@@ -1,0 +1,5 @@
+{
+  "for": "subagent",
+  "whenToUse": "Read-only research + structured plan generation for complex tasks",
+  "mergeParentAgentJson": true
+}

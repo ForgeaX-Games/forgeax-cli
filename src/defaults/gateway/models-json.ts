@@ -1,0 +1,141 @@
+// @desc Default key/models.json template
+
+import type { ModelSpec } from "../../core/types.js";
+
+export const DEFAULT_MODELS_JSON: Record<string, ModelSpec> = {
+  "gemini-2.0-flash": {
+    input: ["text", "image", "video", "audio"],
+    reasoning: false,
+    contextWindow: 1048576,
+    maxOutput: 8192,
+    defaultTemperature: 1.0,
+  },
+  "gemini-2.5-flash": {
+    input: ["text", "image", "video", "audio"],
+    reasoning: true,
+    contextWindow: 1048576,
+    maxOutput: 65536,
+    defaultTemperature: 1.0,
+  },
+  "gemini-2.5-pro": {
+    input: ["text", "image", "video", "audio"],
+    reasoning: true,
+    contextWindow: 1048576,
+    maxOutput: 65536,
+    defaultTemperature: 1.0,
+  },
+  "gemini-2.5-flash-lite": {
+    input: ["text", "image", "video", "audio"],
+    reasoning: false,
+    contextWindow: 1048576,
+    maxOutput: 65536,
+    defaultTemperature: 1.0,
+  },
+  "gemini-3.1-pro-preview": {
+    input: ["text", "image", "video", "audio"],
+    reasoning: true,
+    contextWindow: 1048576,
+    maxOutput: 65536,
+    defaultTemperature: 1.0,
+  },
+  "gemini-3-flash-preview": {
+    input: ["text", "image", "video", "audio"],
+    reasoning: true,
+    contextWindow: 1048576,
+    maxOutput: 65536,
+    defaultTemperature: 1.0,
+  },
+  "gemini-3.1-flash-lite-preview": {
+    input: ["text", "image", "video", "audio"],
+    reasoning: true,
+    contextWindow: 1048576,
+    maxOutput: 65536,
+    defaultTemperature: 1.0,
+  },
+  "gemini-3.1-flash-image-preview": {
+    input: ["text", "image"],
+    reasoning: false,
+    contextWindow: 131072,
+    maxOutput: 32768,
+    defaultTemperature: 1.0,
+  },
+  "claude-opus-4-6": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 1000000,
+    maxOutput: 128000,
+    defaultTemperature: 1.0,
+  },
+  "claude-opus-4-7": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 1000000,
+    maxOutput: 128000,
+    defaultTemperature: 1.0,
+  },
+  "claude-sonnet-4-6": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 1000000,
+    maxOutput: 64000,
+    defaultTemperature: 1.0,
+  },
+  "qwen3.5:35b": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 262144,
+    maxOutput: 8192,
+    defaultTemperature: 1.0,
+  },
+  "qwen3.5": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 262144,
+    maxOutput: 8192,
+    defaultTemperature: 1.0,
+  },
+  "deepseek-v4-flash": {
+    input: ["text"],
+    reasoning: true,
+    contextWindow: 1000000,
+    maxOutput: 384000,
+    defaultTemperature: 1.0,
+  },
+  "deepseek-v4-pro": {
+    input: ["text"],
+    reasoning: true,
+    contextWindow: 1000000,
+    maxOutput: 384000,
+    defaultTemperature: 1.0,
+  },
+  // Azure GPT-5 family (OpenAI Chat Completions compatible; requires `max_completion_tokens`).
+  // Context/output limits per OpenAI public spec; adjust locally if your deployment differs.
+  "gpt-5.2": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 400000,
+    maxOutput: 128000,
+    defaultTemperature: 1.0,
+  },
+  "gpt-5.4": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 1050000,
+    maxOutput: 128000,
+    defaultTemperature: 1.0,
+  },
+  "gpt-5.4-mini": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 400000,
+    maxOutput: 128000,
+    defaultTemperature: 1.0,
+  },
+  "gpt-5.5": {
+    input: ["text", "image"],
+    reasoning: true,
+    contextWindow: 1050000,
+    maxOutput: 128000,
+    defaultTemperature: 1.0,
+  },
+};

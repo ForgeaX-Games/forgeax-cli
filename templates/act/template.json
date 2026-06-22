@@ -1,0 +1,5 @@
+{
+  "for": "subagent",
+  "whenToUse": "Full read/write execution — code changes, file creation, config updates",
+  "mergeParentAgentJson": true
+}

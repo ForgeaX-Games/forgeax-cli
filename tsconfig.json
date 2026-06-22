@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "resolveJsonModule": true,
+    "declaration": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "#src/*": ["./src/*"],
+      "#capabilities/*": ["./capabilities/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "capabilities/**/*.ts",
+    "commands/**/*.ts",
+    "team/**/*.ts",
+    "packs/**/*.ts",
+    "tests/**/*.ts",
+    "templates/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}
