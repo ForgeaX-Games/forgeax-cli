@@ -9,8 +9,8 @@ import { parseSSE } from "./stream.js";
 import { annotateLLMError, throwHttpApiError } from "./errors.js";
 import { readMediaBytes, readFileBytes } from "./media-storage.js";
 import { base64EncodedSize } from "./image-compression.js";
-import { blocksToText } from "../capability/slot/prompt-pipeline.js";
-import { partitionSystemBlocks, embedDynamicInLastUserContent } from "./provider-utils.js";
+import { blocksToText } from "./provider-utils.js";
+import { partitionSystemBlocks, foldDynamicReminders } from "./provider-utils.js";
 
 // OpenAI image input keeps the original MIME in a data URL, while audio input
 // uses a provider-specific `format` enum. We still model both as explicit
@@ -98,26 +98,29 @@ async function convertPartToOpenAI(p: ContentPart, budget?: RequestBudget): Prom
   }
 
   if (p.type === "file") {
-    if (!OPENAI_SUPPORTED_FILE_MIME_TYPES.has(p.mimeType)) {
-      return { type: "text", text: `[file unsupported by OpenAI: ${p.path} (${p.mimeType})]` };
-    }
+    // Read first so the supported-mime gate sees the sniff-corrected mime.
+    let bytes: Buffer;
+    let mimeType: string;
     try {
-      const { bytes, mimeType } = await readFileBytes(p);
-      const b64Size = base64EncodedSize(bytes);
-      if (budget && !budget.canFit(b64Size)) {
-        return { type: "text", text: `[file omitted: request size would exceed 50 MB limit (${p.path})]` };
-      }
-      budget?.charge(b64Size);
-      return {
-        type: "file",
-        file: {
-          filename: p.path,
-          file_data: `data:${mimeType};base64,${bytes.toString("base64")}`,
-        },
-      };
+      ({ bytes, mimeType } = await readFileBytes(p));
     } catch {
       return { type: "text", text: `[file unavailable: ${p.path}]` };
     }
+    if (!OPENAI_SUPPORTED_FILE_MIME_TYPES.has(mimeType)) {
+      return { type: "text", text: `[file unsupported by OpenAI: ${p.path} (${mimeType})]` };
+    }
+    const b64Size = base64EncodedSize(bytes);
+    if (budget && !budget.canFit(b64Size)) {
+      return { type: "text", text: `[file omitted: request size would exceed 50 MB limit (${p.path})]` };
+    }
+    budget?.charge(b64Size);
+    return {
+      type: "file",
+      file: {
+        filename: p.path,
+        file_data: `data:${mimeType};base64,${bytes.toString("base64")}`,
+      },
+    };
   }
 
   if (p.type === "image_file") {
@@ -175,43 +178,53 @@ async function convertPartToOpenAI(p: ContentPart, budget?: RequestBudget): Prom
   }
 
   switch (p.type) {
-    case "image":
-      if (!OPENAI_SUPPORTED_IMAGE_MIME_TYPES.has(p.mimeType)) {
+    case "image": {
+      // Sniff inline bytes via readMediaBytes so dirty mime (e.g. JPEG bytes
+      // declared image/png) gets corrected — same hygiene path as image_file.
+      const { bytes, mimeType: sniffedMime } = await readMediaBytes(p);
+      if (!OPENAI_SUPPORTED_IMAGE_MIME_TYPES.has(sniffedMime)) {
         return {
           type: "text",
           text:
-            `[image: unsupported by OpenAI chat adapter for mime ${p.mimeType}. ` +
+            `[image: unsupported by OpenAI chat adapter for mime ${sniffedMime}. ` +
             `Supported image MIME types: ${listSupported(OPENAI_SUPPORTED_IMAGE_MIME_TYPES)}]`,
         };
       }
-      if (budget && !budget.canFit(p.data.length)) {
+      const b64Size = base64EncodedSize(bytes);
+      if (budget && !budget.canFit(b64Size)) {
         return { type: "text", text: `[image omitted: request size would exceed 50 MB limit]` };
       }
-      budget?.charge(p.data.length);
+      budget?.charge(b64Size);
       return {
         type: "image_url",
-        image_url: { url: `data:${p.mimeType};base64,${p.data}` },
+        image_url: { url: `data:${sniffedMime};base64,${bytes.toString("base64")}` },
       };
-    case "audio":
-      if (!(p.mimeType in OPENAI_AUDIO_FORMAT_BY_MIME)) {
+    }
+    case "audio": {
+      // Sniff inline bytes via readMediaBytes so dirty mime (e.g. MP3 bytes
+      // declared audio/wav) gets corrected — same hygiene path as image.
+      const { bytes, mimeType: sniffedMime } = await readMediaBytes(p);
+      if (!(sniffedMime in OPENAI_AUDIO_FORMAT_BY_MIME)) {
         return {
           type: "text",
           text:
-            `[audio: unsupported by OpenAI chat adapter for mime ${p.mimeType}. ` +
+            `[audio: unsupported by OpenAI chat adapter for mime ${sniffedMime}. ` +
             `Supported audio MIME types: ${listSupported(Object.keys(OPENAI_AUDIO_FORMAT_BY_MIME))}]`,
         };
       }
-      if (budget && !budget.canFit(p.data.length)) {
+      const b64Size = base64EncodedSize(bytes);
+      if (budget && !budget.canFit(b64Size)) {
         return { type: "text", text: `[audio omitted: request size would exceed 50 MB limit]` };
       }
-      budget?.charge(p.data.length);
+      budget?.charge(b64Size);
       return {
         type: "input_audio",
         input_audio: {
-          data: p.data,
-          format: OPENAI_AUDIO_FORMAT_BY_MIME[p.mimeType],
+          data: bytes.toString("base64"),
+          format: OPENAI_AUDIO_FORMAT_BY_MIME[sniffedMime],
         },
       };
+    }
     case "video":
       return {
         type: "text",
@@ -427,13 +440,8 @@ export async function* openAICompatStream(
   // stable and putting dynamic in its OWN trailing user message, every byte
   // before the reminder (including all tool turns) stays cache-eligible
   // across calls regardless of how the conversation tail looked previously.
-  //
-  // When the conversation tail is a tool result (or an assistant with a
-  // pending tool_use), the reminder is SKIPPED — injecting a user text into
-  // a live tool loop is OOD for the model's tool protocol and breaks
-  // GPT-5/o1 reasoning-state reuse. See `embedDynamicInLastUserContent`.
-  const { stable, dynamic } = partitionSystemBlocks(system ?? []);
-  const enrichedMessages = embedDynamicInLastUserContent(messages, dynamic);
+  const { stable } = partitionSystemBlocks(system ?? []);
+  const enrichedMessages = foldDynamicReminders(messages);
 
   const openaiMessages = await messagesToOpenAI(enrichedMessages, stable.length ? stable : undefined, streamOpts.assistantTransform);
   const openaiTools = toolDefsToOpenAI(tools);
@@ -547,7 +555,15 @@ export async function* openAICompatStream(
         const pending = pendingToolCalls.get(idx)!;
         if (tc.id) pending.id = tc.id;
         if (tc.function?.name) pending.name = tc.function.name;
-        if (tc.function?.arguments) pending.arguments += tc.function.arguments;
+        if (tc.function?.arguments) {
+          pending.arguments += tc.function.arguments;
+          yield {
+            type: "tool_call_delta",
+            id: pending.id,
+            name: pending.name,
+            arguments_delta: tc.function.arguments,
+          };
+        }
       }
     }
 

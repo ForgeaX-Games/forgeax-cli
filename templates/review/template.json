@@ -1,5 +1,0 @@
-{
-  "for": "subagent",
-  "whenToUse": "Code/plan review with principle-based framework (read-only, no sub-spawning)",
-  "mergeParentAgentJson": true
-}

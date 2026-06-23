@@ -9,8 +9,7 @@ import { parseSSE } from "./stream.js";
 import { annotateLLMError, throwHttpApiError } from "./errors.js";
 import { readMediaBytes, readFileBytes } from "./media-storage.js";
 import { base64EncodedSize } from "./image-compression.js";
-import { blocksToText } from "../capability/slot/prompt-pipeline.js";
-import { partitionSystemBlocks } from "./provider-utils.js";
+import { blocksToText, partitionSystemBlocks, foldDynamicReminders } from "./provider-utils.js";
 
 /**
  * OpenAI Responses API adapter — `/v1/responses`.
@@ -126,24 +125,27 @@ async function convertPartToInputContent(p: ContentPart, budget?: RequestBudget)
   }
 
   if (p.type === "file") {
-    if (!OPENAI_SUPPORTED_FILE_MIME_TYPES.has(p.mimeType)) {
-      return { type: "input_text", text: `[file unsupported by OpenAI: ${p.path} (${p.mimeType})]` };
-    }
+    // Read first so the supported-mime gate sees the sniff-corrected mime.
+    let bytes: Buffer;
+    let mimeType: string;
     try {
-      const { bytes, mimeType } = await readFileBytes(p);
-      const b64Size = base64EncodedSize(bytes);
-      if (budget && !budget.canFit(b64Size)) {
-        return { type: "input_text", text: `[file omitted: request size would exceed 50 MB limit (${p.path})]` };
-      }
-      budget?.charge(b64Size);
-      return {
-        type: "input_file",
-        filename: p.path,
-        file_data: `data:${mimeType};base64,${bytes.toString("base64")}`,
-      };
+      ({ bytes, mimeType } = await readFileBytes(p));
     } catch {
       return { type: "input_text", text: `[file unavailable: ${p.path}]` };
     }
+    if (!OPENAI_SUPPORTED_FILE_MIME_TYPES.has(mimeType)) {
+      return { type: "input_text", text: `[file unsupported by OpenAI: ${p.path} (${mimeType})]` };
+    }
+    const b64Size = base64EncodedSize(bytes);
+    if (budget && !budget.canFit(b64Size)) {
+      return { type: "input_text", text: `[file omitted: request size would exceed 50 MB limit (${p.path})]` };
+    }
+    budget?.charge(b64Size);
+    return {
+      type: "input_file",
+      filename: p.path,
+      file_data: `data:${mimeType};base64,${bytes.toString("base64")}`,
+    };
   }
 
   if (p.type === "image_file") {
@@ -185,23 +187,26 @@ async function convertPartToInputContent(p: ContentPart, budget?: RequestBudget)
   }
 
   switch (p.type) {
-    case "image":
-      if (!OPENAI_SUPPORTED_IMAGE_MIME_TYPES.has(p.mimeType)) {
+    case "image": {
+      const { bytes, mimeType: sniffedMime } = await readMediaBytes(p);
+      if (!OPENAI_SUPPORTED_IMAGE_MIME_TYPES.has(sniffedMime)) {
         return {
           type: "input_text",
           text:
-            `[image: unsupported by OpenAI Responses for mime ${p.mimeType}. ` +
+            `[image: unsupported by OpenAI Responses for mime ${sniffedMime}. ` +
             `Supported image MIME types: ${listSupported(OPENAI_SUPPORTED_IMAGE_MIME_TYPES)}]`,
         };
       }
-      if (budget && !budget.canFit(p.data.length)) {
+      const b64Size = base64EncodedSize(bytes);
+      if (budget && !budget.canFit(b64Size)) {
         return { type: "input_text", text: `[image omitted: request size would exceed 50 MB limit]` };
       }
-      budget?.charge(p.data.length);
+      budget?.charge(b64Size);
       return {
         type: "input_image",
-        image_url: `data:${p.mimeType};base64,${p.data}`,
+        image_url: `data:${sniffedMime};base64,${bytes.toString("base64")}`,
       };
+    }
     case "audio":
       return { type: "input_text", text: `[inline audio: Responses API does not yet accept inline audio input — transcribe before passing]` };
     case "video":
@@ -396,17 +401,11 @@ export async function* openAIResponseStream(
   tools: ToolDefinition[],
   signal: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
-  // System: stable head + dynamic tail (wrapped) → all into `instructions`.
-  // `input` stays untouched so the byte-prefix cache can hit on the
-  // (instructions stable head + input) prefix bytes.
-  const { stable, dynamic } = partitionSystemBlocks(system ?? []);
-  const stableText = stable.length ? blocksToText(stable) : "";
-  const dynamicText = dynamic.length
-    ? `\n\n<system-reminder>\n${blocksToText(dynamic)}\n</system-reminder>`
-    : "";
-  const instructions = (stableText + dynamicText).trim() || undefined;
+  const { stable } = partitionSystemBlocks(system ?? []);
+  const instructions = stable.length ? blocksToText(stable) : undefined;
+  const enrichedMessages = foldDynamicReminders(messages);
 
-  const input = await messagesToResponseInput(messages);
+  const input = await messagesToResponseInput(enrichedMessages);
   const responseTools = toolDefsToResponses(tools);
 
   const body: Record<string, unknown> = {
@@ -498,7 +497,15 @@ export async function* openAIResponseStream(
         const delta = parsed?.delta;
         if (typeof itemId === "string" && typeof delta === "string") {
           const pc = pendingCalls.get(itemId);
-          if (pc) pc.arguments += delta;
+          if (pc) {
+            pc.arguments += delta;
+            yield {
+              type: "tool_call_delta",
+              id: pc.call_id,
+              name: pc.name,
+              arguments_delta: delta,
+            };
+          }
         }
         break;
       }

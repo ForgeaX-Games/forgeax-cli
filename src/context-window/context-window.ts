@@ -1,30 +1,62 @@
-// @desc ContextWindow — resolve model-visible message history from agent-ledger events
+/** ContextWindow —— 装配最终发给 LLM 的消息历史。
+ *
+ *  与 agenteam ref 1:1（plan §3.8）；只把构造参数从 `(agentId, sessionManager, teamBoard)`
+ *  换成 forgeax 的 `(agentId, ledger, blackboard)`：
+ *  - **agentId**：传给 blackboard 读 LAST_USER_INPUT_AT；这里就是 agentPath。
+ *  - **ledger**：`EventLedger`（per-agent WAL）—— 取 `readAllEvents` /
+ *    `readFromTail`；ContextWindow 不直接持 SessionManager。
+ *  - **blackboard**：可选；不给就 idle anchor 永远是 undefined → 视作 idle，
+ *    每次都会跑 microCompact。生产路径 ConsciousAgent 必给。
+ *
+ *  Pipeline（plan §3.8）：
+ *    history-pipeline (eventsToMessages)
+ *      → tool-normalizer.normalizeHistory (timeline 修复)
+ *      → media-normalizer.sanitizeMedia (inline media magic 校验)
+ *      → micro-compaction.microCompact (idle-gap 闸门 + 老化压缩)
+ *
+ *  此外：
+ *  - locateBoundaries / applyCompactTruncation —— summary boundary 倒序扫描 + 切片。
+ *  - buildSystemSnapshot —— 给 SystemPromptDiff 算用的，1:1 与 ref。 */
 
-import type { AgentLedgerAPI } from "../session/types.js";
-import type { StoredEvent, SnapshotEntry } from "./system-snapshot.js";
-import { replaySystemSnapshot } from "./system-snapshot.js";
-import { eventsToMessages } from "./history-pipeline.js";
-import { normalizeHistory } from "./tool-normalizer.js";
-import { sanitizeMedia } from "./media-normalizer.js";
-import { microCompact, trackUserInput, getLastUserInputAt, type MicroCompactConfig } from "./micro-compaction.js";
-import type { LLMMessage } from "../llm/types.js";
-import { normalizeContent } from "../message/modality.js";
+import type { LLMMessage } from "../llm/types";
+import type { BlackboardAPI } from "../core/types";
+import type { StoredEvent } from "../ledger/types";
+import { applyRewindMask } from "../checkpoint/rewind-mask";
+import { replaySystemSnapshot, type SnapshotEntry } from "./system-snapshot";
+import { eventsToMessages } from "./history-pipeline";
+import { normalizeHistory } from "./tool-normalizer";
+import { sanitizeMedia } from "./media-normalizer";
+import {
+  microCompact,
+  trackUserInput,
+  getLastUserInputAt,
+  type MicroCompactConfig,
+} from "./micro-compaction";
+import { normalizeContent } from "../message/modality";
+
+/** 给 ContextWindow / compaction 公用的最小 ledger 接口 —— 屏蔽掉 EventLedger 其它
+ *  无关字段；测试时也好 stub。生产由 `EventLedger` 实现（ledger/event-ledger.ts）。 */
+export interface LedgerReader {
+  readAllEvents(): Promise<StoredEvent[]>;
+  readFromTail(isEnough: (events: StoredEvent[]) => boolean): Promise<StoredEvent[]>;
+}
 
 // ─── Boundary types ─────────────────────────────────────────────────────────
 
 export type BoundaryHit =
   | { type: "compact"; idx: number; summary: string; keepCount: number }
-  | { type: "partial"; idx: number; summary: string; segmentId: string;
-      summarizedRange: { fromTs: number; toTs: number } };
+  | {
+      type: "partial";
+      idx: number;
+      summary: string;
+      segmentId: string;
+      summarizedRange: { fromTs: number; toTs: number };
+    };
 
-/**
- * Scan events backwards to collect all boundaries.
- * - partial_boundary: collected, search continues
- * - compact_boundary: collected, search stops (everything before it is replaced)
- *
- * Returns boundaries in event-stream order (oldest first).
- * Returns null if no boundaries found.
- */
+/** Scan events backwards collecting boundaries。
+ *  - partial_boundary: 收一条，继续向前。
+ *  - compact_boundary: 收一条后停（之前内容会被该 summary 替换）。
+ *  Returns boundaries in oldest-first order，空则 null。 */
 export function locateBoundaries(events: StoredEvent[]): {
   boundaries: BoundaryHit[];
   anchorIdx: number;
@@ -66,10 +98,7 @@ export function locateBoundaries(events: StoredEvent[]): {
   return { boundaries: hits, anchorIdx, hasCompleteBoundary };
 }
 
-/**
- * Predicate for tail-first shard loading.
- * compact_boundary terminates search; partial_boundary does NOT.
- */
+/** Tail-first shard loading 终止条件：碰到 compact_boundary 就够了；partial 不算。 */
 function hasEnoughContext(events: StoredEvent[]): boolean {
   for (let i = events.length - 1; i >= 0; i--) {
     if (events[i].type === "compact_boundary") return true;
@@ -77,28 +106,19 @@ function hasEnoughContext(events: StoredEvent[]): boolean {
   return false;
 }
 
-/**
- * Slice events to the model-visible window.
- *
- * compact_boundary: everything before it is discarded (except keepCount msgs).
- * Each partial_boundary: events within its summarizedRange are dropped.
- * All boundary summaries become synthetic user messages at the top.
- * Events after the last boundary (protection zone) pass through unchanged.
- */
+/** Slice events to model-visible window：
+ *  - compact_boundary 之前全砍（保留 keepCount 条 LLM message 例外）；
+ *  - 每个 partial_boundary 在其 summarizedRange 内的 event 砍；
+ *  - 所有 boundary summary 升格成 synthetic user message 顶到最前；
+ *  - 最后一个 boundary 之后的 event（保护区）原样保留。 */
 function applyCompactTruncation(events: StoredEvent[]): StoredEvent[] {
   const loc = locateBoundaries(events);
   if (!loc) return events;
 
   const { boundaries, hasCompleteBoundary } = loc;
   const summaryEvents: StoredEvent[] = [];
-
-  // dropBeforeIdx: everything before this index is discarded (compact_boundary)
   let dropBeforeIdx = 0;
-
-  // keepSet: indices restored by compact keepCount (exceptions to dropBeforeIdx)
   const keepSet = new Set<number>();
-
-  // droppedByPartial: indices covered by partial_boundary ranges
   const droppedByPartial = new Set<number>();
 
   for (let bi = 0; bi < boundaries.length; bi++) {
@@ -124,7 +144,6 @@ function applyCompactTruncation(events: StoredEvent[]): StoredEvent[] {
 
     if (b.type === "compact") {
       dropBeforeIdx = b.idx + 1;
-
       if (b.keepCount > 0) {
         let found = 0;
         for (let i = b.idx - 1; i >= 0; i--) {
@@ -138,44 +157,31 @@ function applyCompactTruncation(events: StoredEvent[]): StoredEvent[] {
     } else {
       const scanStart = bi > 0 ? boundaries[bi - 1].idx + 1 : dropBeforeIdx;
       const isLast = bi === boundaries.length - 1;
-
       if (isLast) {
-        // Last boundary: use toTs to precisely keep the protection zone.
-        // Events with ts < toTs were summarized → drop.
-        // Events with ts >= toTs are the protection zone → keep.
         const cutoff = b.summarizedRange.toTs;
         for (let i = scanStart; i < b.idx; i++) {
-          if (events[i].ts < cutoff) {
-            droppedByPartial.add(i);
-          }
+          if (events[i].ts < cutoff) droppedByPartial.add(i);
         }
       } else {
-        // Older boundaries: drop everything — old protection zones are stale.
-        for (let i = scanStart; i < b.idx; i++) {
-          droppedByPartial.add(i);
-        }
+        for (let i = scanStart; i < b.idx; i++) droppedByPartial.add(i);
       }
     }
   }
 
   const lastBoundaryIdx = boundaries[boundaries.length - 1].idx;
   const result: StoredEvent[] = [];
-
   result.push(...summaryEvents);
 
-  // Kept messages before compact (keepCount exceptions)
   if (hasCompleteBoundary && keepSet.size > 0) {
     for (const i of keepSet) result.push(events[i]);
   }
 
-  // Events between boundaries not covered by partial ranges
   for (let i = dropBeforeIdx; i < lastBoundaryIdx; i++) {
     if (droppedByPartial.has(i)) continue;
     if (events[i].type === "compact_boundary" || events[i].type === "partial_boundary") continue;
     result.push(events[i]);
   }
 
-  // Events after the last boundary (protection zone)
   for (let i = lastBoundaryIdx + 1; i < events.length; i++) {
     result.push(events[i]);
   }
@@ -183,51 +189,41 @@ function applyCompactTruncation(events: StoredEvent[]): StoredEvent[] {
   return result;
 }
 
-/**
- * ContextWindow — resolves model-visible conversation history.
- *
- * Uses tail-first shard loading: reads shards from the most recent backwards,
- * stopping as soon as enough context is found (compact_boundary).
- * Falls back to reading all shards when no compact_boundary exists.
- */
+/** ContextWindow —— 解析 model-visible conversation history。 */
 export class ContextWindow {
   constructor(
     private readonly agentId: string,
-    private readonly ledger: AgentLedgerAPI,
-    private readonly teamBoard?: { get(agentId: string, key: string): unknown; set(agentId: string, key: string, value: unknown, opts: { persist: boolean }): void },
+    private readonly ledger: LedgerReader,
+    private readonly blackboard?: BlackboardAPI,
   ) {}
 
-  /** Scan events for user_input and persist the idle anchor to teamboard. */
+  /** 扫 event batch 中的 user_input，写 idle anchor 到 blackboard。 */
   trackEvents(events: ReadonlyArray<{ type: string; ts: number }>): void {
-    if (this.teamBoard) trackUserInput(events, this.teamBoard, this.agentId);
+    if (this.blackboard) trackUserInput(events, this.blackboard, this.agentId);
   }
 
   async buildPrompt(options: MicroCompactConfig = {}): Promise<LLMMessage[]> {
     const windowEvents = await this.readWindowEvents();
     const msgs = eventsToMessages(windowEvents);
     const sanitized = await sanitizeMedia(normalizeHistory(msgs).messages);
-    const resolved = this.teamBoard
-      ? { ...options, lastUserInputAt: options.lastUserInputAt ?? getLastUserInputAt(this.teamBoard, this.agentId) }
+    const resolved = this.blackboard
+      ? { ...options, lastUserInputAt: options.lastUserInputAt ?? getLastUserInputAt(this.blackboard, this.agentId) }
       : options;
     return microCompact(sanitized, resolved);
   }
 
-  /**
-   * Returns raw events without compact truncation applied.
-   * Used by partialCompact to inspect existing boundaries and determine
-   * the compression segment.
-   */
+  /** 不应用 compact truncation 的原始 events —— partialCompact 用来勘察现有边界。 */
   async getWindowEventsRaw(): Promise<StoredEvent[]> {
-    return this.ledger.readEventsFromTail(hasEnoughContext);
+    return applyRewindMask(await this.ledger.readFromTail(hasEnoughContext));
   }
 
   async buildSystemSnapshot(): Promise<Map<string, SnapshotEntry>> {
-    const allEvents = await this.ledger.readEvents();
-    return replaySystemSnapshot(allEvents);
+    const allEvents = await this.ledger.readAllEvents();
+    return replaySystemSnapshot(applyRewindMask(allEvents));
   }
 
   private async readWindowEvents(): Promise<StoredEvent[]> {
-    const events = await this.ledger.readEventsFromTail(hasEnoughContext);
+    const events = applyRewindMask(await this.ledger.readFromTail(hasEnoughContext));
     return applyCompactTruncation(events);
   }
 }

@@ -1,10 +1,10 @@
 /** Shared utilities for Gemini 2.x and 3.x adapters */
 
-import { stat, readFile } from "node:fs/promises";
 import { createPartFromUri, GoogleGenAI } from "@google/genai";
 import type { ContentPart } from "../core/types.js";
 import { isFileMediaContentPart, isInlineMediaContentPart } from "../core/types.js";
 import type { LLMMessage } from "./types.js";
+import { readMediaBytes, readFileBytes } from "./media-storage.js";
 import { listSupported } from "./types.js";
 import type { ToolDefinition } from "../core/types.js";
 
@@ -190,9 +190,9 @@ export async function contentPartsToGemini(content: ContentPart[], message?: LLM
 
     if (p.type === "text_file") {
       try {
-        const buf = await readFile(p.path);
+        const { bytes, mimeType } = await readFileBytes(p);
         parts.push({ text: `[file: ${p.path}]` });
-        parts.push({ inlineData: { data: buf.toString("base64"), mimeType: p.mimeType ?? "text/plain" } });
+        parts.push({ inlineData: { data: bytes.toString("base64"), mimeType: mimeType ?? "text/plain" } });
       } catch {
         parts.push({ text: `[file unavailable: ${p.path}]` });
       }
@@ -200,24 +200,28 @@ export async function contentPartsToGemini(content: ContentPart[], message?: LLM
     }
 
     if (p.type === "file") {
-      if (GEMINI_SUPPORTED_FILE_MIME_TYPES.has(p.mimeType)) {
-        try {
-          const buf = await readFile(p.path);
-          parts.push({ inlineData: { data: buf.toString("base64"), mimeType: p.mimeType } });
-        } catch {
-          parts.push({ text: `[file unavailable: ${p.path}]` });
-        }
-      } else {
-        parts.push({ text: `[file unsupported by Gemini: ${p.path} (${p.mimeType})]` });
+      // Read first so the supported-mime gate sees the sniff-corrected mime.
+      let bytes: Buffer;
+      let mimeType: string;
+      try {
+        ({ bytes, mimeType } = await readFileBytes(p));
+      } catch {
+        parts.push({ text: `[file unavailable: ${p.path}]` });
+        continue;
       }
+      if (!GEMINI_SUPPORTED_FILE_MIME_TYPES.has(mimeType)) {
+        parts.push({ text: `[file unsupported by Gemini: ${p.path} (${mimeType})]` });
+        continue;
+      }
+      parts.push({ inlineData: { data: bytes.toString("base64"), mimeType } });
       continue;
     }
 
     if (isFileMediaContentPart(p)) {
       try {
-        const buf = await readFile(p.path);
+        const { bytes, mimeType } = await readMediaBytes(p);
         parts.push({ text: `[file: ${p.path}]` });
-        parts.push({ inlineData: { data: buf.toString("base64"), mimeType: p.mimeType } });
+        parts.push({ inlineData: { data: bytes.toString("base64"), mimeType } });
       } catch {
         const mediaType = p.type.replace("_file", "");
         parts.push({ text: `[${mediaType} unavailable: ${p.path}]` });
@@ -230,31 +234,23 @@ export async function contentPartsToGemini(content: ContentPart[], message?: LLM
       continue;
     }
 
-    if (p.type === "image" && !GEMINI_SUPPORTED_IMAGE_MIME_TYPES.has(p.mimeType)) {
+    // Sniff inline bytes via readMediaBytes so dirty mime (e.g. JPEG bytes
+    // declared image/png) gets corrected — same hygiene path as file media.
+    const { bytes, mimeType: sniffedMime } = await readMediaBytes(p);
+    const supportedMimes =
+      p.type === "image" ? GEMINI_SUPPORTED_IMAGE_MIME_TYPES
+        : p.type === "audio" ? GEMINI_SUPPORTED_AUDIO_MIME_TYPES
+          : p.type === "video" ? GEMINI_SUPPORTED_VIDEO_MIME_TYPES
+            : null;
+    if (supportedMimes && !supportedMimes.has(sniffedMime)) {
       parts.push({
         text:
-          `[image: unsupported by Gemini API for mime ${p.mimeType}. ` +
-          `Supported image MIME types: ${listSupported(GEMINI_SUPPORTED_IMAGE_MIME_TYPES)}]`,
+          `[${p.type}: unsupported by Gemini API for mime ${sniffedMime}. ` +
+          `Supported ${p.type} MIME types: ${listSupported(supportedMimes)}]`,
       });
       continue;
     }
-    if (p.type === "audio" && !GEMINI_SUPPORTED_AUDIO_MIME_TYPES.has(p.mimeType)) {
-      parts.push({
-        text:
-          `[audio: unsupported by Gemini API for mime ${p.mimeType}. ` +
-          `Supported audio MIME types: ${listSupported(GEMINI_SUPPORTED_AUDIO_MIME_TYPES)}]`,
-      });
-      continue;
-    }
-    if (p.type === "video" && !GEMINI_SUPPORTED_VIDEO_MIME_TYPES.has(p.mimeType)) {
-      parts.push({
-        text:
-          `[video: unsupported by Gemini API for mime ${p.mimeType}. ` +
-          `Supported video MIME types: ${listSupported(GEMINI_SUPPORTED_VIDEO_MIME_TYPES)}]`,
-      });
-      continue;
-    }
-    parts.push({ inlineData: { data: p.data, mimeType: p.mimeType } });
+    parts.push({ inlineData: { data: bytes.toString("base64"), mimeType: sniffedMime } });
   }
   return parts;
 }
@@ -306,40 +302,35 @@ async function prepareGeminiInboundMessage(
 
 async function resolveGeminiUploadTarget(
   part: ContentPart,
-): Promise<{ file: string | Blob; mimeType: string } | null> {
-  if (isFileMediaContentPart(part)) {
-    try {
-      const fileStat = await stat(part.path);
-      if (fileStat.size <= GEMINI_INLINE_FILE_API_THRESHOLD_BYTES) return null;
-      return { file: part.path, mimeType: part.mimeType };
-    } catch {
+): Promise<{ file: Blob; mimeType: string } | null> {
+  // All branches route through the single dispatch points readMediaBytes /
+  // readFileBytes — inContainer-aware reads + magic-byte mime sniff. Returns
+  // a Blob (rather than a path) so File API upload always receives the
+  // sniff-corrected mime and container-aware bytes; using `part.path` directly
+  // would bypass sandboxFs bridge for container-only paths.
+  let bytes: Buffer;
+  let mimeType: string;
+  try {
+    if (isFileMediaContentPart(part)) {
+      ({ bytes, mimeType } = await readMediaBytes(part));
+    } else if (part.type === "text_file" || part.type === "file") {
+      ({ bytes, mimeType } = await readFileBytes(part));
+    } else if (isInlineMediaContentPart(part)) {
+      ({ bytes, mimeType } = await readMediaBytes(part));
+    } else {
       return null;
     }
-  }
-
-  if (part.type === "text_file") {
-    try {
-      const fileStat = await stat(part.path);
-      if (fileStat.size <= GEMINI_INLINE_FILE_API_THRESHOLD_BYTES) return null;
-      return { file: part.path, mimeType: part.mimeType };
-    } catch {
-      return null;
-    }
-  }
-
-  if (part.type === "file") {
-    if (!GEMINI_SUPPORTED_FILE_MIME_TYPES.has(part.mimeType)) return null;
-    return { file: part.path, mimeType: part.mimeType };
-  }
-
-  if (!isInlineMediaContentPart(part)) {
+  } catch {
     return null;
   }
-  const bytes = Buffer.from(part.data, "base64");
+  // generic `file` gate on sniffed mime (not declared)
+  if (part.type === "file" && !GEMINI_SUPPORTED_FILE_MIME_TYPES.has(mimeType)) return null;
   if (bytes.byteLength <= GEMINI_INLINE_FILE_API_THRESHOLD_BYTES) return null;
   return {
-    file: new globalThis.Blob([bytes], { type: part.mimeType }),
-    mimeType: part.mimeType,
+    // Wrap as Uint8Array view so Blob accepts it as BlobPart (Buffer's
+    // ArrayBufferLike doesn't narrow to ArrayBuffer in strict TS).
+    file: new globalThis.Blob([new Uint8Array(bytes)], { type: mimeType }),
+    mimeType,
   };
 }
 

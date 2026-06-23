@@ -1,29 +1,31 @@
+/** command-parser —— `/<tool> [target] -k v -k v` 命令字符串拆分。
+ *
+ *  与 agenteam ref 1:1。
+ *
+ *  语法：
+ *    /<tool-name> [target] -param1 value1 -param2 value2
+ *
+ *  - 不以 `/` 开头 → 返回 null（caller 当成普通用户文本）
+ *  - target 缺省 = "/" 表示「当前 agent」
+ *  - 第一个非 `-` 开头的 token 是 target；其余按 -key value 解析（缺值 = "true"）
+ *  - 引号支持：单 / 双引号包住的整段当一个 token */
+
 export interface ParsedCommand {
   toolName: string;
-  target: string;       // "/" (current stdin agent) or "<agent_id>" (specific agent)
+  /** "/" = 当前 agent；其它字符串视作目标 agent 标识。 */
+  target: string;
   args: Record<string, string>;
 }
 
-/**
- * Parse a slash command string.
- * Syntax: /<tool-name> [target] -param1 value1 -param2 value2
- *
- * target defaults to "/" (current agent). Use an agent_id to target another agent.
- *
- * Examples:
- *   /compact                 → { toolName: "compact", target: "/", args: {} }
- *   /compact responder       → { toolName: "compact", target: "responder", args: {} }
- *   /shell responder -cmd ls → { toolName: "shell", target: "responder", args: { cmd: "ls" } }
- */
 export function parseCommand(input: string): ParsedCommand | null {
   const trimmed = input.trim();
   if (!trimmed.startsWith("/")) return null;
 
-  const tokens = tokenize(trimmed.slice(1)); // drop leading /
+  const tokens = tokenize(trimmed.slice(1));
   if (tokens.length === 0) return null;
 
   const toolName = tokens[0];
-  let target = "/"; // default: CLI mode
+  let target = "/";
   let argStart = 1;
 
   if (tokens.length > 1 && !tokens[1].startsWith("-")) {
@@ -46,7 +48,7 @@ export function parseCommand(input: string): ParsedCommand | null {
   return { toolName, target, args };
 }
 
-/** Split input respecting quoted strings */
+/** Tokenize respecting single / double quotes. */
 function tokenize(input: string): string[] {
   const tokens: string[] = [];
   let current = "";
@@ -54,11 +56,8 @@ function tokenize(input: string): string[] {
 
   for (const ch of input) {
     if (inQuote) {
-      if (ch === inQuote) {
-        inQuote = null;
-      } else {
-        current += ch;
-      }
+      if (ch === inQuote) inQuote = null;
+      else current += ch;
     } else if (ch === '"' || ch === "'") {
       inQuote = ch;
     } else if (ch === " " || ch === "\t") {
@@ -70,7 +69,6 @@ function tokenize(input: string): string[] {
       current += ch;
     }
   }
-
   if (current.length > 0) tokens.push(current);
   return tokens;
 }

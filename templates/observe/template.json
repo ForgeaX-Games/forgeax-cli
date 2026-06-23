@@ -1,4 +1,0 @@
-{
-  "for": "subagent",
-  "whenToUse": "Read-only code exploration, fact-finding, symbol tracing, file search"
-}

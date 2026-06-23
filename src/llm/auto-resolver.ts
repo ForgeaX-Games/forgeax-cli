@@ -1,21 +1,30 @@
-/** Pure model→adapter resolver. Mirror of packages/server's auto-resolver:
- *  every routing decision derives from `.env` + the model id pattern, no
- *  llm_key.json middleman.
+/** Pure model→adapter resolver. Replaces llm_key.json: every routing decision
+ *  derives from `.env` + the model id pattern. No disk reads, no caching, no
+ *  user-editable middleman.
  *
- *  Routing policy (proxy-first when configured, else direct vendor):
+ *  Routing policy:
  *
- *    if LITELLM_PROXY_KEY + LITELLM_PROXY_BASE_URL set:
+ *    if LITELLM_PROXY_KEY + LITELLM_PROXY_BASE_URL are set, the proxy is
+ *    treated as the primary gateway for every model:
  *      claude-*                         → anthropic-messages (proxy /messages)
  *      gpt-* / codex-* / o[1-9]-*       → openai-responses   (proxy /v1)
- *      *                                → openai-compat      (proxy /v1)
+ *      everything else                  → openai-compat      (proxy /v1)
  *
- *    otherwise:
+ *    otherwise we fall back to direct vendor APIs:
  *      claude-*                         → anthropic-messages + ANTHROPIC_*
  *      gpt-* / codex-* / o[1-9]-*       → openai-responses   + OPENAI_*
  *      gemini-3*                        → google-gemini-3    + GEMINI_API_KEY
  *      gemini-*                         → google-gemini-2    + GEMINI_API_KEY
  *      deepseek-*                       → deepseek-v4        + DEEPSEEK_*
- */
+ *
+ *    nothing matches → throws a single, actionable error: "set
+ *    LITELLM_PROXY_KEY + LITELLM_PROXY_BASE_URL in .env, or add a vendor key
+ *    that recognizes this id".
+ *
+ *  Trade-off: when the proxy is configured we lose Gemini-native features
+ *  (thinkingBudget / thinkingLevel / thoughtSignature) because LiteLLM speaks
+ *  openai-compat for Gemini. Users who need those features can clear
+ *  LITELLM_PROXY_* and rely on direct GEMINI_API_KEY routing. */
 
 export interface ResolvedAdapter {
   api: string;
@@ -27,9 +36,12 @@ function proxyConfigured(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.LITELLM_PROXY_KEY && env.LITELLM_PROXY_BASE_URL);
 }
 
-/** Strip trailing slash + trailing `/v1` from LITELLM_PROXY_BASE_URL so users
- *  carrying habit from llm_key.json (`api_base` ending in `/v1`) don't hit
- *  /v1/v1/... 404s. */
+/** Normalize the user's LITELLM_PROXY_BASE_URL into a bare host (no trailing
+ *  slash, no trailing `/v1`). The resolver re-appends `/v1` itself for the
+ *  openai-* adapter families; the anthropic adapter prepends `/v1/messages`.
+ *  Tolerating both `https://host` and `https://host/v1` covers the most
+ *  common .env pasting mistake — legacy llm_key.json configs put `/v1` in
+ *  api_base, and users carrying that habit into .env hit /v1/v1/... 404s. */
 function normalizeProxyBase(raw: string): string {
   return raw.replace(/\/+$/, "").replace(/\/v1$/, "");
 }
@@ -41,6 +53,14 @@ const RE_GEMINI = /^gemini-/i;
 const RE_DEEPSEEK = /^deepseek-/i;
 
 export function resolveModelAdapter(model: string, env: NodeJS.ProcessEnv): ResolvedAdapter {
+  // Direct-route exceptions: 用户显式配了 DEEPSEEK_API_KEY 等直连 key 的情况下,
+  // 即便 LITELLM_PROXY 也配着, 也优先走直连. 理由: 自家 LiteLLM proxy 不一定上架
+  // 所有 vendor model id (e.g. deepseek-v4-flash), 强制走代理会 401/404. 直连
+  // key 是"我要绕过代理用这个模型"的明确意图, 应当尊重.
+  if (RE_DEEPSEEK.test(model) && env.DEEPSEEK_API_KEY) {
+    return { api: "deepseek-v4", apiKey: env.DEEPSEEK_API_KEY, apiBase: env.DEEPSEEK_BASE_URL || undefined };
+  }
+
   if (proxyConfigured(env)) {
     const proxyKey = env.LITELLM_PROXY_KEY!;
     const proxyBase = normalizeProxyBase(env.LITELLM_PROXY_BASE_URL!);

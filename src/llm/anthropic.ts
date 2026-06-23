@@ -16,7 +16,7 @@ import {
   describeImageSize,
   type ImagePreflightPolicy,
 } from "./image-compression.js";
-import { partitionSystemBlocks, embedDynamicInLastUserContent } from "./provider-utils.js";
+import { partitionSystemBlocks, foldDynamicReminders } from "./provider-utils.js";
 
 type AnthropicAssistantBlock =
   | { type: "text"; text: string }
@@ -98,8 +98,8 @@ async function convertPartToAnthropic(p: ContentPart): Promise<any | any[]> {
 
   if (p.type === "text_file") {
     try {
-      const { bytes } = await readFileBytes(p);
-      if (p.mimeType === "text/plain") {
+      const { bytes, mimeType } = await readFileBytes(p);
+      if (mimeType === "text/plain") {
         return [
           { type: "text", text: `[file: ${p.path}]` },
           { type: "document", source: { type: "base64", media_type: "text/plain", data: bytes.toString("base64") } },
@@ -112,18 +112,23 @@ async function convertPartToAnthropic(p: ContentPart): Promise<any | any[]> {
   }
 
   if (p.type === "file") {
-    if (ANTHROPIC_SUPPORTED_DOCUMENT_MIME_TYPES.has(p.mimeType)) {
-      try {
-        const { bytes } = await readFileBytes(p);
-        return [
-          { type: "text", text: `[file: ${p.path}]` },
-          { type: "document", source: { type: "base64", media_type: p.mimeType, data: bytes.toString("base64") } },
-        ];
-      } catch {
-        return { type: "text", text: `[file unavailable: ${p.path}]` };
-      }
+    // Read first to let readFileBytes sniff-correct mime; gate uses corrected
+    // mime so PDF bytes declared application/octet-stream still get routed to
+    // the document path instead of being rejected by a declared-mime gate.
+    let bytes: Buffer;
+    let mimeType: string;
+    try {
+      ({ bytes, mimeType } = await readFileBytes(p));
+    } catch {
+      return { type: "text", text: `[file unavailable: ${p.path}]` };
     }
-    return { type: "text", text: `[file unsupported by Anthropic: ${p.path} (${p.mimeType})]` };
+    if (!ANTHROPIC_SUPPORTED_DOCUMENT_MIME_TYPES.has(mimeType)) {
+      return { type: "text", text: `[file unsupported by Anthropic: ${p.path} (${mimeType})]` };
+    }
+    return [
+      { type: "text", text: `[file: ${p.path}]` },
+      { type: "document", source: { type: "base64", media_type: mimeType, data: bytes.toString("base64") } },
+    ];
   }
 
   if (p.type === "image_file") {
@@ -142,8 +147,10 @@ async function convertPartToAnthropic(p: ContentPart): Promise<any | any[]> {
   }
 
   if (p.type === "image") {
-    const bytes = Buffer.from(p.data, "base64");
-    return await convertInlineImageToAnthropic(bytes, p.mimeType, `inline image`);
+    // Use readMediaBytes so inline mime gets sniff-corrected (single dispatch
+    // point for media bytes — same hygiene path as image_file).
+    const { bytes, mimeType } = await readMediaBytes(p);
+    return await convertInlineImageToAnthropic(bytes, mimeType, `inline image`);
   }
 
   if (p.type === "video" || p.type === "audio") {
@@ -400,16 +407,8 @@ function createAnthropicProvider(opts: ProviderFactoryOpts): LLMProvider {
       // fresh trailing user message carrying a single <system-reminder> block).
       // The reminder lives in its OWN message so the dynamic byte changes
       // never sit inside the cache prefix — marker B (placed on the
-      // second-last user, which is guaranteed to be a non-reminder message)
-      // closes the cache window strictly before the reminder.
-      //
-      // When the conversation tail is a tool_result (or an assistant with a
-      // pending tool_use), the reminder is SKIPPED — wedging an extra user
-      // text into a live tool loop severs Anthropic interleaved-thinking
-      // continuity and is the documented cause of empty/premature end_turn.
-      // See `embedDynamicInLastUserContent` for the full rationale.
-      const { stable, dynamic } = partitionSystemBlocks(system ?? []);
-      const enrichedMessages = embedDynamicInLastUserContent(messages, dynamic);
+      const { stable } = partitionSystemBlocks(system ?? []);
+      const enrichedMessages = foldDynamicReminders(messages);
 
       const anthropicMessages = await messagesToAnthropic(enrichedMessages);
       const anthropicTools = toolDefsToAnthropic(tools);
@@ -526,8 +525,10 @@ function createAnthropicProvider(opts: ProviderFactoryOpts): LLMProvider {
           case "content_block_delta": {
             const delta = parsed.delta;
             if (delta?.type === "text_delta" && delta.text) {
-              if (currentBlock?.type === "text") currentBlock.text += delta.text;
-              yield { type: "text", text: delta.text };
+              if (currentBlock?.type === "text") {
+                currentBlock.text += delta.text;
+                yield { type: "text", text: delta.text };
+              }
             } else if (delta?.type === "thinking_delta" && delta.thinking) {
               if (currentBlock?.type === "thinking") currentBlock.thinking += delta.thinking;
               yield { type: "thinking", text: delta.thinking };
@@ -540,6 +541,12 @@ function createAnthropicProvider(opts: ProviderFactoryOpts): LLMProvider {
             ) {
               if (currentBlock.type === "tool_use") {
                 currentBlock.arguments += delta.partial_json;
+                yield {
+                  type: "tool_call_delta",
+                  id: currentBlock.id ?? "",
+                  name: currentBlock.name ?? "",
+                  arguments_delta: delta.partial_json,
+                };
               }
             }
             break;
