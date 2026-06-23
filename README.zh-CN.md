@@ -14,7 +14,7 @@
 ForgeaX **不绑定任何模型厂商**。内核通过可插拔的 **driver** 层(`cli-*` 提供者)驱动 Forge,
 因此你可以用**已经在付费的编程 agent 订阅**来跑整个 studio——或者用一个普通的 API key:
 
-- **[Claude Code](https://claude.com/product/claude-code)** —— 用你的 **Claude Pro / Max**
+- **[the reference agent CLI](https://claude.com/product/claude-code)** —— 用你的 **Claude Pro / Max**
   计划,或一个 **Anthropic API key**。
 - **[OpenAI Codex](https://developers.openai.com/codex)** —— 登录你的 **ChatGPT Plus / Pro**
   计划,或用一个 **OpenAI API key**。

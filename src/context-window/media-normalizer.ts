@@ -1,22 +1,15 @@
-/**
- * media-normalizer.ts — Sanitize inline media content parts in replayed messages.
+/** media-normalizer —— 反向 inflate 后的 inline media 兜底校验。
  *
- * Only validates inline media (image/video/audio) magic bytes — catches
- * corrupted base64 early so provider inline conversion doesn't receive garbage.
+ *  与 agenteam ref 1:1：
+ *  - 只校验 inline media（image / video / audio）的 base64 magic prefix；坏掉的
+ *    转成 text 占位，避免 provider inline 转换吃到垃圾后报模糊错误。
+ *  - 不验 file-based parts（FileMediaContentPart / file / text_file），那是 producer
+ *    的责任；reachability 在 readMediaBytes / readFileBytes 消费时再判。
  *
- * **Path-based parts are NOT sanitized here.** The `FileMediaContentPart` / `file` /
- * `text_file` contract says the producer is responsible for the path owner
- * (see `FileMediaContentPart.inContainer` in src/core/types.ts). Reachability
- * is decided at consumption time (`readMediaBytes` / `readFileBytes`) — if the
- * file is gone, provider adapters catch the read error and surface a
- * placeholder. No duplicate accessibility check upstream.
- */
+ *  本模块只 import core/types 的 type guards + llm/types 的 LLMMessage。 */
 
-import {
-  isInlineMediaContentPart,
-  type ContentPart,
-} from "../core/types.js";
-import type { LLMMessage } from "../llm/types.js";
+import { isInlineMediaContentPart, type ContentPart } from "../core/types";
+import type { LLMMessage } from "../llm/types";
 
 export async function sanitizeMedia(messages: LLMMessage[]): Promise<LLMMessage[]> {
   const result: LLMMessage[] = [];
@@ -52,10 +45,7 @@ function sanitizePart(part: ContentPart): ContentPart {
   return part;
 }
 
-// ─── Magic bytes detection (base64 prefix matching) ─────────────────────────
-//
-// Checking the base64 prefix avoids decoding the entire payload.
-// Each entry maps to the raw-byte signature of a common format.
+// ── Magic bytes detection (base64 prefix matching) ──────────────────────────
 
 const IMAGE_PREFIXES = [
   "/9j/",      // JPEG  (FF D8 FF)
@@ -75,13 +65,13 @@ const AUDIO_PREFIXES = [
   "UklGR",     // RIFF  (WAV container: 52 49 46 46)
   "//E",       // AAC ADTS (FF F1)
   "//k",       // AAC ADTS (FF F9)
-  "AAAA",      // AAC raw / M4A atom (common leading zeros)
+  "AAAA",      // AAC raw / M4A atom
 ];
 
 const VIDEO_PREFIXES = [
-  "AAAA",      // MP4/MOV (ftyp atom, leading size bytes 00 00 00)
+  "AAAA",      // MP4/MOV (ftyp atom)
   "GkXf",      // WebM/MKV (EBML header: 1A 45 DF A3)
-  "UklGR",     // AVI  (RIFF container: 52 49 46 46)
+  "UklGR",     // AVI  (RIFF container)
   "Zmxh",      // FLV  (46 4C 56)
 ];
 
@@ -90,14 +80,6 @@ function matchesAnyPrefix(data: string, prefixes: string[]): boolean {
   return prefixes.some((p) => data.startsWith(p));
 }
 
-function looksLikeImage(data: string): boolean {
-  return matchesAnyPrefix(data, IMAGE_PREFIXES);
-}
-
-function looksLikeAudio(data: string): boolean {
-  return matchesAnyPrefix(data, AUDIO_PREFIXES);
-}
-
-function looksLikeVideo(data: string): boolean {
-  return matchesAnyPrefix(data, VIDEO_PREFIXES);
-}
+function looksLikeImage(data: string): boolean { return matchesAnyPrefix(data, IMAGE_PREFIXES); }
+function looksLikeAudio(data: string): boolean { return matchesAnyPrefix(data, AUDIO_PREFIXES); }
+function looksLikeVideo(data: string): boolean { return matchesAnyPrefix(data, VIDEO_PREFIXES); }

@@ -1,3 +1,10 @@
+/** Tool normalizer —— pending / result 构造 + 历史 timeline 修复（normalizeHistory）。
+ *
+ *  与 agenteam ref 1:1：provider 层用 createPending / createToolResult；
+ *  context-window replay 走 normalizeHistory（drop raw tool dups + 把死掉的 pending
+ *  转 interrupted）；ConsciousAgent 在重启恢复路径上调 buildPersistentToolRepair
+ *  把 interrupted 转成 synthetic 落盘。 */
+
 import type { ContentPart } from "../core/types.js";
 import { contentToString, normalizeContent } from "../message/modality.js";
 import type { LLMMessage, LLMToolCall } from "../llm/types.js";
@@ -14,12 +21,12 @@ export interface PersistentToolRepair {
   needsRepair: boolean;
 }
 
-export function isToolErrorResult(result: unknown): boolean {
-  return typeof result === "object" && result !== null && "error" in result;
-}
-
 export function isTerminalToolMessage(msg: LLMMessage): boolean {
   return msg.role === "tool" && msg.toolStatus !== "pending";
+}
+
+export function isToolErrorResult(result: unknown): boolean {
+  return typeof result === "object" && result !== null && "error" in result;
 }
 
 export function createPendingToolMessage(toolCall: LLMToolCall): LLMMessage {
@@ -35,6 +42,44 @@ export function createPendingToolMessage(toolCall: LLMToolCall): LLMMessage {
 
 export function createPendingToolMessages(toolCalls: LLMToolCall[]): LLMMessage[] {
   return toolCalls.map(createPendingToolMessage);
+}
+
+const INLINE_MEDIA_TYPES = new Set(["image", "video", "audio"]);
+
+function inferRequiredFields(type: string): string[] | null {
+  if (type === "text") return ["text"];
+  if (INLINE_MEDIA_TYPES.has(type)) return ["data", "mimeType"];
+  if (type === "file" || type === "text_file" || type.endsWith("_file")) return ["path", "mimeType"];
+  return null;
+}
+
+function isContentPartArray(v: unknown): v is ContentPart[] {
+  return Array.isArray(v) && v.length > 0 && typeof (v as any[])[0]?.type === "string";
+}
+
+function validateContentParts(parts: ContentPart[]): { parts: ContentPart[]; errors: string[] } {
+  const valid: ContentPart[] = [];
+  const errors: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i] as Record<string, unknown>;
+    const t = p.type as string;
+    const required = inferRequiredFields(t);
+    if (!required) {
+      valid.push(parts[i]);
+      continue;
+    }
+    const missing = required.filter((f) => typeof p[f] !== "string");
+    if (missing.length > 0) {
+      const actualShape = Object.keys(p).map((k) => `${k}: ${typeof p[k]}`).join(", ");
+      errors.push(
+        `parts[${i}]: type="${t}" requires top-level string fields [${required.join(", ")}], ` +
+        `but missing: [${missing.join(", ")}]. Actual shape: { ${actualShape} }`,
+      );
+      continue;
+    }
+    valid.push(parts[i]);
+  }
+  return { parts: valid, errors };
 }
 
 export function createToolResultMessage(toolCall: LLMToolCall, result: unknown): LLMMessage {
@@ -68,52 +113,6 @@ export function createToolResultMessage(toolCall: LLMToolCall, result: unknown):
   };
 }
 
-function isContentPartArray(v: unknown): v is ContentPart[] {
-  return Array.isArray(v) && v.length > 0 && typeof (v as any[])[0]?.type === "string";
-}
-
-/**
- * Infer required fields from the type name pattern rather than a hardcoded table.
- * Rules:
- *   - "text"                        → needs "text"
- *   - inline media (image/video/audio) → needs "data" + "mimeType"
- *   - anything with _file suffix / "file" → needs "path" + "mimeType"
- *   - unrecognized type              → pass through (no rejection)
- */
-const INLINE_MEDIA_TYPES = new Set(["image", "video", "audio"]);
-
-function inferRequiredFields(type: string): string[] | null {
-  if (type === "text") return ["text"];
-  if (INLINE_MEDIA_TYPES.has(type)) return ["data", "mimeType"];
-  if (type === "file" || type === "text_file" || type.endsWith("_file")) return ["path", "mimeType"];
-  return null;
-}
-
-function validateContentParts(parts: ContentPart[]): { parts: ContentPart[]; errors: string[] } {
-  const valid: ContentPart[] = [];
-  const errors: string[] = [];
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i] as Record<string, unknown>;
-    const t = p.type as string;
-    const required = inferRequiredFields(t);
-    if (!required) {
-      valid.push(parts[i]);
-      continue;
-    }
-    const missing = required.filter((f) => typeof p[f] !== "string");
-    if (missing.length > 0) {
-      const actualShape = Object.keys(p).map((k) => `${k}: ${typeof p[k]}`).join(", ");
-      errors.push(
-        `parts[${i}]: type="${t}" requires top-level string fields [${required.join(", ")}], ` +
-        `but missing: [${missing.join(", ")}]. Actual shape: { ${actualShape} }`,
-      );
-      continue;
-    }
-    valid.push(parts[i]);
-  }
-  return { parts: valid, errors };
-}
-
 export function createSyntheticToolResult(
   toolCall: LLMToolCall,
   reason = `[Error: tool call "${toolCall.name}" was interrupted — no result available]`,
@@ -140,13 +139,11 @@ export function createInterruptedToolResult(
   };
 }
 
-/**
- * Normalize tool call / tool result pairing in memory:
- * - Drop raw tool ledger duplicates from replay
- * - Route each tool call to its best visible state
- * - Keep live in-flight calls as pending
- * - Mark dead pending/missing calls as interrupted once the conversation moved on
- */
+/** Normalize tool call / tool result pairing in memory:
+ *  - Drop raw tool ledger duplicates from replay
+ *  - Route each tool call to its best visible state
+ *  - Keep live in-flight calls as pending
+ *  - Mark dead pending/missing calls as interrupted once conversation moved on */
 export function normalizeToolTimeline(messages: LLMMessage[]): NormalizedToolTimeline {
   const result: LLMMessage[] = [];
   let hasInterruptedToolCalls = false;
@@ -162,9 +159,7 @@ export function normalizeToolTimeline(messages: LLMMessage[]): NormalizedToolTim
 
     result.push(msg);
 
-    if (!msg.toolCalls?.length) {
-      continue;
-    }
+    if (!msg.toolCalls?.length) continue;
 
     const bestById = new Map<string, LLMMessage>();
     let cursor = i + 1;
@@ -211,11 +206,7 @@ export function normalizeToolTimeline(messages: LLMMessage[]): NormalizedToolTim
     i = cursor - 1;
   }
 
-  return {
-    messages: result,
-    changed,
-    hasInterruptedToolCalls,
-  };
+  return { messages: result, changed, hasInterruptedToolCalls };
 }
 
 export function buildPersistentToolRepair(messages: LLMMessage[]): PersistentToolRepair {
@@ -246,27 +237,15 @@ function compareToolMessagePriority(a: LLMMessage, b: LLMMessage): number {
 
 function toolMessagePriority(msg: LLMMessage): number {
   if (msg.role !== "tool") return -1;
-  if (msg.toolStatus === "completed" || msg.toolStatus === "failed") {
-    return 3;
-  }
-  if (msg.toolStatus === "synthetic") {
-    return 2;
-  }
-  if (msg.toolStatus === "pending") {
-    return 1;
-  }
-  if (isTerminalToolMessage(msg)) {
-    return 3;
-  }
+  if (msg.toolStatus === "completed" || msg.toolStatus === "failed") return 3;
+  if (msg.toolStatus === "synthetic") return 2;
+  if (msg.toolStatus === "pending") return 1;
+  if (isTerminalToolMessage(msg)) return 3;
   return 0;
 }
 
-/**
- * History normalization entrypoint — chains all normalizers.
- * Currently only tool-timeline normalization; future normalizers
- * (media dedup, message merge, etc.) can be chained here without
- * changing higher-level callers.
- */
+/** History normalization entrypoint —— chains all normalizers。
+ *  目前只跑 timeline 修复；后续 media dedup / message merge 等加进来不影响 caller。 */
 export function normalizeHistory(messages: LLMMessage[]): NormalizedToolTimeline {
   return normalizeToolTimeline(messages);
 }

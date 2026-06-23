@@ -1,20 +1,7 @@
-node_modules
 node_modules/
-*.tsbuildinfo
-debug.log
-debug.log.*
-package-lock.json
-.cursor/
-
-# ── 运行时产物（instance 侧生成，不入版本控制）──
-/team/
-backups/
-.instance-meta.json
-containers.list
-mounts.json
-node_modules
-
-# Playwright MCP runtime traces (forgeax-cli capability)
-.playwright-mcp/
-
+dist/
+.vite/
+*.log
 .DS_Store
+.env
+.env.local

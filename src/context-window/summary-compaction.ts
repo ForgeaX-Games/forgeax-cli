@@ -1,33 +1,42 @@
-import type { AgentJson, EventBusAPI } from "../core/types.js";
-import type { AgentLedgerAPI } from "../session/types.js";
-import { ConsciousAgent } from "../core/conscious-agent.js";
-import { ContextWindow, locateBoundaries } from "./context-window.js";
-import { normalizeContent } from "../message/modality.js";
-import { createProvider, getModelSpec } from "../llm/provider.js";
-import { assembleResponse } from "../llm/stream.js";
-import { extractMessageBodyText } from "../llm/thinking.js";
-import type { LLMMessage } from "../llm/types.js";
-import { eventsToMessages } from "./history-pipeline.js";
-import { normalizeHistory } from "./tool-normalizer.js";
-import type { StoredEvent } from "./system-snapshot.js";
-import type { CompactProtectionZone } from "./micro-compaction.js";
+/** summary-compaction —— 容量触发 / 边界滚动的全量压缩。
+ *
+ *  与 agenteam ref 718 行 1:1（plan §3.8）；只把 `ConsciousAgent.resolveModelsConfig`
+ *  解耦成 caller 注入的 `resolveModels: () => ModelsConfig`，避免 context-window
+ *  反向依赖 conscious-agent。SessionManager 对应替换成 LedgerReader（buildPrompt
+ *  / getWindowEventsRaw 只用到这个最小接口）。
+ *
+ *  两个入口：
+ *  - `partialCompact` —— 增量段落压缩，发 `partial_boundary` event。
+ *  - `fullCompact`    —— 日切边界全量合并，发 `compact_boundary` event。
+ *
+ *  Per-agent lock 保证 partial / full 互斥（一棵 agent 同时只能跑一个）。 */
+
+import type { EventBusAPI, ModelsConfig } from "../core/types";
+import type { LLMMessage } from "../llm/types";
+import type { StoredEvent } from "../ledger/types";
+import { ContextWindow, locateBoundaries, type LedgerReader } from "./context-window";
+import { eventsToMessages } from "./history-pipeline";
+import { normalizeHistory } from "./tool-normalizer";
+import type { CompactProtectionZone } from "./micro-compaction";
+import { normalizeContent } from "../message/modality";
+import { createProvider, getModelSpec } from "../llm/provider";
+import { assembleResponse } from "../llm/stream";
+import { extractMessageBodyText } from "../llm/thinking";
 import { randomUUID } from "node:crypto";
 
-/** Per-agent lock — shared between partial and full compaction (mutually exclusive). */
+// ─── Per-agent lock ─────────────────────────────────────────────────────────
+
 const _compactionLocks = new Map<string, boolean>();
 
-/**
- * Protection zone size: keep the most-recent N user messages uncompacted.
- * If the post-boundary stream has fewer than this many user messages,
- * compact everything (full-stream compaction degenerates gracefully).
- */
+// ─── Constants ──────────────────────────────────────────────────────────────
+
 const KEEP_USER_MSGS = 3;
 const MIN_MESSAGES = 4;
 
 const SUMMARY_MIN_OUTPUT_TOKENS = 10_000;
-// Caps below must comfortably exceed the largest thinking budget any caller might inherit
-// (Anthropic Sonnet 4.6 high effort = 32768) plus reply headroom — otherwise the Anthropic
-// API rejects the request with `max_tokens must be greater than thinking.budget_tokens`.
+// Caps must comfortably exceed the largest thinking budget caller might inherit
+// (Anthropic Sonnet 4.6 high effort = 32768) plus reply headroom — otherwise the
+// API rejects with `max_tokens must be greater than thinking.budget_tokens`.
 const SUMMARY_MAX_OUTPUT_TOKENS = 40_000;
 const FULL_COMPACT_MAX_OUTPUT_TOKENS = 40_000;
 
@@ -44,14 +53,7 @@ export type CompactionResult =
       summarizeUsage?: { inputTokens: number; outputTokens: number };
     };
 
-// ─── Shared helpers ─────────────────────────────────────────────────────────
-
-function resolveCompactionModel(getAgentJson: () => AgentJson): string {
-  const mc = ConsciousAgent.resolveModelsConfig(getAgentJson());
-  const model = Array.isArray(mc.model) ? mc.model[0] : (mc.model ?? undefined);
-  if (model) return model;
-  throw new Error("No model configured for compaction — set models.model in agent.json or agenteam.json");
-}
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function resolveSummaryMaxTokens(modelName: string, cap: number = SUMMARY_MAX_OUTPUT_TOKENS): number {
   const spec = getModelSpec(modelName);
@@ -69,27 +71,13 @@ function serializeMessageForSummary(m: LLMMessage): string {
 function extractSummaryBlock(raw: string): string {
   const summaryMatch = raw.match(/<summary>([\s\S]*?)<\/summary>/);
   if (summaryMatch) return summaryMatch[1].trim();
-
   const withoutAnalysis = raw.replace(/<analysis>[\s\S]*?<\/analysis>/g, "").trim();
   return withoutAnalysis || raw;
 }
 
-/**
- * Find the protection-zone cutoff (the index of its first event).
- *
- * Walks backwards from the tail (stopping at `lastBoundaryIdx`) and counts
- * `role: "user"` LLMMessage events. When the N-th one is reached, returns its
- * index — that user message marks the start of the protection zone.
- *
- * Why land on a user message: it's a natural "new turn / new intent" boundary.
- * Splitting *before* one is always safe — the previous turn's assistant +
- * tool_use blocks + their tool_results are all already complete. Never splits
- * mid-thinking, never breaks a tool_use ↔ tool_result pair.
- *
- * If the stream has fewer than `keepUserMsgs` user messages after the last
- * boundary, returns `events.length` — meaning the protection zone is empty
- * and the caller should compact the entire post-boundary segment.
- */
+/** Find protection-zone cutoff (index of first event in the protection zone)。
+ *  从 tail 倒数 keepUserMsgs 条 user message；落到该 user message 的 idx，
+ *  保证从那条开始切片不破坏 tool_use ↔ tool_result 配对。 */
 function findProtectionCutoffIdx(
   events: StoredEvent[],
   lastBoundaryIdx: number,
@@ -113,30 +101,25 @@ function getTokensBefore(events: StoredEvent[]): number {
   return 0;
 }
 
-// ─── Shared initialization (used by both partial and full compact) ──────────
+// ─── Shared init ────────────────────────────────────────────────────────────
 
 interface CompactionContext {
   rawEvents: StoredEvent[];
   normalizedMessages: LLMMessage[];
   modelName: string;
+  modelsConfig: ModelsConfig;
   boundaryInfo: ReturnType<typeof locateBoundaries>;
-  /** Index of the last boundary event, or -1 if the stream has no prior boundary. */
+  /** Index of last boundary event；无 boundary 则 -1。 */
   lastBoundaryIdx: number;
-  /** Index of the first event in the protection zone, or `rawEvents.length` if the zone is empty (full-stream compaction). */
+  /** Index of first event in protection zone；保护区为空则等于 rawEvents.length。 */
   cutoffIdx: number;
   tokensBefore: number;
 }
 
-/**
- * Common initialization for both partial and full compaction:
- * read events, normalize, resolve model, locate boundaries, find protection zone.
- *
- * Returns CompactionContext on success, or CompactionResult (ok: false) on early exit.
- */
 async function prepareCompaction(
   agentId: string,
-  ledger: AgentLedgerAPI,
-  getAgentJson: () => AgentJson,
+  ledger: LedgerReader,
+  resolveModels: () => ModelsConfig,
 ): Promise<CompactionContext | CompactionResult> {
   const cw = new ContextWindow(agentId, ledger);
   const rawEvents = await cw.getWindowEventsRaw();
@@ -148,9 +131,13 @@ async function prepareCompaction(
     return { ok: false, reason: `Session too short to compact (fewer than ${MIN_MESSAGES} messages).` };
   }
 
+  let modelsConfig: ModelsConfig;
   let modelName: string;
   try {
-    modelName = resolveCompactionModel(getAgentJson);
+    modelsConfig = resolveModels();
+    const m = Array.isArray(modelsConfig.model) ? modelsConfig.model[0] : (modelsConfig.model ?? undefined);
+    if (!m) throw new Error("No model configured for compaction — set models.model in agent.json or session.defaultModels");
+    modelName = m;
   } catch (err: any) {
     return { ok: false, reason: err?.message ?? "No model available for compaction." };
   }
@@ -162,29 +149,16 @@ async function prepareCompaction(
   const cutoffIdx = findProtectionCutoffIdx(rawEvents, lastBoundaryIdx, KEEP_USER_MSGS);
   const tokensBefore = getTokensBefore(rawEvents);
 
-  return { rawEvents, normalizedMessages, modelName, boundaryInfo, lastBoundaryIdx, cutoffIdx, tokensBefore };
+  return { rawEvents, normalizedMessages, modelName, modelsConfig, boundaryInfo, lastBoundaryIdx, cutoffIdx, tokensBefore };
 }
 
-/** Type guard: distinguish early-exit result from successful context. */
 function isEarlyExit(r: CompactionContext | CompactionResult): r is CompactionResult {
   return "ok" in r;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  partialCompact — incremental segment summarization
+//  partialCompact —— incremental segment summarization
 // ═══════════════════════════════════════════════════════════════════════════
-
-// Key design decisions (learned from Claude Code + our own truncation incident):
-//
-// 1. Sections 7-9 (task state) are NON-NEGOTIABLE — they MUST appear even if
-//    earlier sections need to be shortened. This is the #1 cause of post-compact
-//    amnesia: the model spends all output tokens on code snippets and never
-//    writes what was completed vs what's pending.
-//
-// 2. Code snippets should be BRIEF (signature + key lines only). The full code
-//    exists on disk; the summary exists to preserve *intent and progress*.
-//
-// 3. analysis block is a scratchpad — stripped before injection.
 
 const SUMMARIZE_PROMPT = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests, your previous actions, and — most critically — the current task progress.
 
@@ -238,6 +212,8 @@ Your summary MUST include ALL of the following sections, in this order:
    If the last task was concluded, say so and only list next steps explicitly requested by the user.
    Include direct quotes from the most recent conversation showing where you left off.
 
+FINAL REMINDER: Sections 7, 8, and 9 are the most important parts of this summary. A summary missing these sections is USELESS for continuing work. Budget your output accordingly — shorten sections 3-5 if needed, but NEVER omit 7-9.
+
 <example>
 <analysis>
 [Chronological trace of conversation — what happened, what was completed, what's pending]
@@ -278,15 +254,13 @@ Your summary MUST include ALL of the following sections, in this order:
    [Exactly what was being worked on, where it stopped, what comes next]
    User's last instruction: "[verbatim quote]"
 </summary>
-</example>
-
-FINAL REMINDER: Sections 7, 8, and 9 are the most important parts of this summary. A summary missing these sections is USELESS for continuing work. Budget your output accordingly — shorten sections 3-5 if needed, but NEVER omit 7-9.`;
+</example>`;
 
 export interface PartialCompactOptions extends CompactProtectionZone {
   agentId: string;
-  ledger: AgentLedgerAPI;
+  ledger: LedgerReader;
   eventBus: EventBusAPI;
-  getAgentJson: () => AgentJson;
+  resolveModels: () => ModelsConfig;
   signal: AbortSignal;
   instructions?: string;
 }
@@ -301,22 +275,13 @@ export interface PartialBoundaryPayload {
   };
 }
 
-export async function partialCompact(
-  options: PartialCompactOptions,
-): Promise<CompactionResult> {
-  const {
-    agentId,
-    ledger,
-    eventBus,
-    getAgentJson,
-    signal,
-    instructions,
-  } = options;
+export async function partialCompact(options: PartialCompactOptions): Promise<CompactionResult> {
+  const { agentId, ledger, eventBus, resolveModels, signal, instructions } = options;
 
-  const prepared = await prepareCompaction(agentId, ledger, getAgentJson);
+  const prepared = await prepareCompaction(agentId, ledger, resolveModels);
   if (isEarlyExit(prepared)) return prepared;
 
-  const { rawEvents, normalizedMessages, modelName, boundaryInfo, lastBoundaryIdx, cutoffIdx, tokensBefore } = prepared;
+  const { rawEvents, normalizedMessages, modelName, modelsConfig, boundaryInfo, lastBoundaryIdx, cutoffIdx, tokensBefore } = prepared;
 
   const lastB = boundaryInfo?.boundaries[boundaryInfo.boundaries.length - 1];
   const prevSummary = lastB?.summary ?? "";
@@ -328,20 +293,14 @@ export async function partialCompact(
   }
   const conversationText = segmentNormalized.map(serializeMessageForSummary).join("\n");
 
-  // Build context suffix: previous boundary's protection zone + current protection zone.
-  // Both are unsummarized recent context the model needs to capture key state from.
   let contextSuffix = "";
-
-  // Previous boundary's protection zone (events between prev-prev boundary and last
-  // boundary, with ts >= last boundary's toTs). These were kept by toTs logic before
-  // and will be dropped once this new boundary supersedes the last one.
   if (lastB?.type === "partial" && lastB.summarizedRange.toTs > 0) {
     const prevBIdx = boundaryInfo!.boundaries.length >= 2
       ? boundaryInfo!.boundaries[boundaryInfo!.boundaries.length - 2].idx
       : -1;
     const lastToTs = lastB.summarizedRange.toTs;
     const oldProtEvents = rawEvents.slice(prevBIdx + 1, lastBoundaryIdx)
-      .filter(e => e.ts >= lastToTs && e.type !== "compact_boundary" && e.type !== "partial_boundary");
+      .filter((e) => e.ts >= lastToTs && e.type !== "compact_boundary" && e.type !== "partial_boundary");
     const { messages: oldProtNorm } = normalizeHistory(eventsToMessages(oldProtEvents));
     if (oldProtNorm.length > 0) {
       const oldProtText = oldProtNorm.map(serializeMessageForSummary).join("\n");
@@ -349,7 +308,6 @@ export async function partialCompact(
     }
   }
 
-  // Current protection zone: events after cutoffIdx — not being compressed in this round.
   const { messages: protNormalized } = normalizeHistory(eventsToMessages(rawEvents.slice(cutoffIdx)));
   if (protNormalized.length > 0) {
     const protText = protNormalized.map(serializeMessageForSummary).join("\n");
@@ -362,15 +320,14 @@ export async function partialCompact(
   }
 
   let systemPrompt = SUMMARIZE_PROMPT;
-  if (instructions) {
-    systemPrompt += `\n\n## Custom Compact Instructions\n${instructions}`;
-  }
+  if (instructions) systemPrompt += `\n\n## Custom Compact Instructions\n${instructions}`;
 
   let summarizeUsage: { inputTokens: number; outputTokens: number } | undefined;
 
   const maxTokens = resolveSummaryMaxTokens(modelName);
   const provider = createProvider({
-    ...ConsciousAgent.resolveModelsConfig(getAgentJson()),
+    ...modelsConfig,
+    model: modelName,
     maxTokens,
     showThinking: false,
     temperature: 0.3,
@@ -400,11 +357,6 @@ export async function partialCompact(
 
   const boundaryTs = Date.now();
   const fromTs = segmentEvents[0]?.ts ?? boundaryTs;
-  // toTs anchors the protection zone in the event stream by *timestamp* so that
-  // events written during the async summarize call (which arrive after cutoffIdx
-  // was captured) are still correctly classified as "protected, not summarized"
-  // on replay. cutoffIdx === rawEvents.length means full-stream compaction —
-  // protection zone is empty, fall back to boundaryTs.
   const toTs = rawEvents[cutoffIdx]?.ts ?? boundaryTs;
 
   const payload: PartialBoundaryPayload = {
@@ -433,12 +385,8 @@ export async function partialCompact(
   };
 }
 
-/**
- * Thin wrapper with per-agent lock. Used by auto_compact plugin and compact tool.
- */
-export async function compactCurrentSession(
-  options: PartialCompactOptions,
-): Promise<CompactionResult> {
+/** Thin wrapper with per-agent lock。auto_compact daemon / `/compact` slash 用。 */
+export async function compactCurrentSession(options: PartialCompactOptions): Promise<CompactionResult> {
   const { agentId } = options;
 
   if (_compactionLocks.get(agentId)) {
@@ -454,12 +402,8 @@ export async function compactCurrentSession(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  fullCompact — day-boundary merge of all segments
+//  fullCompact —— day-boundary merge of all segments
 // ═══════════════════════════════════════════════════════════════════════════
-
-// More conservative than SUMMARIZE_PROMPT — this is the last compaction
-// before the agent enters a new day, so information loss here is effectively
-// permanent. Uses higher token budget and an extra "Persistent Context" section.
 
 const MERGE_PROMPT = `You are performing a DAY-BOUNDARY FULL COMPACTION — merging multiple session summary segments into a single comprehensive summary. This is the LAST compaction before the agent enters a new day. Information not preserved here is effectively LOST from working memory.
 
@@ -500,72 +444,29 @@ CRITICAL OUTPUT RULES:
 Your summary MUST include ALL sections in this order:
 
 1. Primary Request and Intent
-   The user's CURRENT active request and goals. For older requests that are fully completed, a one-line mention is enough.
-
 2. Key Technical Concepts
-   Technical concepts, patterns, and architecture decisions that are STILL RELEVANT. Drop concepts from older work that is done and unlikely to be revisited. Always include the "why", not just the "what".
-
 3. Files and Changes
-   - Current-period files: full list with path + role + what changed.
-   - Older-period files: only keep those still actively relevant. Completed work on files no longer in play can be omitted.
-
 4. Errors and Fixes
-   - Recurring or systemic error patterns: ALWAYS keep (they prevent future mistakes).
-   - One-off errors from older work that were resolved and won't recur: compress to one line or drop.
-
 5. Problem Solving
-   Key insights and debugging lessons that have ongoing value. Drop step-by-step debugging traces from resolved issues unless the pattern is likely to recur.
-
 6. User Messages
-   - Current-period: ALL user messages.
-   - Older periods: keep preference statements, corrections, and feedback that still apply. Drop routine task instructions that have been completed.
-
 7. Completed Work (MANDATORY — do NOT skip)
-   - Current period: detailed list with outcomes.
-   - Older periods: compress into brief per-day summaries (e.g. "Apr 7: implemented fullCompact, refactored memory_curator").
-   This section prevents re-doing finished work — keep enough to know what's done, no more.
-
 8. Pending Tasks (MANDATORY — do NOT skip)
-   Everything still TODO, with exact status of partially-done tasks. Drop tasks from older summaries that have since been completed (move them to Section 7).
-
 9. Current State and Next Step (MANDATORY — do NOT skip)
-   What was happening right before this summary. Include the user's most recent instruction verbatim.
-
 10. Persistent Context (MANDATORY — full compaction only)
     Long-lived information that should survive indefinitely:
-    - User preferences and conventions (communication style, coding standards, language preferences)
+    - User preferences and conventions
     - Project structure and architecture understanding
     - Tool/workflow patterns that worked well or poorly
-    - Commitments made to the user (e.g. "I'll do X tomorrow")
+    - Commitments made to the user
     - Active branches, PR states, deploy states
-    This section is the MOST DURABLE part of the summary — it should grow slowly and only contain facts with long shelf life.
 
-<example>
-<analysis>
-[Per-segment contributions, contradictions resolved, important info flagged]
-</analysis>
-
-<summary>
-1. Primary Request and Intent: ...
-2. Key Technical Concepts: ...
-3. Files and Changes: ...
-4. Errors and Fixes: ...
-5. Problem Solving: ...
-6. User Messages: ...
-7. Completed Work: ...
-8. Pending Tasks: ...
-9. Current State and Next Step: ...
-10. Persistent Context: ...
-</summary>
-</example>
-
-FINAL REMINDER: This is a day-boundary compaction. The agent will wake up tomorrow with this summary + its persistent memory files (MEMORY.md, knowledge/, experience/, daily logs). Your job is to produce a CURATED working memory — not a complete archive. Detailed history lives in daily log files on disk; this summary is a navigation aid that tells the agent where it stands, what matters now, and what long-term facts to remember. Prioritize: current context > long-lived facts > compressed older history. Drop noise.`;
+FINAL REMINDER: This is a day-boundary compaction. Detailed history lives on disk; this summary is a navigation aid. Prioritize: current context > long-lived facts > compressed older history. Drop noise.`;
 
 export interface FullCompactOptions {
   agentId: string;
-  ledger: AgentLedgerAPI;
+  ledger: LedgerReader;
   eventBus: EventBusAPI;
-  getAgentJson: () => AgentJson;
+  resolveModels: () => ModelsConfig;
   signal: AbortSignal;
 }
 
@@ -576,21 +477,8 @@ export interface CompactBoundaryPayload {
   createdAt: number;
 }
 
-/**
- * Full compaction: merge all existing partial_boundary summaries (and any
- * prior compact_boundary) into a single compact_boundary event.
- *
- * Used at day boundaries by memory_curator. More conservative than
- * partialCompact — uses MERGE_PROMPT with higher token budget and an
- * extra "Persistent Context" section.
- *
- * If no boundaries exist, falls back to summarizing all messages outside
- * the protection zone, writing a compact_boundary.
- */
-export async function fullCompact(
-  options: FullCompactOptions,
-): Promise<CompactionResult> {
-  const { agentId, ledger, eventBus, getAgentJson, signal } = options;
+export async function fullCompact(options: FullCompactOptions): Promise<CompactionResult> {
+  const { agentId } = options;
 
   if (_compactionLocks.get(agentId)) {
     return { ok: false, reason: "Compaction already in progress for this agent — skipping." };
@@ -598,25 +486,20 @@ export async function fullCompact(
   _compactionLocks.set(agentId, true);
 
   try {
-    return await _fullCompactInner(agentId, ledger, eventBus, getAgentJson, signal);
+    return await _fullCompactInner(options);
   } finally {
     _compactionLocks.delete(agentId);
   }
 }
 
-async function _fullCompactInner(
-  agentId: string,
-  ledger: AgentLedgerAPI,
-  eventBus: EventBusAPI,
-  getAgentJson: () => AgentJson,
-  signal: AbortSignal,
-): Promise<CompactionResult> {
-  const prepared = await prepareCompaction(agentId, ledger, getAgentJson);
+async function _fullCompactInner(options: FullCompactOptions): Promise<CompactionResult> {
+  const { agentId, ledger, eventBus, resolveModels, signal } = options;
+
+  const prepared = await prepareCompaction(agentId, ledger, resolveModels);
   if (isEarlyExit(prepared)) return prepared;
 
-  const { rawEvents, normalizedMessages, modelName, boundaryInfo, cutoffIdx, tokensBefore } = prepared;
+  const { rawEvents, normalizedMessages, modelName, modelsConfig, boundaryInfo, cutoffIdx, tokensBefore } = prepared;
 
-  // Build merge input: collect all boundary summaries + uncompacted messages
   const inputParts: string[] = [];
   const mergedSegmentIds: string[] = [];
 
@@ -664,7 +547,8 @@ async function _fullCompactInner(
 
   const maxTokens = resolveSummaryMaxTokens(modelName, FULL_COMPACT_MAX_OUTPUT_TOKENS);
   const provider = createProvider({
-    ...ConsciousAgent.resolveModelsConfig(getAgentJson()),
+    ...modelsConfig,
+    model: modelName,
     maxTokens,
     showThinking: false,
     temperature: 0.3,

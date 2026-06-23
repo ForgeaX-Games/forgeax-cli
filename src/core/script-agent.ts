@@ -1,50 +1,38 @@
-/** @desc ScriptAgent — runs user-defined TypeScript scripts */
+/** ScriptAgent —— 跑用户写的 TS / JS 脚本作为 agent 主循环。
+ *
+ *  本轮（C6）只落 interface，不落实际 runMain 实现。Scheduler / SessionManager 还没好，
+ *  动态 import + ESM cache busting 那套等 C8/C11 一起接进来。
+ *
+ *  ref：agenteam-os src/core/script-agent.ts 56 行。
+ *  脚本 entry 路径约定：`<agentDir>/src/index.ts`（与 ref 一致）。 */
 
-import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import type { AgentContext, Event, AgentInitConfig } from "./types.js";
-import { BaseAgent } from "./base-agent.js";
+import { pathToFileURL } from "node:url";
+import { BaseAgent } from "./base-agent";
+import type { AgentContext, Event } from "../core/types";
 
-/** Relative path segments from agent root to the ScriptAgent entry file. */
+/** Script entry segment —— 相对 agentDir 的入口。 */
 export const SCRIPT_ENTRY_SEGMENTS = ["src", "index.ts"] as const;
 
-interface ScriptModule {
+/** 用户脚本的最小契约：可选 start，必有 update。 */
+export interface ScriptModule {
   start?: (ctx: AgentContext) => void | Promise<void>;
   update: (events: Event[], ctx: AgentContext) => void | Promise<void>;
 }
 
 export class ScriptAgent extends BaseAgent {
-  constructor(config: AgentInitConfig) {
-    super(config);
-    this.watchAgentJson();
+  /** Resolve module URL with ESM cache-bust query param. */
+  protected scriptModuleUrl(): string {
+    return `${pathToFileURL(join(this.agentDir, ...SCRIPT_ENTRY_SEGMENTS)).href}?v=${Date.now()}`;
   }
 
-  protected async runMain(_signal: AbortSignal): Promise<void> {
-    const modulePath = pathToFileURL(join(this.agentDir, ...SCRIPT_ENTRY_SEGMENTS)).href;
-    // Cache-bust: append unique query param so ESM loader re-evaluates the module
-    const mod = (await import(`${modulePath}?v=${Date.now()}`)) as ScriptModule;
+  async run(signal: AbortSignal): Promise<void> {
+    return this.runMain(signal);
+  }
 
-    if (mod.start) await mod.start(this.agentContext);
-
-    while (!this.shuttingDown) {
-      if (this.abortController.signal.aborted) {
-        this.abortController = new AbortController();
-      }
-
-      try {
-        await this.queue.waitForEvent(this.signal);
-      } catch {
-        continue;
-      }
-
-      if (this.coalesceMs > 0) {
-        await new Promise((r) => setTimeout(r, this.coalesceMs));
-      }
-
-      const events = this.queue.drain();
-      if (events.length > 0) {
-        await mod.update(events, this.agentContext);
-      }
-    }
+  async runMain(_signal: AbortSignal): Promise<void> {
+    // 占位：完整 turn loop（waitForEvent → coalesce → drain → mod.update）
+    // 等 C8/C11 把 Scheduler / Session 接进来后再补。
+    throw new Error("ScriptAgent.runMain not implemented yet (C6 interface-only stub)");
   }
 }

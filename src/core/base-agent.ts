@@ -1,321 +1,269 @@
-/** @desc BaseAgent — abstract base class for all agent implementations */
+/** BaseAgent —— 所有 agent 实现的抽象基类。
+ *
+ *  与 agenteam ref（312 行）对齐策略：
+ *  - **id == agentPath**（"root", "root/iori", "root/iori/suzu"）—— Session 层唯一寻址用 path。
+ *  - **不挂 SessionManager**：forgeax 一棵树一个 sid，Session 由顶层 SessionManager 单实例持有。
+ *  - **持有 3 loader + 3 registry**（B1.1, 2026-05-20）：ToolRegistry / SlotRegistry /
+ *    PluginRegistry 在 constructor 内 new，注入 `agentContext`。Loader 当前 `_loadInternal`
+ *    仍是 stub（B1.2-B1.3），所以 `reloadKits()` 暂为 noop；registry 默认空。
+ *    `ConsciousAgent.buildPrompt` 已经从 `agentContext.tools.list()` 拿工具列表 —— echo turn
+ *    永远拿到空数组，与之前 caller-injected `getTools = () => []` 行为完全等价。
+ *  - **AgentTree 已监听整棵子树的 agent.json**；单 agent reload 由 Scheduler 显式触发。
+ *  - **runMain abstract**：ConsciousAgent / ScriptAgent 自实现。
+ *
+ *  自持组件：EventQueue + AbortController + 3 loader + 3 registry；
+ *  共享单例（构造时注入）：EventBus / Blackboard / AgentTree。 */
 
-import { readFile } from "node:fs/promises";
-import { deepMerge } from "./deep-merge.js";
 import type {
-  AgentInterface,
-  AgentInitConfig,
-  AgentJson,
-  Event,
-  SelfEvent,
-  EventBusAPI,
-  TeamBoardAPI,
-  AgentTreeAPI,
   AgentContext,
-  FSWatcherAPI,
-  WatchRegistration,
-} from "./types.js";
-import { runWithAgentTurn, runWithAgentScope, bindAgentScope } from "./logger.js";
-import type { EventBus } from "./event-bus.js";
-import { EventQueue } from "./event-queue.js";
-import { AGENT_DEFAULTS } from "../defaults/agent/agent-json.js";
-import { Hook, createHookEvent } from "../hooks/types.js";
-import { PluginLoader } from "../loaders/plugin-loader.js";
-import { PluginRegistry } from "../registries/plugin-registry.js";
-import { ToolLoader } from "../loaders/tool-loader.js";
-import { ToolRegistry } from "../registries/tool-registry.js";
-import { SlotLoader } from "../loaders/slot-loader.js";
-import { SlotRegistry } from "../registries/slot-registry.js";
-import { getPathManager } from "../fs/path-manager.js";
-import { createAgentFs } from "../sandbox/fs-bridge.js";
-import { AgentLedger } from "../session/agent-ledger.js";
+  AgentJson,
+  AgentTreeAPI,
+  BlackboardAPI,
+  Event,
+  EventBusAPI,
+  SelfEvent,
+} from "../core/types";
+import type { FSWatcherAPI, WatchRegistration } from "../fs/types";
+import { Hook } from "../hooks/types";
+import { EventBus } from "./event-bus";
+import { EventQueue } from "./event-queue";
+import { AGENT_DEFAULTS } from "../defaults/agent-json";
+import { deepMerge } from "../utils/deep-merge";
+import { readFile } from "node:fs/promises";
+import { ToolRegistry } from "../kits/tool-registry";
+import { SlotRegistry } from "../kits/slot-registry";
+import { PluginRegistry } from "../kits/plugin-registry";
+import { KitToolLoader } from "../kits/tool-loader";
+import { KitSlotLoader } from "../kits/slot-loader";
+import { KitPluginLoader } from "../kits/plugin-loader";
+import { createAgentFs } from "../fs/agent-fs";
+import { wrapAgentFsWithRecorder, type RecorderHooks } from "../fs/agent-fs-recorder";
+import { getPathManager } from "../fs/path-manager";
+import { getTerminalManager } from "../terminal/manager";
 
-export abstract class BaseAgent implements AgentInterface {
-  readonly id: string;
+export interface AgentInitConfig {
+  /** Agent path within session, e.g. "root/iori"; 也是 EventBus / Blackboard 的命名空间 key。 */
+  agentPath: string;
+  /** Filesystem root for this agent — typically `paths.session(sid).agent(path).root()`. */
+  agentDir: string;
+  /** Already-merged agent.json (deepMerge(base, overrides))；BaseAgent 自己不读盘。 */
+  agentJson: AgentJson;
+  /** Absolute game root resolved at agent build time (bug-20260522).
+   *  Optional — existing unit tests that build BaseAgent directly may omit it. */
+  sessionCwd?: string;
+  eventBus: EventBus;
+  blackboard: BlackboardAPI;
+  tree: AgentTreeAPI;
+  /** Optional FSWatcher singleton — when provided, enables agent.json hot-reload. */
+  fsWatcher?: FSWatcherAPI;
+  /** Optional file-activity recorder hooks supplied by Session. When present,
+   *  `agentContext.fs` is wrapped so every mutation (write/append/rename/delete)
+   *  appends to the per-session ledger and emits a `file-activity` bus event.
+   *  Tests that build BaseAgent directly without a Session can omit this — the
+   *  fs surface remains the bare `createAgentFs()` output, no recording. */
+  fileRecorder?: RecorderHooks;
+}
 
-  // Agent-specific config
+export abstract class BaseAgent {
+  readonly agentPath: string;
   protected agentJson: AgentJson;
   protected readonly agentDir: string;
 
-  // Self-owned components (unique per instance)
   readonly queue: EventQueue;
   protected abortController = new AbortController();
   protected shuttingDown = false;
 
-  // Shared singletons (passed in via config)
-  protected readonly teamBoard: TeamBoardAPI;
-  protected readonly agentTree: AgentTreeAPI;
+  protected readonly blackboard: BlackboardAPI;
+  protected readonly tree: AgentTreeAPI;
   protected readonly eventBus: EventBus;
   protected readonly fsWatcher?: FSWatcherAPI;
-  /** Back-pointer to the SessionRuntime that owns this agent. P2+. */
-  protected readonly sessionRuntime?: import("./session-runtime.js").SessionRuntimeAPI;
 
-  /** Agent-bound EventBus facade exposed to tools, plugins and scheduler. */
+  private agentJsonWatchReg: WatchRegistration | null = null;
+
+  /** Agent-bound EventBus —— emitterId 自动塞 agentPath，省得 caller 每次都填。 */
   readonly boundEventBus: EventBusAPI;
-  /** Agent-bound TeamBoard facade — watch callbacks auto-inherit agent scope. */
-  readonly boundTeamBoard: TeamBoardAPI;
-
-  /** Stable AgentContext shared across loaders, plugins, slots and external callers. */
   readonly agentContext: AgentContext;
 
-  // Loaders (stateless — only hold kind + logContext + generation counter)
-  protected readonly pluginLoader: PluginLoader;
-  protected readonly toolLoader: ToolLoader;
-  protected readonly slotLoader: SlotLoader;
-
-  // Registries (the single source of truth for loaded capabilities)
-  protected readonly pluginRegistry: PluginRegistry;
+  // ─── kits subsystem（B1.1-B1.9 完整接通；reload-coordinator 见 B1.10）────────
+  protected readonly toolLoader: KitToolLoader;
+  protected readonly slotLoader: KitSlotLoader;
+  protected readonly pluginLoader: KitPluginLoader;
   protected readonly toolRegistry: ToolRegistry;
   protected readonly slotRegistry: SlotRegistry;
-
-  readonly ledger: AgentLedger;
-
-  protected capabilitiesInitialized = false;
-  private agentJsonWatchReg: WatchRegistration | null = null;
-  private overridesWatchReg: WatchRegistration | null = null;
-
-  /** Set by Scheduler to enable proactive capability reload after tool batches. */
-  capabilityFlush?: () => Promise<boolean>;
+  protected readonly pluginRegistry: PluginRegistry;
 
   constructor(config: AgentInitConfig) {
-    this.id = config.id;
+    this.agentPath = config.agentPath;
     this.agentDir = config.agentDir;
     this.agentJson = config.agentJson;
-
-    // Shared singletons
-    this.teamBoard = config.teamBoard;
-    this.agentTree = config.agentTree;
+    this.blackboard = config.blackboard;
+    this.tree = config.tree;
     this.eventBus = config.eventBus;
     this.fsWatcher = config.fsWatcher;
-    this.sessionRuntime = config.sessionRuntime;
 
-    // Self-owned components
     this.queue = new EventQueue();
+    this.eventBus.register(this.agentPath, this.queue);
 
-    // Register this agent's queue with the event bus
-    this.eventBus.register(this.id, this.queue);
-
-    // Bound facade:
-    //   publish(event) — observers only, no queue routing.
-    //   emit(event)    — observers + route via event.to, broadcast skips self.
-    const agentId = this.id;
+    const me = this.agentPath;
     const bus = this.eventBus;
     this.boundEventBus = {
-      publish: (event: Event, emitterId?: string) => bus.publish(event, emitterId ?? agentId),
-      emit: (event: Event, emitterId?: string) => bus.emit(event, emitterId ?? agentId),
-      emitToSelf: (event: SelfEvent) => bus.emit({ ...event, to: agentId }, agentId),
+      publish: (event: Event, emitterId?: string) => bus.publish(event, emitterId ?? me),
+      emit: (event: Event, emitterId?: string) => bus.emit(event, emitterId ?? me),
+      emitToSelf: (event: SelfEvent) => bus.emit({ ...event, to: me } as Event, me),
       hook: (type, payload) => {
-        const event = createHookEvent(type, payload, `agent:${agentId}`);
-        bus.publish(event, agentId);
+        const event: Event = { source: `agent:${me}`, type, payload, ts: Date.now() };
+        bus.publish(event, me);
         return event;
       },
-      observe: (handler: (event: Event, emitterId?: string) => void) =>
-        bus.observe(bindAgentScope(agentId, handler)),
-      observeAgent: (targetId: string, handler: (event: Event) => void) =>
-        bus.observeAgent(targetId, bindAgentScope(agentId, handler)),
+      observe: (handler) => bus.observe(handler),
+      observeAgent: (targetId, handler) => bus.observeAgent(targetId, handler),
     };
 
-    const board = this.teamBoard;
-    this.boundTeamBoard = {
-      set: (aid, key, val, opts) => board.set(aid, key, val, opts),
-      get: (aid, key) => board.get(aid, key),
-      remove: (aid, key) => board.remove(aid, key),
-      removeAll: (aid) => board.removeAll(aid),
-      removeByPrefix: (prefix) => board.removeByPrefix(prefix),
-      getAll: (aid) => board.getAll(aid),
-      agentIds: () => board.agentIds(),
-      watch: (aid, key, cb) => board.watch(aid, key, bindAgentScope(agentId, cb)),
-      loadFromDisk: () => board.loadFromDisk(),
-      registerFSWatcher: (w) => board.registerFSWatcher(w),
-    };
-
-    // Loaders — stateless, only need logContext
-    this.pluginLoader = new PluginLoader();
-    this.pluginLoader.setLogContext(this.id);
-    this.toolLoader = new ToolLoader();
-    this.toolLoader.setLogContext(this.id);
-    this.slotLoader = new SlotLoader();
-    this.slotLoader.setLogContext(this.id);
-
-    // Registries
-    this.pluginRegistry = new PluginRegistry();
-    this.pluginRegistry.setLogContext(this.id);
+    // Kit loaders + registries —— 与 ref base-agent.ts L130-141 等价：per-agent
+    // 各自一套（loader 是 stateless 类，registry 持 static + dynamic 双 Map）。
+    this.toolLoader = new KitToolLoader();
+    this.slotLoader = new KitSlotLoader();
+    this.pluginLoader = new KitPluginLoader();
     this.toolRegistry = new ToolRegistry();
     this.slotRegistry = new SlotRegistry();
+    this.pluginRegistry = new PluginRegistry();
 
-    // Per-agent event ledger (one AgentLedger per BaseAgent — owned for the
-    // agent's full lifetime; "Session" at the conversation level is one layer
-    // up, in SessionRuntime). The session id (when present) namespaces the
-    // ledger path so two sessions hosting the same agent kind don't write to
-    // the same shards.
-    const sessionId = this.sessionRuntime?.meta.id ?? null;
-    this.ledger = new AgentLedger(this.id, this.boundEventBus, this.fsWatcher, sessionId);
-
-    // Base agentContext — subclasses patch specific fields after super()
     const self = this;
+    const pathManager = getPathManager();
+    const baseAgentFs = createAgentFs(
+      pathManager,
+      this.blackboard,
+      this.agentPath,
+      this.agentDir,
+      () => config.sessionCwd ?? this.agentJson.defaultDir,
+    );
+    const agentFs = config.fileRecorder
+      ? wrapAgentFsWithRecorder(baseAgentFs, this.agentPath, config.fileRecorder)
+      : baseAgentFs;
     this.agentContext = {
-      agentId: this.id,
+      agentPath: this.agentPath,
       agentDir: this.agentDir,
+      cwd: config.sessionCwd ?? config.agentDir,
       get signal() { return self.abortController.signal; },
       eventBus: this.boundEventBus,
-      teamBoard: this.boundTeamBoard,
-      pathManager: getPathManager(),
-      fs: createAgentFs(getPathManager(), this.teamBoard, this.id),
-      getAgentJson: () => this.agentJson,
-      tree: config.agentTree,
+      blackboard: this.blackboard,
+      tree: this.tree,
       hook: Hook,
-      ledger: this.ledger,
-      session: this.sessionRuntime,
-      slots: this.slotRegistry,
+      getAgentJson: () => this.agentJson,
       tools: this.toolRegistry,
+      slots: this.slotRegistry,
       plugins: this.pluginRegistry,
+      fs: agentFs,
+      pathManager,
+      terminal: getTerminalManager(),
     };
 
-    // SlotLoader needs agentContext as its SlotContext
+    // 与 ref base-agent.ts L165-167 等价：
+    //   - slotLoader 需要 ctx 在 createInstance 时拿到（plumb 一次）
+    //   - pluginRegistry 需要 ctx 在 replaceStatic 时决定要不要 start
     this.slotLoader.setSlotContext(this.agentContext);
     this.pluginRegistry.setContext(this.agentContext);
   }
 
-  /** Shared agent entrypoint: installs the root logging context. */
-  async run(signal: AbortSignal): Promise<void> {
-    await this.withAgentScope(() => this.runMain(signal));
-  }
+  // ─── Kit lifecycle ────────────────────────────────────────────────────────
 
-  /** Subclasses implement their actual main loop here. */
-  protected abstract runMain(signal: AbortSignal): Promise<void>;
+  /** 顺序：plugins 先（可能动态 register tool/slot），tools 次（dynamic plugin
+   *  registered 的 tool 已落到 tools registry），slots 最后（slot 内可能读
+   *  toolRegistry / pluginRegistry 状态）。与 ref BaseAgent.initCapabilities 一致。 */
+  private static readonly KIT_KINDS = ["plugins", "tools", "slots"] as const;
 
-  /** Run code under this agent's scope without a turn number. */
-  protected withAgentScope<T>(fn: () => T): T {
-    return runWithAgentScope(this.id, fn);
-  }
-
-  /** Run code under this agent's scope with a specific turn number. */
-  protected withAgentTurn<T>(turn: number, fn: () => T): T {
-    return runWithAgentTurn(this.id, turn, fn);
-  }
-
-  /**
-   * Initialize capabilities: load all capability modules from disk.
-   * FSWatcher-based hot-reload is managed by AgentReloadCoordinator
-   * at the Scheduler level.
-   */
-  async initCapabilities(): Promise<void> {
-    await this.ledger.ensureActive();
-    await this.reloadCapabilities();
-    this.capabilitiesInitialized = true;
-  }
-
-  private static readonly CAPABILITY_KINDS = ["plugins", "tools", "slots"] as const;
-
-  /** Reload a specific capability kind, or all if omitted. */
-  async reloadCapabilityKind(kind?: "tools" | "slots" | "plugins"): Promise<void> {
-    const kinds = kind ? [kind] : BaseAgent.CAPABILITY_KINDS;
-    for (const k of kinds) {
-      switch (k) {
-        case "plugins": {
-          const plugins = await this.pluginLoader.load(this.agentContext);
-          this.pluginRegistry.replaceStatic(plugins);
-          console.log(`plugins reloaded: ${plugins.size} total`);
-          break;
-        }
-        case "tools": {
-          const tools = await this.toolLoader.load(this.agentContext);
-          this.toolRegistry.replaceStatic(tools);
-          console.log(`tools reloaded: ${tools.size} total`);
-          break;
-        }
-        case "slots": {
-          const slots = await this.slotLoader.load(this.agentContext);
-          this.slotRegistry.replaceStatic(slots);
-          console.log(`slots reloaded: ${slots.size} total`);
-          break;
-        }
+  /** Per-kind reload. Loader 是 stateless 类，扫到的 instance 通过 registry
+   *  `replaceStatic` 做 ref-equality diff —— 未变文件 instance 复用，registry
+   *  side-effect 只对真变化触发（plugin start/stop 等）。 */
+  async reloadKitKind(kind: "tools" | "slots" | "plugins"): Promise<void> {
+    switch (kind) {
+      case "plugins": {
+        const plugins = await this.pluginLoader.load(this.agentContext);
+        await this.pluginRegistry.replaceStatic(plugins);
+        break;
+      }
+      case "tools": {
+        const tools = await this.toolLoader.load(this.agentContext);
+        this.toolRegistry.replaceStatic(tools);
+        break;
+      }
+      case "slots": {
+        const slots = await this.slotLoader.load(this.agentContext);
+        this.slotRegistry.replaceStatic(slots);
+        break;
       }
     }
   }
 
-  /** Reload all capabilities (tools + slots + plugins) from disk. */
-  protected async reloadCapabilities(): Promise<void> {
-    await this.reloadCapabilityKind();
+  /** Load all kit kinds from disk. Called by Scheduler.attachAgent so that
+   *  registry 已就位之后才轮到 runAgent 跑第一个 turn。Idempotent —— 重复调
+   *  通过 loader._inflight + _moduleCache 自动去重。 */
+  async initKits(): Promise<void> {
+    for (const k of BaseAgent.KIT_KINDS) {
+      await this.reloadKitKind(k);
+    }
   }
 
-  /** Stop the agent loop (abort signal) */
+  /** Subclass entry point. Caller (Scheduler) 持锁调用，不需要 BaseAgent 自身排队。 */
+  abstract run(signal: AbortSignal): Promise<void>;
+
+  /** Abort current iteration; shutdown() 才是完整释放。 */
   stop(): void {
     this.abortController.abort();
   }
 
-  /** Full shutdown: stop loop, close sources, unregister from eventBus */
+  /** Full shutdown：abort + 注销 queue + 清空 registries。FSWatcher 反注册延后到
+   *  reload-coordinator（B1.8）接管时再做。 */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     this.abortController.abort();
     this.agentJsonWatchReg?.dispose();
     this.agentJsonWatchReg = null;
-    this.overridesWatchReg?.dispose();
-    this.overridesWatchReg = null;
-    this.fsWatcher?.unregisterOwner(this.id);
-    this.eventBus.unregister(this.id);
+    if (this.fsWatcher) this.fsWatcher.unregisterOwner(this.agentPath);
+    this.eventBus.unregister(this.agentPath);
     this.toolRegistry.clear();
     this.slotRegistry.clear();
     this.pluginRegistry.clear();
-    this.ledger.destroy();
   }
 
-  /** Load agent config: deepMerge(agent.json, agent-overrides.json). */
-  static async loadConfig(agentId: string): Promise<AgentJson> {
-    const agent = getPathManager().agent(agentId);
-    let base: Record<string, unknown> = {};
-    try { base = JSON.parse(await readFile(agent.config(), "utf-8")); } catch {}
-    let overrides: Record<string, unknown> = {};
-    try { overrides = JSON.parse(await readFile(agent.configOverrides(), "utf-8")); } catch {}
-    return deepMerge(base, overrides) as AgentJson;
-  }
-
-  /** Reload config from disk into in-memory agentJson. */
-  protected async reloadConfig(): Promise<void> {
-    this.agentJson = await BaseAgent.loadConfig(this.id);
-  }
-
-  /**
-   * Register FSWatcher-backed watches on agent.json and agent-overrides.json.
-   * Either file changing triggers a full reload via reloadConfig().
-   * Updates only the in-memory agentJson config — capability reloads are
-   * driven by the AgentReloadCoordinator at the Scheduler level.
-   * Enable/disable changes take effect immediately via runtime conditions.
-   */
+  /** Register FSWatcher-backed watch on agent.json. Either file changing triggers
+   *  a full reload via reloadAgentJson(). Call from subclass constructor. */
   protected watchAgentJson(): void {
     if (this.agentJsonWatchReg || !this.fsWatcher) return;
-    const agentLayer = getPathManager().agent(this.id);
+    const agentJsonPath = `${this.agentDir}/agent.json`;
     const reload = () => {
-      this.reloadConfig().catch((err) => {
-        console.warn(`agent config reload ignored: ${err?.message ?? err}`);
+      this.reloadAgentJson().catch((err) => {
+        process.stderr.write(`[base-agent] agent.json reload failed for '${this.agentPath}': ${err?.message ?? err}\n`);
       });
     };
-    this.agentJsonWatchReg = this.fsWatcher.watchFile(agentLayer.config(),          reload, { ownerId: this.id });
-    this.overridesWatchReg = this.fsWatcher.watchFile(agentLayer.configOverrides(), reload, { ownerId: this.id });
+    this.agentJsonWatchReg = this.fsWatcher.watchFile(agentJsonPath, reload, { ownerId: this.agentPath });
   }
 
-  /** Complete cleanup: shutdown + clear teamBoard data */
-  async free(): Promise<void> {
-    this.eventBus.publish({
-      source: `agent:${this.id}`,
-      type: "agent_freed",
-      payload: { agentId: this.id },
-      ts: Date.now(),
-    }, this.id);
-
-    await this.shutdown();
-    this.teamBoard.removeByPrefix(`${this.id}:`);
-    this.teamBoard.removeAll(this.id);
-    console.log("free() complete — teamBoard cleared");
+  /** Reload agent.json from disk and update in-memory snapshot. */
+  protected async reloadAgentJson(): Promise<void> {
+    let raw: Record<string, unknown> = {};
+    try {
+      const txt = await readFile(`${this.agentDir}/agent.json`, "utf-8");
+      raw = JSON.parse(txt) as Record<string, unknown>;
+    } catch {
+      // Missing or corrupt — fall back to defaults silently
+    }
+    this.setAgentJson(deepMerge(
+      AGENT_DEFAULTS as unknown as Record<string, unknown>,
+      raw,
+    ) as unknown as AgentJson);
   }
 
-  /** Get the abort signal for this agent */
   get signal(): AbortSignal {
     return this.abortController.signal;
   }
 
-  /** Get coalesce delay from config */
   protected get coalesceMs(): number {
     return this.agentJson.coalesceMs ?? AGENT_DEFAULTS.coalesceMs;
+  }
+
+  /** Replace in-memory agent.json（caller 在 reload 时调用）。 */
+  setAgentJson(next: AgentJson): void {
+    this.agentJson = next;
   }
 }

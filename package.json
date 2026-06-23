@@ -1,92 +1,42 @@
 {
   "name": "forgeax-cli",
-  "version": "1.3.0",
+  "version": "0.1.0",
+  "private": true,
   "type": "module",
-  "description": "ForgeaX agent runtime kernel \u2014 multi-agent orchestration runtime hosted in-process by @forgeax/server.",
+  "description": "ForgeaX reusable orchestration layer: R2 compose/resolve/toWire/checkTool, session/scheduler/tree, soul (digital life), kits, llm, kernel adaptors, ledger, HTTP api routers, ws, builtin kits/personas.",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./brand": "./src/brand/index.ts",
+    "./cli-providers": "./src/cli-providers/index.ts",
+    "./*": ["./src/*.ts", "./src/*/index.ts"]
+  },
   "bin": {
-    "forgeax": "./bin/forgeax"
-  },
-  "engines": {
-    "node": ">=22"
-  },
-  "imports": {
-    "#src/*": "./src/*",
-    "#capabilities/*": "./capabilities/*"
+    "forgeax-pack": "./bin/forgeax-pack",
+    "forge": "./bin/forge"
   },
   "scripts": {
-    "start": "tsx src/main.ts",
-    "dev": "tsx watch --ignore team --ignore debug.log src/main.ts",
-    "ctl": "tsx src/ctl-command/gateway-ctl/index.ts",
-    "wechat": "tsx src/ctl-command/wechat.ts",
-    "ink-renderer": "tsx src/ctl-command/ink-renderer.ts",
-    "engine-channel": "tsx src/ctl-command/engine-channel.ts",
-    "ui:dev": "cd ui && pnpm dev",
-    "ui:build": "cd ui && pnpm build"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src"
   },
   "dependencies": {
-    "@alcalzone/ansi-tokenize": "^0.3.0",
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@forgeax/agent-host": "workspace:*",
+    "@forgeax/agent-runtime": "workspace:*",
+    "@forgeax/types": "workspace:*",
+    "@ag-ui/core": "^0.0.53",
     "@google/genai": "^1.0.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "@types/lodash-es": "^4.17.12",
-    "@types/react": "^19.2.14",
-    "@types/react-reconciler": "^0.33.0",
-    "@types/stack-utils": "^2.0.3",
-    "ansi-styles": "^6.2.3",
-    "auto-bind": "^5.0.1",
-    "better-sqlite3": "^12.8.0",
-    "bidi-js": "^1.0.3",
-    "chalk": "^5.6.2",
-    "cli-boxes": "^4.0.1",
-    "cli-cursor": "^5.0.0",
-    "code-excerpt": "^4.0.0",
-    "discord.js": "^14.26.2",
-    "emoji-regex": "^10.6.0",
-    "fast-glob": "^3.3.3",
-    "get-east-asian-width": "^1.5.0",
-    "indent-string": "^5.0.0",
-    "lodash-es": "^4.18.1",
-    "marked": "^17.0.5",
-    "mime-types": "^3.0.2",
-    "qrcode-terminal": "^0.12.0",
-    "react": "^19.2.4",
-    "react-reconciler": "^0.31.0",
-    "restore-cursor": "^5.1.0",
-    "semver": "^7.7.4",
+    "chokidar": "^4.0.0",
+    "hono": "^4.6.0",
+    "minimatch": "^10.2.5",
     "sharp": "^0.34.5",
-    "signal-exit": "^4.1.0",
-    "slice-ansi": "^8.0.0",
-    "stack-utils": "^2.0.6",
-    "string-width": "^8.2.0",
-    "strip-ansi": "^7.2.0",
-    "supports-hyperlinks": "^4.4.0",
-    "ts-lsp-client": "1.0.3",
-    "type-fest": "^5.5.0",
-    "typescript-language-server": "^5.1.3",
-    "usehooks-ts": "^3.1.1",
-    "widest-line": "^6.0.0",
-    "wrap-ansi": "^10.0.0",
-    "ws": "^8.19.0",
-    "yaml": "^2.8.2"
+    "yaml": "^2.8.2",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/mime-types": "^3.0.1",
-    "@types/node": "^22.0.0",
-    "@types/qrcode-terminal": "^0.12.2",
-    "@types/semver": "^7.7.1",
-    "@types/ws": "^8.18.1",
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
-  },
-  "pnpm": {
-    "_comment": "pnpm 11+ ignores this field; canonical config now lives in pnpm-workspace.yaml. Kept for pnpm 9/10 back-compat only.",
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "protobufjs",
-      "sharp",
-      "@google/genai"
-    ]
+    "@types/bun": "^1.3.13",
+    "@types/node": "^20.0.0",
+    "dependency-cruiser": "^17.4.3",
+    "typescript": "^5.6.3"
   }
 }
