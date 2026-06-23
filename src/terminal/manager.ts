@@ -855,7 +855,7 @@ interface WrapOpts {
  *  - cd side-effects persist in the long-lived shell (CURRENT_DIR stays in sync)
  *  - a unique marker is echoed to bash stdout so Node knows when the command finished
  *
- *  Uses `eval` with single-quote wrapping (à la the reference agent CLI) instead of `bash -c`.
+ *  Uses `eval` with single-quote wrapping (à la Claude Code) instead of `bash -c`.
  *  `bash -c` forks a child process, so `cd` effects are lost when it exits.
  *  `eval` runs in the current shell, preserving cwd changes.
  *

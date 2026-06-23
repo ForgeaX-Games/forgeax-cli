@@ -16,7 +16,7 @@ ForgeaX is **not locked to one model vendor**. The kernel drives Forge through a
 **driver** layer (the `cli-*` providers), so you can run the whole studio on the coding-agent
 **subscription you already pay for** — or on a plain API key:
 
-- **[the reference agent CLI](https://claude.com/product/claude-code)** — run on your **Claude Pro / Max**
+- **[Claude Code](https://claude.com/product/claude-code)** — run on your **Claude Pro / Max**
   plan, or an **Anthropic API key**.
 - **[OpenAI Codex](https://developers.openai.com/codex)** — sign in with your
   **ChatGPT Plus / Pro** plan, or an **OpenAI API key**.

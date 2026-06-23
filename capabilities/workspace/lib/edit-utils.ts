@@ -1,6 +1,6 @@
 /**
  * Core string matching and replacement utilities for file editing tools.
- * Ported from the reference agent CLI's FileEditTool/utils.ts — provides safe replacement
+ * Ported from Claude Code's FileEditTool/utils.ts — provides safe replacement
  * (immune to JS `$` special patterns), quote normalization fallback, and
  * trailing-whitespace stripping.
  */

@@ -174,7 +174,7 @@ function isEarlyExit(r: CompactionContext | CompactionResult): r is CompactionRe
 //  partialCompact — incremental segment summarization
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Key design decisions (learned from the reference agent CLI + our own truncation incident):
+// Key design decisions (learned from Claude Code + our own truncation incident):
 //
 // 1. Sections 7-9 (task state) are NON-NEGOTIABLE — they MUST appear even if
 //    earlier sections need to be shortened. This is the #1 cause of post-compact

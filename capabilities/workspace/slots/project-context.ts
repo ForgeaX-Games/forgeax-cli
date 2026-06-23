@@ -10,7 +10,7 @@ const MAX_TREE_ENTRIES = 50;
 const HEAD_LINES = 20;
 const TAIL_LINES = 10;
 
-// AGENTS.md first: AgenTeam's own naming takes priority over CLAUDE.md (the reference agent CLI convention).
+// AGENTS.md first: AgenTeam's own naming takes priority over CLAUDE.md (Claude Code convention).
 // In each directory, only the first found is used.
 const DOC_NAMES = ["AGENTS.md", "CLAUDE.md"] as const;
 
