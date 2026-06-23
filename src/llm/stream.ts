@@ -63,11 +63,6 @@ class ResponseAccumulator {
         });
         break;
       }
-      case "tool_call_delta":
-        // Incremental arg deltas are forwarded to the UI for live rendering;
-        // the accumulator ignores them because the final tool_call event
-        // carries the complete arguments string.
-        break;
       case "provider_sidecar":
         this.providerSidecarData = mergeProviderSidecarData(
           this.providerSidecarData,

@@ -4,6 +4,7 @@ import { GoogleGenAI } from "@google/genai";
 import { registerProvider, downgradeEffort, type ProviderFactoryOpts } from "./provider.js";
 import type { LLMMessage, LLMProvider } from "./types.js";
 import { annotateLLMError } from "./errors.js";
+import { withModelFeedback } from "../core/logger.js";
 import {
   collectToolResponsesToGemini,
   toolDefsToGemini,
@@ -13,8 +14,8 @@ import {
   streamGeminiResponse,
 } from "./gemini-shared.js";
 import { extractTextContent } from "./thinking.js";
-import { blocksToText } from "./provider-utils.js";
-import { partitionSystemBlocks, foldDynamicReminders } from "./provider-utils.js";
+import { blocksToText } from "../capability/slot/prompt-pipeline.js";
+import { partitionSystemBlocks, embedDynamicInLastUserContent } from "./provider-utils.js";
 
 async function messagesToGemini2(messages: LLMMessage[]): Promise<any[]> {
   const contents: any[] = [];
@@ -81,8 +82,13 @@ function createGemini2Provider(opts: ProviderFactoryOpts): LLMProvider {
         // keeping systemInstruction stable AND parking per-turn dynamic in its
         // own trailing user turn means every prior turn's bytes (history, tool
         // responses) stay byte-stable across calls and remain cache-eligible.
-        const { stable } = partitionSystemBlocks(system ?? []);
-        const enrichedMessages = foldDynamicReminders(messages);
+        //
+        // When the tail is a functionResponse (mapped from `role:"tool"`) or
+        // an assistant with a pending functionCall, the reminder is SKIPPED
+        // to keep the tool-loop turn intact. See
+        // `embedDynamicInLastUserContent` for the full rationale.
+        const { stable, dynamic } = partitionSystemBlocks(system ?? []);
+        const enrichedMessages = embedDynamicInLastUserContent(messages, dynamic);
 
         const contents = await messagesToGemini2(enrichedMessages);
         const geminiTools = toolDefsToGemini(tools);
@@ -108,10 +114,10 @@ function createGemini2Provider(opts: ProviderFactoryOpts): LLMProvider {
         yield* streamGeminiResponse(response, signal);
       } catch (err) {
         annotateLLMError(err, { provider: "gemini", model });
-        console.error(
+        withModelFeedback(() => console.error(
           "[gemini] stream error",
           JSON.stringify({ model, error: describeGeminiError(err) }),
-        );
+        ));
         throw err;
       }
     },

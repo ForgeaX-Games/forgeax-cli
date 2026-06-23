@@ -1,26 +1,30 @@
-/** FSWatcher — on-demand inotify slot manager (no implicit root watch).
+/** @desc FSWatcher — on-demand inotify slot manager (no implicit root watch).
  *
- *  Ported from agenteam-os-ref/src/fs/watcher.ts.
+ * API: caller provides an absolute path; watchFile / watchDir each lease an
+ * inotify slot keyed by the actual fs.watch target + recursiveness. Slots are
+ * reference-counted; when the last subscriber disposes, the underlying
+ * fs.watch handle is closed.
  *
- *  API: caller provides an absolute path; watchFile / watchDir each lease an
- *  inotify slot keyed by the actual fs.watch target + recursiveness. Slots are
- *  reference-counted; when the last subscriber disposes, the underlying
- *  fs.watch handle is closed.
+ * No global "watch the entire instance root" — paths nobody asks about never
+ * enter the kernel inotify table.
  *
- *  Atomic-rename safety: watchFile internally watches the parent directory
- *  (non-recursive) and filters events by basename. fs.watch on a single file
- *  loses its association after editors do create-temp + rename. */
+ * Atomic-rename safety: watchFile internally watches the parent directory
+ * (non-recursive) and filters events by basename. fs.watch on a single file
+ * loses its association after editors do create-temp + rename.
+ */
 
 import { watch, type FSWatcher as NodeFSWatcher } from "node:fs";
 import { dirname, basename } from "node:path";
-import type { FSWatcherAPI, WatchRegistration, FSChangeEvent, FSHandler } from "./types";
+import type { FSWatcherAPI, WatchRegistration, FSChangeEvent, FSHandler } from "../core/types.js";
 
 let _instance: FSWatcher | null = null;
 
+/** Get the global FSWatcher singleton (null if not yet created). */
 export function getFSWatcher(): FSWatcher | null {
   return _instance;
 }
 
+/** Create (or return existing) global FSWatcher singleton. */
 export function createOrGetFSWatcher(): FSWatcher {
   if (!_instance) _instance = new FSWatcher();
   return _instance;
@@ -32,15 +36,16 @@ let nextId = 0;
 interface Subscriber {
   id: string;
   ownerId?: string;
+  /** Filter raw filename (relative to slot watch path). Return false to skip. */
   filter?: (filename: string) => boolean;
   handler: FSHandler;
   debounceMs: number;
 }
 
 interface Slot {
-  watchPath: string;
+  watchPath: string;     // absolute path actually passed to fs.watch
   recursive: boolean;
-  handle: NodeFSWatcher | null;
+  handle: NodeFSWatcher | null;  // null = degraded (path missing); subscriber still leases for refcount
   refCount: number;
   subscribers: Map<string, Subscriber>;
 }
@@ -51,18 +56,15 @@ function slotKey(watchPath: string, recursive: boolean): string {
 
 export class FSWatcher implements FSWatcherAPI {
   private slots = new Map<string, Slot>();
-  private regIndex = new Map<string, string>();
-  private owners = new Map<string, Set<string>>();
+  private regIndex = new Map<string, string>();       // regId -> slot key
+  private owners = new Map<string, Set<string>>();    // ownerId -> regIds
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  watchFile(
-    absPath: string,
-    handler: () => void,
-    opts?: { debounceMs?: number; ownerId?: string },
-  ): WatchRegistration {
+  watchFile(absPath: string, handler: () => void,
+            opts?: { debounceMs?: number; ownerId?: string }): WatchRegistration {
     const parent = dirname(absPath);
     const base = basename(absPath);
-    return this._subscribe(parent, false, {
+    return this._subscribe(parent, /*recursive*/ false, {
       ownerId: opts?.ownerId,
       filter: (filename) => filename === base,
       handler: () => handler(),
@@ -70,13 +72,10 @@ export class FSWatcher implements FSWatcherAPI {
     });
   }
 
-  watchDir(
-    absPath: string,
-    handler: FSHandler,
-    opts?: { debounceMs?: number; ownerId?: string; pattern?: RegExp },
-  ): WatchRegistration {
+  watchDir(absPath: string, handler: FSHandler,
+           opts?: { debounceMs?: number; ownerId?: string; pattern?: RegExp }): WatchRegistration {
     const pattern = opts?.pattern;
-    return this._subscribe(absPath, true, {
+    return this._subscribe(absPath, /*recursive*/ true, {
       ownerId: opts?.ownerId,
       filter: pattern ? (filename) => pattern.test(filename.split(/[\\/]/).join("/")) : undefined,
       handler,
@@ -102,7 +101,7 @@ export class FSWatcher implements FSWatcherAPI {
     if (_instance === this) _instance = null;
   }
 
-  // ─── Internal ─────────────────────────────────────────────────────────────
+  // ─── Internal ─────────────────────────────────────────────────────────
 
   private _subscribe(watchPath: string, recursive: boolean, sub: Omit<Subscriber, "id">): WatchRegistration {
     const key = slotKey(watchPath, recursive);
@@ -133,14 +132,23 @@ export class FSWatcher implements FSWatcherAPI {
       });
       handle.on("error", (err: NodeJS.ErrnoException) => {
         if (err.code === "EACCES" || err.code === "EPERM" || err.code === "ENOENT") return;
-        process.stderr.write(`[FSWatcher] watch error for ${watchPath}: ${err.message}\n`);
+        console.warn(`[FSWatcher] watch error for ${watchPath}: ${err.message}`);
       });
     } catch (err) {
+      // Path doesn't exist yet — register a degraded slot so disposal still
+      // works and re-subscribes don't hard-crash. Caller is responsible for
+      // ensuring the path exists if they want events.
       const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[FSWatcher] watch failed for ${watchPath}: ${msg}\n`);
+      console.warn(`[FSWatcher] watch failed for ${watchPath}: ${msg}`);
       handle = null;
     }
-    const slot: Slot = { watchPath, recursive, handle, refCount: 0, subscribers: new Map() };
+    const slot: Slot = {
+      watchPath,
+      recursive,
+      handle,
+      refCount: 0,
+      subscribers: new Map(),
+    };
     this.slots.set(key, slot);
     return slot;
   }

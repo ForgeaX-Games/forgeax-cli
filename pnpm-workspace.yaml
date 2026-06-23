@@ -1,0 +1,16 @@
+# pnpm v11+ requires non-auth settings to live here.
+# The `pnpm` field in package.json is no longer read by pnpm 11.
+#
+# `allowBuilds` (added in pnpm v10.26.0) replaces the v10 `onlyBuiltDependencies` array.
+# It is a map of package-name → bool. Builds for unlisted packages are blocked
+# (default `strictDepBuilds: true` makes the install fail with ERR_PNPM_IGNORED_BUILDS).
+#
+# When adding a new native dependency that needs a postinstall/build script,
+# add it here as `<name>: true`. start.sh prints the exact lines to paste on first
+# install failure, but committing the entry keeps fresh clones from breaking on
+# other machines.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  protobufjs: true
+  sharp: true

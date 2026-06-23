@@ -1,31 +1,49 @@
-/** system-snapshot —— pure functions for replaying & diffing system prompt state.
+/**
+ * system-snapshot.ts — Pure functions for replaying & diffing system prompt state.
  *
- *  与 agenteam ref 1:1（StoredEvent 类型来源换成 ledger/types 而不是本地副本）：
- *  - replaySystemSnapshot(events) → Map<blockName, SnapshotEntry>
- *  - diffSystemBlocks(prev, current) → SystemDelta | null
- *
- *  Zero I/O / zero side-effects，agent 层 / SessionManager / xml renderer 共享。
- *  支持三种历史 payload 格式：
- *    1) `{ changed: SystemBlock[], removed?: string[] }` —— 当前 delta 格式
- *    2) `{ blocks: SystemBlock[] }` —— v0.2 全量
- *    3) `{ content: string }` —— v0.1 legacy（写到 __legacy__ key） */
+ * Zero I/O, zero side-effects. Shared by:
+ *   - AgentLedger     (build snapshot from events.jsonl for diff)
+ *   - conscious-agent (runtime diff before emit)
+ *   - xml.ts          (render <system> block)
+ */
 
-import type { SystemBlock } from "../llm/types";
-import type { StoredEvent } from "../ledger/types";
+import type { SystemBlock } from "../llm/types.js";
+
+/** Local copy of StoredEvent (mirrors media-dir.ts; avoids reverse layering). */
+export interface StoredEvent {
+  type: string;
+  ts: number;
+  source?: string;
+  to?: string;
+  emitterId?: string;
+  payload?: Record<string, unknown>;
+  [key: string]: unknown;
+}
 
 export interface SnapshotEntry {
   text: string;
   priority: number;
-  /** Cache hint replayed from the source SystemBlock。`undefined` 当 dynamic 处理。 */
+  /** Cache hint replayed from the source SystemBlock. May be undefined for
+   *  legacy snapshots predating the cacheHint field — consumers should treat
+   *  undefined as "dynamic" (matches prompt-pipeline default). */
   cacheHint?: "stable" | "dynamic";
 }
 
+/**
+ * Replay all `hook:systemPrompt` delta events into a Map<blockName, SnapshotEntry>.
+ *
+ * Supports three payload formats (newest → oldest):
+ *   1. `{ changed: SystemBlock[], removed?: string[] }` — current delta format
+ *   2. `{ blocks: SystemBlock[] }` — COMPAT:v0.2 full-snapshot format
+ *   3. `{ content: string }`       — COMPAT:v0.1 legacy string format
+ */
 export function replaySystemSnapshot(events: readonly StoredEvent[]): Map<string, SnapshotEntry> {
   const map = new Map<string, SnapshotEntry>();
   let insertSeq = 0;
 
   for (const ev of events) {
     if (ev.type !== "hook:systemPrompt") continue;
+
     const p = ev.payload;
     if (!p) continue;
 
@@ -49,7 +67,7 @@ export function replaySystemSnapshot(events: readonly StoredEvent[]): Map<string
       continue;
     }
 
-    // COMPAT:v0.2 — full blocks array
+    // COMPAT:v0.2-systemPrompt-blocks — full blocks array (pre-delta format)
     const blocks = p.blocks;
     if (Array.isArray(blocks)) {
       map.clear();
@@ -66,7 +84,7 @@ export function replaySystemSnapshot(events: readonly StoredEvent[]): Map<string
       continue;
     }
 
-    // COMPAT:v0.1 — legacy string
+    // COMPAT:v0.1-systemPrompt-string — legacy string content
     const content = p.content;
     if (typeof content === "string") {
       map.clear();
@@ -82,8 +100,12 @@ export interface SystemDelta {
   removed: string[];
 }
 
-/** Diff `current` blocks 对照 `previous` snapshot；无变化返回 null。
- *  `previous` map 会被 mutate（caller 视为可弃）。 */
+/**
+ * Diff `current` blocks against a `previous` snapshot (typically from
+ * `replaySystemSnapshot`). Returns the delta, or `null` if nothing changed.
+ *
+ * The `previous` map may be mutated — callers should treat it as disposable.
+ */
 export function diffSystemBlocks(
   previous: Map<string, SnapshotEntry>,
   current: SystemBlock[],
@@ -93,12 +115,16 @@ export function diffSystemBlocks(
 
   for (const block of current) {
     currentNames.add(block.name);
-    if (previous.get(block.name)?.text !== block.text) changed.push(block);
+    if (previous.get(block.name)?.text !== block.text) {
+      changed.push(block);
+    }
   }
 
   const removed: string[] = [];
   for (const id of previous.keys()) {
-    if (!currentNames.has(id)) removed.push(id);
+    if (!currentNames.has(id)) {
+      removed.push(id);
+    }
   }
 
   return changed.length > 0 || removed.length > 0

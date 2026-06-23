@@ -4,6 +4,7 @@ import { GoogleGenAI } from "@google/genai";
 import { registerProvider, downgradeEffort, type ProviderFactoryOpts } from "./provider.js";
 import type { LLMMessage, LLMProvider, LLMToolCall, ProviderSidecarData, StreamEvent } from "./types.js";
 import { annotateLLMError } from "./errors.js";
+import { withModelFeedback } from "../core/logger.js";
 import {
   collectToolResponsesToGemini,
   toolDefsToGemini,
@@ -13,8 +14,8 @@ import {
   yieldGeminiUsage,
 } from "./gemini-shared.js";
 import { extractTextContent } from "./thinking.js";
-import { blocksToText } from "./provider-utils.js";
-import { partitionSystemBlocks, foldDynamicReminders } from "./provider-utils.js";
+import { blocksToText } from "../capability/slot/prompt-pipeline.js";
+import { partitionSystemBlocks, embedDynamicInLastUserContent } from "./provider-utils.js";
 
 interface GoogleToolCallSidecar {
   id: string;
@@ -265,8 +266,13 @@ function createGemini3Provider(opts: ProviderFactoryOpts): LLMProvider {
       try {
         // Partition system into stable (systemInstruction) + dynamic (appended
         // as a fresh trailing user message carrying a single system-reminder
-        const { stable } = partitionSystemBlocks(system ?? []);
-        const enrichedMessages = foldDynamicReminders(messages);
+        // block). See gemini2.ts for the cache-prefix rationale — same
+        // implicit context caching considerations apply on Gemini 3.x.
+        //
+        // Tool-loop tail (functionResponse / pending functionCall) ⇒ reminder
+        // skipped. See `embedDynamicInLastUserContent` for full rationale.
+        const { stable, dynamic } = partitionSystemBlocks(system ?? []);
+        const enrichedMessages = embedDynamicInLastUserContent(messages, dynamic);
 
         const contents = await messagesToGemini3(enrichedMessages);
         const geminiTools = toolDefsToGemini(tools);
@@ -288,10 +294,10 @@ function createGemini3Provider(opts: ProviderFactoryOpts): LLMProvider {
         yield* streamGemini3Response(response, signal);
       } catch (err) {
         annotateLLMError(err, { provider: "gemini", model });
-        console.error(
+        withModelFeedback(() => console.error(
           "[gemini] stream error",
           JSON.stringify({ model, error: describeGeminiError(err) }),
-        );
+        ));
         throw err;
       }
     },

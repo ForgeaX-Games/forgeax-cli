@@ -1,16 +1,5 @@
-/** model-routing —— 多模型 fallback 时的内存粘性 + 冷却。
- *
- *  与 agenteam ref 完全 1:1。
- *
- *  逻辑：
- *  - models 配成 ["A","B","C"] 时，最近一次 A 成功 → ttlMs 内继续优先 A；
- *  - A 触发 LLMFallback → 把 A 放入 cooldownUntilByModel，直到 cooldownMs 过期；
- *  - order(config) 输出加工后的候选顺序，给 provider registry 拿去顺序尝试；
- *  - configKey 带 agentId + models + routing，配置变化 hint 自动重置。
- *
- *  纯内存，per-agent 实例化（ConsciousAgent 持有），进程重启丢弃 hint。 */
-
-import type { ModelsConfig } from "../core/types";
+// @desc Per-agent in-memory model routing hints
+import type { ModelsConfig } from "./types.js";
 
 interface ModelRoutingHint {
   configKey: string;
@@ -45,7 +34,7 @@ export class ModelRoutingHints {
 
     const hint = this.ensureHint(config);
     const now = Date.now();
-    const available = models.filter((m) => (hint.cooldownUntilByModel[m] ?? 0) <= now);
+    const available = models.filter((model) => (hint.cooldownUntilByModel[model] ?? 0) <= now);
     const ordered = available.length > 0 ? available : models;
 
     if (
@@ -56,7 +45,7 @@ export class ModelRoutingHints {
     ) {
       return {
         ...config,
-        model: [hint.stickyModel, ...ordered.filter((m) => m !== hint.stickyModel)],
+        model: [hint.stickyModel, ...ordered.filter((model) => model !== hint.stickyModel)],
       };
     }
 

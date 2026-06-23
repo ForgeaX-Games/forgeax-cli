@@ -18,7 +18,7 @@ export interface SystemBlock {
 }
 
 export interface LLMMessage {
-  role: "user" | "assistant" | "tool" | "system";
+  role: "user" | "assistant" | "tool";
   /** Normalized content for provider consumption — always ContentPart[].
    *  Event/storage layer may keep raw strings; normalization happens when
    *  constructing LLMMessage (replay / bind / prepareInboundMessages). */
@@ -31,8 +31,6 @@ export interface LLMMessage {
   toolStatus?: "pending" | "completed" | "failed" | "synthetic" | "interrupted";
   toolCalls?: LLMToolCall[];
   providerSidecarData?: ProviderSidecarData;
-  /** Structured system blocks carried by role:"system" dynamic-reminder messages. */
-  systemBlocks?: SystemBlock[];
 }
 
 export interface LLMToolCall {
@@ -64,12 +62,6 @@ export type StreamEvent =
       name: string;
       arguments: string;
       providerSidecarData?: ProviderSidecarData;
-    }
-  | {
-      type: "tool_call_delta";
-      id: string;
-      name: string;
-      arguments_delta: string;
     }
   | { type: "provider_sidecar"; providerSidecarData: ProviderSidecarData }
   | { type: "usage"; inputTokens: number; outputTokens: number; model?: string };
@@ -114,10 +106,6 @@ export interface LLMProvider {
     options: MaterializeToolMessagesOptions,
   ): LLMMessage[];
 
-  /** Returns the tool_result LLMMessage. Synchronous — media hygiene is now
-   *  handled at the storage layer (event-blob.ts size-based externalize on
-   *  WAL write, media-storage.ts magic-byte mime sniff on file read), not at
-   *  this seam. */
   materializeToolResult?(
     toolCall: LLMToolCall,
     result: unknown,

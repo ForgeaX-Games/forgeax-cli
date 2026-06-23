@@ -1,21 +1,38 @@
-/** Lifecycle hook 常量与 payload 类型 —— 全部走 EventBus.publish 派发。
- *
- *  约定：
- *  - `hook:*` 前缀是「observer-only」事件命名习惯；block() / isBlocked() 不再是
- *    hook 专属 —— EventBus.publish 给每个事件都挂上了 block 通道。
- *  - `stream:*` 前缀是临时流式事件，**不**写 EventLedger（StreamLLM 是热路径，
- *    每 token 一次，落盘代价不可接受）。
- *
- *  ConsciousAgent 在 turn loop 关键点调 `boundEventBus.hook(Hook.TurnStart, ...)`
- *  —— `hook` 由 BaseAgent.boundEventBus 提供，自动带 `source: agent:<id>`；
- *  raw EventBus 不实现该方法（参考 ref core/event-bus.ts）。
- *  Hook handler 收到事件后可以 `event.block(reason)` 短路后续 observer / 路由，
- *  这就是确认对话框 / 内容审查 / ToolCall guard kit 共用的机制。 */
+/** Lifecycle hook constants and payload types — emitted through EventBus */
 
-import type { LLMMessage, LLMToolCall, StreamEvent, SystemBlock, ProviderSidecarData } from "../llm/types";
+import type { LLMMessage, LLMToolCall, StreamEvent, SystemBlock } from "../llm/types.js";
+import type { EventBase, EventHandoff, EventPayload } from "../core/types.js";
 
-/** Stream 事件前缀 —— 用 startsWith 判断时只看这个常量。 */
+/** Prefix for ephemeral stream events — not persisted to events.jsonl. */
 export const STREAM_PREFIX = "stream:" as const;
+
+// ─── Cancelable Hook Event ────────────────────────────────────────────────────
+//
+// All hook events carry block()/isBlocked() — analogous to DOM preventDefault().
+// Callers (e.g. tool-batch-runner) check isBlocked() after publish to decide
+// whether to proceed. Observers that don't call block() leave behavior unchanged.
+// Hook events are always published (observer-only), never routed to queues.
+
+export interface HookEvent extends EventBase {
+  to?: undefined;
+  handoff?: undefined;
+  block(reason?: string): void;
+  isBlocked(): boolean;
+  blockReason?: string;
+}
+
+export function createHookEvent(
+  type: string, payload: EventPayload, source: string,
+): HookEvent {
+  let blocked = false;
+  const event: HookEvent = {
+    source, type, payload, ts: Date.now(),
+    block(r?: string) { blocked = true; event.blockReason = r; },
+    isBlocked() { return blocked; },
+    blockReason: undefined,
+  };
+  return event;
+}
 
 export const Hook = {
   AssistantMessage: "hook:assistantMessage",
@@ -27,6 +44,7 @@ export const Hook = {
   SystemPrompt:     "hook:systemPrompt",
   LLMFallback:      "hook:llmFallback",
   LLMRetry:         "hook:llmRetry",
+  LedgerShardChange: "hook:ledgerShardChange",
 
   AgentAttach:      "hook:agentAttach",
   AgentDetach:      "hook:agentDetach",
@@ -36,7 +54,7 @@ export const Hook = {
 
 export type HookType = typeof Hook[keyof typeof Hook] | `hook:${string}` | `${typeof STREAM_PREFIX}${string}`;
 
-/** AgentContext 透传给 kit 的 hook 名常量表 —— kit 不直接 import Hook。 */
+/** Extensible hook constants table — passed via AgentContext so plugins don't need direct imports. */
 export type HookTable = typeof Hook & { readonly [k: string]: string };
 
 export interface HookPayloadMap {
@@ -46,7 +64,7 @@ export interface HookPayloadMap {
     turn: number;
     model?: string;
     usage?: { inputTokens: number; outputTokens: number };
-    providerSidecarData?: ProviderSidecarData;
+    providerSidecarData?: import("../llm/types.js").ProviderSidecarData;
   };
   [Hook.TurnStart]: {
     turn: number;
@@ -66,15 +84,6 @@ export interface HookPayloadMap {
     name: string;
     durationMs: number;
     error?: string;
-    /** Correlates to the originating tool.call (improves UI matching beyond
-     *  name+running; also keys the ledger record). */
-    callId?: string;
-    ok?: boolean;
-    /** Full tool result payload. Persisted to the per-agent ledger so forgeax
-     *  OWNS a faithful, replayable record of the turn (P0 of 历史归属/上下文所有权;
-     *  prerequisite for host-owned context). Kernel-neutral: every kernel
-     *  (claude-code / codex / forgeax-core) surfaces `tool.result.result`. */
-    result?: unknown;
   };
   [Hook.StreamLLM]: {
     chunk: StreamEvent;
