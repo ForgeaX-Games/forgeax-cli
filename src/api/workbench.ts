@@ -11,6 +11,7 @@ import { resolve, basename, join } from 'node:path';
 // consistent with the rest of the codebase.
 import { Glob } from 'bun';
 import { defaultProjectRoot } from './lib/safe-path';
+import { assetRoot } from '../lib/asset-root';
 import { friendlyPath } from './lib/friendly-path';
 import { getActiveGame, setActiveGame, clearActiveGameIf } from '../api/lib/active-game';
 import { findMarketplaceManifest } from './lib/marketplace-manifest';
@@ -54,7 +55,9 @@ export function isReelGame(gameDir: string): boolean {
 function resolveGameTemplate(projectRoot: string): string | null {
   const userOverride = resolve(projectRoot, '.forgeax/games/_template');
   if (existsSync(userOverride)) return userOverride;
-  const builtin = resolve(projectRoot, 'packages/engine/templates/game-default');
+  // Use assetRoot() to locate the builtin template across all platforms/modes
+  // (dev source tree, or packaged app). assetRoot() points to the 'packages' level.
+  const builtin = resolve(assetRoot(), '..', 'packages', 'engine', 'templates', 'game-default');
   if (existsSync(builtin)) return builtin;
   return null;
 }
