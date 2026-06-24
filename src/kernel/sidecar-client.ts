@@ -5,11 +5,9 @@
  * 改走 sidecar 时,kernel 经此 client 申请进程组 + 取消 + 收 onExit。
  *
  * 自包含:不 import `@forgeax/agent-host`(避免跨 submodule workspace 依赖),只镜像同款
- * newline-JSON-RPC 线协议 + 控制面方法形状。socket 缺失 → existsSync 闸先 reject(回避 Bun
- * 对不存在 unix socket 的异步 ENOENT 抛)。
+ * newline-JSON-RPC 线协议 + 控制面方法形状。
  */
 import { connect as netConnect, type Socket } from 'node:net';
-import { existsSync } from 'node:fs';
 import { tt } from '../lib/turn-trace';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -70,7 +68,6 @@ export class SidecarClient {
   /** 连到 sidecar;socket 不存在 → reject(调用方决定是否 spawn sidecar 后重试)。 */
   static connect(sockPath = defaultSockPath(), timeoutMs = 2000): Promise<SidecarClient> {
     return new Promise((resolve, reject) => {
-      if (!existsSync(sockPath)) { reject(Object.assign(new Error(`sidecar socket absent: ${sockPath}`), { code: 'ENOENT' })); return; }
       let sock: Socket;
       try { sock = netConnect(sockPath); } catch (e) { reject(e as Error); return; }
       const timer = setTimeout(() => { sock.destroy(); reject(new Error('sidecar connect timeout')); }, timeoutMs);

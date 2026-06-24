@@ -52,8 +52,14 @@ export async function ensureSidecar(): Promise<SidecarClient> {
     });
   }
 
-  // 3) 重试连接。
-  const deadline = Date.now() + 8000;
+  // 3) 重试连接。窗口默认 30s(env `FORGEAX_AGENT_HOST_SPAWN_TIMEOUT_MS` 可覆盖):Windows 上
+  //    首次 `Bun.spawn` 冷启(bun 启动 + 转译 + 杀软实时扫描 + reclaimSocket 对陈旧 socket 的探测)
+  //    常超过旧的 8s 硬上限 → 误报 "not reachable after spawn"(进程其实仍在启动)。
+  const spawnTimeoutMs = ((): number => {
+    const v = Number(process.env.FORGEAX_AGENT_HOST_SPAWN_TIMEOUT_MS);
+    return Number.isFinite(v) && v > 0 ? v : 30000;
+  })();
+  const deadline = Date.now() + spawnTimeoutMs;
   while (Date.now() < deadline) {
     const c = await tryConnect();
     if (c) { cached = c; return cached; }
