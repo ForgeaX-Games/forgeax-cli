@@ -105,13 +105,13 @@ describe('Doc 07 — runtime pause backend', () => {
     await buildSnap();
 
     setPaused(true);
-    const ai = await callTool({ toolId: 't.echo', input: {}, caller: { kind: 'ai' } });
+    const ai = await callTool({ toolId: 't.echo', args: {}, caller: { kind: 'ai' } });
     expect(ai.ok).toBe(false);
     if (!ai.ok) expect(ai.code).toBe('paused');
 
     // User caller is unaffected — Pause means "freeze the agent, not the
     // user's hands".
-    const user = await callTool({ toolId: 't.echo', input: {}, caller: { kind: 'user' } });
+    const user = await callTool({ toolId: 't.echo', args: {}, caller: { kind: 'user' } });
     expect(user.ok).toBe(true);
   });
 

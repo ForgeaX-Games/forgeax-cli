@@ -163,7 +163,7 @@ function buildReport(results: Result[]): string {
 
 async function main() {
   await mkdir(REPORTS, { recursive: true });
-  const keysPath = getPathManager().user().llmKeyFile();
+  const keysPath = resolve(getPathManager().user().keyDir(), "llm_key.json");
   const keys: Record<string, KeyEntry> = JSON.parse(await readFile(keysPath, "utf-8"));
 
   const tasks: Array<{ section: string; model: string; api: string; hasKey: boolean }> = [];

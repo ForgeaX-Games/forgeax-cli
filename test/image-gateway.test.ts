@@ -260,7 +260,7 @@ describe("litellm-images vendor", () => {
   test("HTTP error → throws with proxy message", async () => {
     const fetcher = (async () => new Response(JSON.stringify({
       error: { message: "Invalid model name" },
-    }), { status: 400 })) as typeof fetch;
+    }), { status: 400 })) as unknown as typeof fetch;
     const v = createLitellmImagesVendor({
       baseUrl: "https://proxy.test/v1",
       apiKey: "sk-test",
@@ -271,7 +271,7 @@ describe("litellm-images vendor", () => {
   });
 
   test("missing data[0].b64_json → throws", async () => {
-    const fetcher = (async () => new Response(JSON.stringify({ data: [{ url: "https://..." }] }), { status: 200 })) as typeof fetch;
+    const fetcher = (async () => new Response(JSON.stringify({ data: [{ url: "https://..." }] }), { status: 200 })) as unknown as typeof fetch;
     const v = createLitellmImagesVendor({
       baseUrl: "https://proxy.test/v1",
       apiKey: "sk-test",
@@ -291,7 +291,7 @@ describe("end-to-end via gateway with litellm-images vendor registered", () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xaa]);
     const fetcher = (async () => new Response(JSON.stringify({
       data: [{ b64_json: Buffer.from(png).toString("base64") }],
-    }), { status: 200 })) as typeof fetch;
+    }), { status: 200 })) as unknown as typeof fetch;
 
     registerImageVendor(createLitellmImagesVendor({
       baseUrl: "https://proxy.test/v1",

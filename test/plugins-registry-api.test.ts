@@ -42,7 +42,7 @@ describe('/api/plugins', () => {
     app.route('/api/plugins', createPluginsRouter());
     const res = await app.request('/api/plugins/manifests');
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.counts.manifests).toBe(1);
     expect(body.counts.workbench).toBe(1);
     expect(body.manifests[0]).toMatchObject({
@@ -75,7 +75,7 @@ describe('/api/plugins', () => {
     const app = new Hono();
     app.route('/api/plugins', createPluginsRouter());
     const res = await app.request('/api/plugins/manifests');
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.generation).toBe(after.generation);
     expect(body.manifests[0].id).toBe('@forgeax-plugin/wb-late');
   });
@@ -88,7 +88,7 @@ describe('/api/plugins', () => {
     const app = new Hono();
     app.route('/api/plugins', createPluginsRouter());
     const res = await app.request('/api/plugins/manifests');
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.issues.some((i: { phase: string }) => i.phase === 'scan')).toBe(true);
   });
 });

@@ -91,7 +91,7 @@ describe("DELETE symlink to directory — link only removed, target survives", (
 
     // Response ok
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.ok).toBe(true);
     expect(body.slug).toBe(slug);
 
@@ -125,7 +125,7 @@ describe("DELETE real directory — recursive rm (current behavior)", () => {
     );
 
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.ok).toBe(true);
     expect(body.slug).toBe(slug);
 
@@ -157,7 +157,7 @@ describe("DELETE dangling symlink — broken link cleaned up", () => {
     // and would 404. After w11 adds lstat, it should detect the symlink
     // and unlink it.
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.ok).toBe(true);
 
     // Symlink gone
@@ -182,7 +182,7 @@ describe("DELETE edge cases", () => {
       { method: "DELETE" },
     );
     expect(res.status).toBe(404);
-    const body = await res.json();
+    const body = (await res.json()) as any;
     expect(body.error).toBe("not found");
   });
 });

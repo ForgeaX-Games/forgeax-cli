@@ -403,6 +403,6 @@ describe('10 · .fxpack export reject modes', () => {
     ]);
     // No `applied: true` or similar bit. The descriptor is read-only context;
     // the UI is the one that confirms.
-    expect((insp.trust as Record<string, unknown>).applied).toBeUndefined();
+    expect((insp.trust as unknown as Record<string, unknown>).applied).toBeUndefined();
   });
 });

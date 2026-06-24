@@ -33,7 +33,7 @@ function mockProxy(
   responder: (req: CapturedRequest) => { status: number; body: unknown },
   captured: CapturedRequest[] = [],
 ) {
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     const headers: Record<string, string> = {};
     if (init?.headers) {
@@ -48,7 +48,7 @@ function mockProxy(
       status,
       headers: { "content-type": "application/json" },
     });
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   return captured;
 }
 

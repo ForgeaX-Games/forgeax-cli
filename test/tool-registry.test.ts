@@ -386,9 +386,9 @@ describe('confirm gate emit (w5)', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(capturedPayload).not.toBeNull();
     // token field present, confirmId absent (AC-11 shape)
-    expect(typeof (capturedPayload as Record<string, unknown>).token).toBe('string');
-    expect((capturedPayload as Record<string, unknown>).confirmId).toBeUndefined();
-    bus.emit('tool.confirm-acked', { token: (capturedPayload as Record<string, unknown>).token, decision: 'deny' });
+    expect(typeof (capturedPayload as unknown as Record<string, unknown>).token).toBe('string');
+    expect((capturedPayload as unknown as Record<string, unknown>).confirmId).toBeUndefined();
+    bus.emit('tool.confirm-acked', { token: (capturedPayload as unknown as Record<string, unknown>).token, decision: 'deny' });
     await pending;
   });
 });

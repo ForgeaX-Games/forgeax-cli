@@ -134,7 +134,7 @@ describe("complete() via litellm transport", () => {
   test("HTTP 400 with structured error → throws with proxy message", async () => {
     globalThis.fetch = (async () => new Response(JSON.stringify({
       error: { message: "model not allowed", type: "invalid_request_error" },
-    }), { status: 400 })) as typeof fetch;
+    }), { status: 400 })) as unknown as typeof fetch;
 
     await expect(complete({ model: "fake-model", messages: [{ role: "user", content: "x" }] }))
       .rejects.toThrow(/model not allowed/);
@@ -147,7 +147,7 @@ describe("complete() via litellm transport", () => {
   });
 
   test("non-JSON response → throws with status + snippet", async () => {
-    globalThis.fetch = (async () => new Response("upstream offline", { status: 502 })) as typeof fetch;
+    globalThis.fetch = (async () => new Response("upstream offline", { status: 502 })) as unknown as typeof fetch;
     await expect(complete({ model: "gpt-5.5", messages: [{ role: "user", content: "x" }] }))
       .rejects.toThrow(/non-JSON response.*upstream offline/);
   });
