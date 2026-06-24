@@ -158,10 +158,17 @@ export class ClaudeCodeProvider implements CliProvider {
   }
 
   async health(timeoutMs = 1500): Promise<ProviderHealth> {
-    // Check (a) binary executes (b) ANTHROPIC_API_KEY present somewhere.
+    // Check (a) binary executes (b) an auth credential is present somewhere.
     // Both checks run regardless of either's outcome so missing-binary +
     // missing-key are reported together rather than serially.
+    //
+    // Credential can arrive two ways: ANTHROPIC_API_KEY (x-api-key, e.g. a
+    // litellm proxy key) OR ANTHROPIC_AUTH_TOKEN (Bearer, the OpenRouter
+    // default path — there ANTHROPIC_API_KEY is intentionally blanked). Accept
+    // either, else the OpenRouter setup is wrongly reported unhealthy and chat
+    // is refused.
     const apiKey =
+      this.envOverride.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_AUTH_TOKEN ??
       this.envOverride.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? '';
     // Redact $HOME prefix via shared friendlyPath helper (see shared/).
     const friendlyBin = friendlyPath(this.binary);
@@ -189,7 +196,7 @@ export class ClaudeCodeProvider implements CliProvider {
     }
     const missing: string[] = [];
     if (!binaryOk) missing.push(binaryDetail!);
-    if (!apiKey) missing.push('ANTHROPIC_API_KEY not set (or OAuth via keychain)');
+    if (!apiKey) missing.push('no API credential (set ANTHROPIC_AUTH_TOKEN for OpenRouter, ANTHROPIC_API_KEY, or OAuth via keychain)');
     if (missing.length === 0) return { ok: true, detail: binaryDetail ?? undefined };
     return { ok: false, detail: missing.join(' · ') };
   }
@@ -209,7 +216,12 @@ export class ClaudeCodeProvider implements CliProvider {
 
     const env: Record<string, string> = {};
     if (this.envOverride.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = this.envOverride.ANTHROPIC_API_KEY;
+    if (this.envOverride.ANTHROPIC_AUTH_TOKEN) env.ANTHROPIC_AUTH_TOKEN = this.envOverride.ANTHROPIC_AUTH_TOKEN;
     if (this.envOverride.ANTHROPIC_BASE_URL) env.ANTHROPIC_BASE_URL = this.envOverride.ANTHROPIC_BASE_URL;
+    // Spawn inherits process.env (subprocess-jsonl merges {...process.env,...env}),
+    // so the actual OpenRouter creds flow through from $ROOT/.env even when
+    // envOverride is empty. These explicit lines only matter if a route ever
+    // populates cfg.env.
 
     const projectRoot = defaultProjectRoot();
     // Scope precedence for "the game": the chat tab's own session defaultDir

@@ -20,6 +20,11 @@ import { getSessionManager } from '../core/session-manager';
 
 const SAFE_ENV_KEYS = new Set([
   'ANTHROPIC_API_KEY',
+  // OpenRouter (default backend) auth — claude-code reads ANTHROPIC_AUTH_TOKEN
+  // as a Bearer token; the OpenRouter key (sk-or-...) goes here while
+  // ANTHROPIC_API_KEY is blanked. See FirstRunSetup onboarding + OpenRouter's
+  // claude-code integration guide (https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration).
+  'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
   'FORGEAX_MODEL',
   'OPENAI_API_KEY',
@@ -105,6 +110,7 @@ export function createSettingsRouter(): Hono {
     return c.json({
       env: {
         ANTHROPIC_API_KEY: maskKey(env.ANTHROPIC_API_KEY),
+        ANTHROPIC_AUTH_TOKEN: maskKey(env.ANTHROPIC_AUTH_TOKEN),
         ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL ?? null,
         FORGEAX_MODEL: env.FORGEAX_MODEL ?? null,
         OPENAI_API_KEY: maskKey(env.OPENAI_API_KEY),
