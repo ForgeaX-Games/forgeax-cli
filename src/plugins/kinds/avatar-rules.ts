@@ -118,7 +118,13 @@ export function loadAvatarRules(
       // `packages/` + 从 assetRoot 算出的相对路径.
       const relFromRoot = relative(rootDir, filePath);
       const queryPath = `packages/${relFromRoot}`;
-      urlPath = `/api/files/raw?path=${encodeURIComponent(queryPath)}`;
+      // Content-version token: /api/files/raw 给 media 发 `Cache-Control:
+      // public, max-age=300`, 而立绘 webm 换皮 (插画师补图 / seed --force /
+      // 改 portrait 映射) 时文件路径不变, 浏览器会在 5 分钟内继续放旧帧.
+      // 用 size-mtime 当版本号挂在 URL 上, 内容一变 URL 就变, 立即穿透缓存.
+      const stv = statSync(filePath);
+      const ver = `${stv.size}-${Math.floor(stv.mtimeMs)}`;
+      urlPath = `/api/files/raw?path=${encodeURIComponent(queryPath)}&v=${ver}`;
     } catch {
       issues.push(`${abs}: cannot compute URL for ${filePath}`);
       continue;
