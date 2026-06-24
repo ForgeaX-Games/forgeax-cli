@@ -42,6 +42,7 @@ import { createPacksRouter } from './api/packs';
 import { createRuntimeRouter } from './api/runtime';
 import { createObservatoryRouter } from './api/observatory';
 import { createCeApiShimRouter, type UiAssetCleanup } from './api/ce-api-shim';
+import { createGameAssetsRouter } from './api/game-assets';
 import { createPrefsRouter } from './api/prefs';
 import { sessionScope } from './api/lib/session-scope';
 import { bootCliProviders } from './cli-providers';
@@ -118,6 +119,7 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
   app.use('/api/*', sessionScope());
 
   app.route('/api/files', createFilesRouter());
+  app.route('/api/games', createGameAssetsRouter());
   app.route('/api/assets', createAssetsRouter());
   app.route('/api/workbench', createWorkbenchRouter());
   app.route('/api/projects', createProjectsRouter());
