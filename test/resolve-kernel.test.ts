@@ -28,6 +28,11 @@ describe('resolveKernel — providerOverride 优先于全局 env', () => {
     expect(resolveKernel('forge', 'codex').id).toBe('codex');
   });
 
+  test('显式 codebuddy 命中(cbc 内核已自注册)', () => {
+    process.env.FORGEAX_KERNEL_IMPL = 'claude-code';
+    expect(resolveKernel('forge', 'codebuddy').id).toBe('codebuddy');
+  });
+
   test('无显式 → 回落全局 env', () => {
     process.env.FORGEAX_KERNEL_IMPL = 'codex';
     expect(resolveKernel('forge').id).toBe('codex');

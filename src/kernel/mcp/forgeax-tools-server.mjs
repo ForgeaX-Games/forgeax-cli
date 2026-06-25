@@ -254,6 +254,17 @@ const TOOLS = {
   },
 };
 
+// FORGEAX_DISABLE_PERCEPTION=1 → omit the perception tools (query_world /
+// capture_frame) from this server entirely. Set by the codebuddy (cbc) kernel:
+// cbc carries a ~20x larger baseline context than cc and defers MCP tools behind
+// ToolSearch, so the agent reflexively calling query_world (then waiting on an
+// unavailable preview) stacks model round-trips into a 60-90s "stuck" turn. cc /
+// forgeax-core keep perception (they're light enough). See cbc-profile.ts.
+if (process.env.FORGEAX_DISABLE_PERCEPTION === '1') {
+  delete TOOLS.query_world;
+  delete TOOLS.capture_frame;
+}
+
 let buf = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => {

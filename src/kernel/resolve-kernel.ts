@@ -15,17 +15,20 @@ import { type AgentKernel, type KernelId, getKernel, registerKernel, listKernels
 import { ClaudeCodeKernel } from './claude-code-kernel';
 import { CodexKernel } from './codex-kernel';
 import { CursorKernel } from './cursor-kernel';
+import { CbcKernel } from './cbc-kernel';
 
 function ensureRegistered(): void {
   if (!getKernel('claude-code')) registerKernel(new ClaudeCodeKernel());
   if (!getKernel('codex')) registerKernel(new CodexKernel());
   if (!getKernel('cursor-agent')) registerKernel(new CursorKernel());
+  // codebuddy(cbc):the reference agent CLI 近同源分叉,spawn `codebuddy -p` 子进程,自管登录。
+  if (!getKernel('codebuddy')) registerKernel(new CbcKernel());
   // 原生内核(forgeax-core 等)不在此构造 —— 由产品壳注入进共享 registry(见上 DIP 说明)。
 }
 
 /** 已注册可选内核列表(确保自带内核已注册后枚举)。供 `/api/cli/health` 的
- *  provider 选择器列出 claude-code / codex / cursor-agent(+ 产品壳注入的 forgeax-core),
- *  与 chat 路径 `resolveKernel(providerOverride)` 能跑的集合一致。 */
+ *  provider 选择器列出 claude-code / codex / cursor-agent / codebuddy(+ 产品壳注入的
+ *  forgeax-core),与 chat 路径 `resolveKernel(providerOverride)` 能跑的集合一致。 */
 export function listAvailableKernels(): AgentKernel[] {
   ensureRegistered();
   return listKernels();

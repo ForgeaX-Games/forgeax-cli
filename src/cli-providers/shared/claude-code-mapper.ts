@@ -83,6 +83,9 @@ interface RawResultEvent {
   total_cost_usd?: number;
   duration_ms?: number;
   usage?: RawUsage;
+  /** cbc/cc put the real abort reason(s) here on error_during_execution etc.
+   *  (e.g. "Tool ... not found in agent cli", "Stream timeout: no data ..."). */
+  errors?: unknown[];
 }
 
 interface RawAssistantOrOther {
@@ -204,9 +207,15 @@ export function mapClaudeEvent(raw: ClaudeRawEvent, state: ClaudeMapperState): C
     if (state.doneEmitted) return out;
     captureUsage(state, r.usage);
     if (r.is_error || (r.subtype && r.subtype !== 'success')) {
+      // Surface the kernel's real abort reason (errors[]) instead of the opaque
+      // "subtype=error_during_execution" — this is what tells us WHY (tool not
+      // found in agent cli / stream timeout / etc.). Drop to subtype only if empty.
+      const detail = Array.isArray(r.errors) && r.errors.length
+        ? r.errors.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))).join(' · ')
+        : '';
       out.push({
         type: 'error',
-        message: r.result || `claude exited with subtype=${r.subtype ?? 'unknown'}`,
+        message: r.result || detail || `exited with subtype=${r.subtype ?? 'unknown'}`,
       });
     } else {
       out.push({
