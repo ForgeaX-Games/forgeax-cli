@@ -15,6 +15,7 @@ import { assetRoot } from '../lib/asset-root';
 import { friendlyPath } from './lib/friendly-path';
 import { getActiveGame, setActiveGame, clearActiveGameIf } from '../api/lib/active-game';
 import { findMarketplaceManifest } from './lib/marketplace-manifest';
+import { computeAgentNaming, pickPersonName, type AgentNaming } from './lib/agent-naming';
 import { getPathManager } from '../fs/path-manager';
 import { listAgents } from '../agents/loader';
 import { getSessionManager } from '../core/session-manager';
@@ -438,6 +439,42 @@ export function createWorkbenchRouter(): Hono {
         avatarRulesById.set('forge', arinRules);
       }
 
+      // 统一命名「中文职能·英文名」+ 灰字英文职能。card 是 SSOT（plugin 自带
+      // cnTitle/enTitle/name）；legacy manifest agent 也按 id 借 plugin card 拼。
+      type CardT = (typeof pluginEntries)[number]['definition']['card'];
+      const cardById = new Map<string, CardT>();
+      for (const e of pluginEntries) cardById.set(e.definition.id, e.definition.card);
+      const namingFor = (
+        id: string,
+        fallbackName: string,
+        legacyProfession?: { zh?: string; en?: string },
+      ): { naming: AgentNaming; personName?: string } => {
+        // forge：legacy-only 编排者，没有 plugin card，合成英文名 Forge。
+        if (id === 'forge') {
+          return {
+            naming: computeAgentNaming({
+              personName: 'Forge',
+              cnTitle: legacyProfession?.zh ?? '主线制作人',
+              enTitle: legacyProfession?.en ?? 'Lead Producer',
+              fallback: fallbackName,
+            }),
+            personName: 'Forge',
+          };
+        }
+        const card = cardById.get(id);
+        const cn = card?.cnTitle;
+        const pn = cn ? pickPersonName(card?.name) : undefined;
+        return {
+          naming: computeAgentNaming({
+            personName: pn,
+            cnTitle: cn,
+            enTitle: card?.enTitle,
+            fallback: fallbackName,
+          }),
+          personName: pn,
+        };
+      };
+
       const agents = await Promise.all(
         (manifest.agents ?? []).map(async (a) => {
           let files: ResolvedFile[] = [];
@@ -453,9 +490,13 @@ export function createWorkbenchRouter(): Hono {
             }
           }
           const ar = avatarRulesById.get(a.id);
+          const name = a.cardName[lang] ?? a.cardName.zh ?? a.cardName.en ?? a.id;
+          const { naming, personName } = namingFor(a.id, name, a.cardName);
           return {
             id: a.id,
-            name: a.cardName[lang] ?? a.cardName.zh ?? a.cardName.en ?? a.id,
+            name,
+            ...(personName ? { personName } : {}),
+            naming,
             role: a.role,
             color: a.color,
             avatar: a.avatar ?? a.id[0].toUpperCase(),
@@ -480,9 +521,12 @@ export function createWorkbenchRouter(): Hono {
         const name = typeof cardName === 'string'
           ? cardName
           : (cardName[lang] ?? cardName.zh ?? cardName.en ?? def.id);
+        const { naming, personName } = namingFor(def.id, name);
         agents.push({
           id: def.id,
           name,
+          ...(personName ? { personName } : {}),
+          naming,
           role: def.role,
           color: def.card.color,
           avatar: def.card.avatar ?? def.id[0].toUpperCase(),

@@ -24,6 +24,7 @@ import { getEventBus } from '../events/bus';
 import { scanAllLayers } from '../plugins/scanner';
 import { mergeManifests } from '../plugins/merger';
 import { defaultProjectRoot } from './lib/safe-path';
+import { computeAgentNaming, pickPersonName } from './lib/agent-naming';
 
 interface PluginManifest {
   schemaVersion?: number;
@@ -78,7 +79,13 @@ interface PluginManifest {
       multiInstance?: boolean;
       defaultSkills?: unknown[];
       produces?: string[];
-      card?: { name?: { zh?: string; en?: string } | string; color?: string; avatar?: string };
+      card?: {
+        name?: { zh?: string; en?: string } | string;
+        cnTitle?: string;
+        enTitle?: string;
+        color?: string;
+        avatar?: string;
+      };
     };
   };
   entry?: {
@@ -135,8 +142,16 @@ interface BusPluginInfo {
     multiInstance?: boolean;
     defaultSkills?: unknown[];
     produces?: string[];
-    card?: { name?: { zh?: string; en?: string } | string; color?: string; avatar?: string };
+    card?: {
+      name?: { zh?: string; en?: string } | string;
+      cnTitle?: string;
+      enTitle?: string;
+      color?: string;
+      avatar?: string;
+    };
   };
+  /** 统一命名（kind=agent 才有）：title=「中文职能·英文名」，sub=灰字英文职能。 */
+  naming?: { title: string; sub: string };
   entry?: {
     frontend?: string;
     standalone?: {
@@ -266,6 +281,16 @@ async function loadAllPlugins(): Promise<BusPluginInfo[]> {
           produces: a.produces,
           card: a.card,
         };
+        const cn = a.card?.cnTitle;
+        const fallback = typeof m.displayName === 'string'
+          ? m.displayName
+          : (m.displayName.zh ?? m.displayName.en ?? a.id ?? m.id);
+        slim.naming = computeAgentNaming({
+          personName: cn ? pickPersonName(a.card?.name) : undefined,
+          cnTitle: cn,
+          enTitle: a.card?.enTitle,
+          fallback,
+        });
       }
       if (m.provides?.cliProvider) {
         const cp = m.provides.cliProvider;
