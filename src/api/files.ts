@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { stat } from 'fs/promises';
+import { stat, unlink } from 'fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defaultProjectRoot, resolveSafePath, ALLOWED_TOP_DIRS } from './lib/safe-path';
@@ -160,6 +160,21 @@ export function createFilesRouter() {
     const tree = await listTree(root, rel, 4);
     if (!tree) return c.json({ error: 'not found' }, 404);
     return c.json({ tree });
+  });
+
+  r.delete('/', async (c) => {
+    const root = defaultProjectRoot();
+    const rel = c.req.query('path') ?? '';
+    const abs = resolveSafePath(root, rel);
+    if (!abs) return c.json({ error: 'path outside whitelist (games/**)' }, 400);
+    try {
+      await unlink(abs);
+      return c.json({ ok: true, path: rel });
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (msg.includes('ENOENT')) return c.json({ ok: true, path: rel });
+      return c.json({ error: msg }, 500);
+    }
   });
 
   return r;

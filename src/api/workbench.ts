@@ -52,6 +52,37 @@ export function isReelGame(gameDir: string): boolean {
   }
 }
 
+/** After scaffold-copying a game template, replace every GUID in all
+ *  .pack.json files with fresh crypto.randomUUID() values, maintaining
+ *  internal cross-references (refs[]). Without this, every game created
+ *  from the same template shares the same GUIDs → pack-guid-collision. */
+async function regeneratePackGuids(gameDir: string): Promise<void> {
+  const glob = new Glob('**/*.pack.json');
+  const packFiles: string[] = [];
+  for await (const entry of glob.scan({ cwd: gameDir, absolute: true, dot: true })) {
+    if (entry.includes('node_modules')) continue;
+    packFiles.push(entry);
+  }
+  const guidMap = new Map<string, string>();
+  const fresh = (old: string): string => {
+    let g = guidMap.get(old);
+    if (!g) { g = crypto.randomUUID(); guidMap.set(old, g); }
+    return g;
+  };
+  for (const fp of packFiles) {
+    try {
+      const raw = await readFile(fp, 'utf-8');
+      const pack = JSON.parse(raw) as { assets?: { guid: string; refs: string[] }[] };
+      if (!Array.isArray(pack.assets)) continue;
+      for (const asset of pack.assets) {
+        asset.guid = fresh(asset.guid);
+        asset.refs = asset.refs.map((r) => fresh(r));
+      }
+      await writeFile(fp, JSON.stringify(pack, null, 2) + '\n', 'utf-8');
+    } catch { /* skip malformed pack files */ }
+  }
+}
+
 function resolveGameTemplate(projectRoot: string): string | null {
   const userOverride = resolve(projectRoot, '.forgeax/games/_template');
   if (existsSync(userOverride)) return userOverride;
@@ -498,6 +529,9 @@ export function createWorkbenchRouter(): Hono {
     }
     try {
       await cp(templateDir, gameDir, { recursive: true });
+      // Regenerate all GUIDs in .pack.json files so each game has unique
+      // identities (the template's GUIDs are shared across all scaffolded games).
+      await regeneratePackGuids(gameDir);
       // Replace id in forge.json
       const manifestPath = join(gameDir, 'forge.json');
       if (existsSync(manifestPath)) {

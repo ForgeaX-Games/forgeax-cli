@@ -29,11 +29,12 @@ import { FileActivityLedger } from "../ledger/file-activity-ledger";
 import type { FileLockMap } from "../fs/agent-fs-recorder";
 import { bindSystemEventLog } from "../ledger/system-event-log";
 import { Logger } from "./logger";
-import type { SessionConfig } from "./types";
+import type { SessionConfig, ModelsConfig } from "./types";
 import type { PathManagerAPI, SessionLayerAPI } from "../fs/types";
 import { createOrGetFSWatcher } from "../fs/watcher";
 import { AgentKitReloadCoordinator } from "../kits/reload-coordinator";
 import { clearRememberedForSession } from "../kernel/tool-approval";
+import { runAutoExtract } from "../soul/auto-extract";
 
 /** One pending delegate_to_subagent awaiting the sub-agent's turn-end.
  *  Keyed by sub-agent's `agentPath` (e.g. "suzu"). */
@@ -215,8 +216,37 @@ export class Session {
       this._bindLedgerPersistence(),
       this._bindAgentCommandRouting(),
       this._bindDelegationCallback(),
+      this._bindAutoExtract(),
       bindSystemEventLog(this.paths.globalEventsLog(), this.eventBus),
     ];
+  }
+
+  // ─── turn-end → 自动沉淀(USER.md + 分层记忆)──────────────────────────────
+
+  /** 每个 agent 回合结束(非取消)后,后台抽取持久记忆并按层路由(P1)。节流/互斥/
+   *  fire-and-forget 全在 `runAutoExtract` 内,这里只负责取 ledger + resolveModels。
+   *  `FORGEAX_AUTO_EXTRACT=0` 可全局关闭。 */
+  private _bindAutoExtract(): () => void {
+    return this.eventBus.observe((event, emitterId) => {
+      if (event.type !== "hook:turnEnd" || !emitterId) return;
+      const payload = (event.payload ?? {}) as { aborted?: boolean };
+      if (payload.aborted) return;
+      if (!this.tree.get(emitterId)) return; // 仅树内 agent
+      const agent = this.scheduler.getAgent(emitterId) as unknown as {
+        agentContext?: { resolveModels?: () => ModelsConfig };
+      } | null;
+      const resolveModels = agent?.agentContext?.resolveModels;
+      if (typeof resolveModels !== "function") return; // ScriptAgent / 无模型 → 跳过
+      void runAutoExtract({
+        sid: this.sid,
+        agentPath: emitterId,
+        ledger: this.getOrCreateLedger(emitterId),
+        resolveModels,
+      }).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(emitterId, undefined, `auto-extract: ${msg}`);
+      });
+    });
   }
 
   // ─── delegate_to_subagent → auto-completion-callback ─────────────────────
