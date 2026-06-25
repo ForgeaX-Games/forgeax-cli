@@ -68,6 +68,12 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
     stdin: stdin !== undefined ? 'pipe' : 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
+    // ★ 关键:detached → 子进程 setsid 成新 session/进程组、**脱离控制终端**。
+    //   否则 CLI 内核(codebuddy / claude-code 等)作为 server 的后台进程组子进程,一旦碰
+    //   控制终端(查终端尺寸/title 等),内核会发 SIGTTOU/SIGTTIN 给**整个进程组**,把 server
+    //   一起冻成 STAT T(stopped)—— 表现为「选 codebuddy 发送即整页卡死、刷新都无响应」。
+    //   对齐 agent-host/kernel-process.ts 的 detached 隔离(forgeax-core 正因走它而不中招)。
+    detached: true,
   });
 
   // Stdin payload + EOF
@@ -76,21 +82,30 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
     proc.stdin.end();
   }
 
-  // Wire abort → SIGTERM, then SIGKILL after grace period.
-  let killTimer: ReturnType<typeof setTimeout> | null = null;
-  const onAbort = () => {
+  // detached 后子进程是进程组 leader(pgid==pid):杀**整组**(-pid)一并收掉它 spawn 的孙子
+  //   进程,不留孤儿;pid 非法或不允许时回退杀单进程。(-0 会误杀自身组,故严格 pid>0。)
+  const killGroup = (sig: 'SIGTERM' | 'SIGKILL'): void => {
+    const pid = proc.pid;
+    if (typeof pid === 'number' && pid > 0) {
+      try {
+        process.kill(-pid, sig);
+        return;
+      } catch {
+        /* 组已消失 / 不允许 → 回退单进程 */
+      }
+    }
     try {
-      proc.kill('SIGTERM');
+      proc.kill(sig);
     } catch {
       /* already dead */
     }
-    killTimer = setTimeout(() => {
-      try {
-        proc.kill('SIGKILL');
-      } catch {
-        /* gone */
-      }
-    }, killGraceMs);
+  };
+
+  // Wire abort → SIGTERM, then SIGKILL after grace period.
+  let killTimer: ReturnType<typeof setTimeout> | null = null;
+  const onAbort = () => {
+    killGroup('SIGTERM');
+    killTimer = setTimeout(() => killGroup('SIGKILL'), killGraceMs);
   };
   if (signal.aborted) onAbort();
   else signal.addEventListener('abort', onAbort, { once: true });

@@ -549,6 +549,11 @@ export class ConsciousAgent extends BaseAgent {
             ? ((e.payload as { attachments: Array<Record<string, unknown>> }).attachments)
             : [],
         );
+        // 全链路 trace:浏览器随消息带来的 W3C traceparent(emitForgeaXMessage payload.traceparent
+        //   → /:sid/messages event payload → 这里),透传给内核 → kernel.turn 挂浏览器 ui.request 下。
+        const traceparent = events
+          .map((e) => ((e.payload as { traceparent?: unknown })?.traceparent))
+          .find((tp): tp is string => typeof tp === 'string' && tp.length > 0);
         const mc = this.modelRoutingHints.order(
           resolveModelsConfig(this.agentJson, this.sessionDefaultModels),
         );
@@ -567,6 +572,7 @@ export class ConsciousAgent extends BaseAgent {
           turn: this.currentTurn,
           tools: hostTools,
           ...(attachments.length ? { attachments } : {}),
+          ...(traceparent ? { traceparent } : {}),
           ...(model ? { model } : {}),
         });
         tt("kernel.returned", { agent: this.agentPath, turn: this.currentTurn, aborted: signal.aborted, error });

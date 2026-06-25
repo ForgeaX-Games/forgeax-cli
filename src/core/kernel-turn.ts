@@ -21,6 +21,8 @@ import type { EventBusAPI } from './types';
 import { composeTurnRequest } from '../kernel/compose-turn-request';
 import { resolveKernel } from '../kernel/resolve-kernel';
 import { tt } from '../lib/turn-trace';
+import { hostTelemetryEnabled } from '../kernel/host-telemetry';
+import { startCliKernelTurn, type CliKernelTurnTrace } from '../kernel/cli-kernel-trace';
 
 /** 确定性 UUIDv5(RFC 4122,sha1)——稳定 key → 稳定 UUID(CC resume 要求 UUID)。 */
 function uuidv5(name: string): string {
@@ -51,6 +53,9 @@ export interface KernelTurnOpts {
   tools?: { name: string; description?: string; inputSchema?: Record<string, unknown> }[];
   /** 多模态附件(图片);透传进 composeTurnRequest → 原生内核 facade 组 image block。 */
   attachments?: Array<Record<string, unknown>>;
+  /** 全链路 trace:浏览器 ui.request 的 W3C traceparent(经 /:sid/messages event payload 传到这);
+   *  透传进 composeTurnRequest → TurnRequest.traceparent → 内核把 kernel.turn 挂成其 child。 */
+  traceparent?: string;
 }
 
 /** 跑一轮内核 turn,把流式/工具/终态映射成 bus 事件。返回 {aborted,error}。 */
@@ -62,6 +67,8 @@ export async function runKernelTurn(opts: KernelTurnOpts): Promise<{ aborted: bo
   let thinkingText = '';
   let usage: { inputTokens: number; outputTokens: number } | undefined;
   let error: string | undefined;
+  let reason: string | undefined; // turn.done.reason(全链路 trace:kernel.turn 结束原因)
+  let cliTrace: CliKernelTurnTrace | null = null; // 第 2 层:非-forgeax-core 内核的 kernel.turn span
   const toolName = new Map<string, string>(); // callId → name(供 tool.result 命名)
 
   try {
@@ -74,8 +81,22 @@ export async function runKernelTurn(opts: KernelTurnOpts): Promise<{ aborted: bo
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.tools ? { extraTools: opts.tools } : {}),
       ...(opts.attachments && opts.attachments.length ? { attachments: opts.attachments } : {}),
+      ...(opts.traceparent ? { traceparent: opts.traceparent } : {}),
     });
     const kernel = resolveKernel(agentId);
+
+    // 第 2 层全链路 trace:非-forgeax-core 内核(codebuddy/claude-code/codex/cursor)跑在本进程、
+    //   自身不出 span。给它包一个 kernel.turn(挂浏览器 ui.request 下):provisional 立即落盘,
+    //   卡住 → trace 里留「永不收口的 kernel.turn」可定位。forgeax-core 不包(它自 sidecar 出,
+    //   重复)。未接 host-telemetry(纯 cli)→ 静默不产。
+    if (kernel.id !== 'forgeax-core' && hostTelemetryEnabled()) {
+      cliTrace = startCliKernelTurn({
+        kernelId: kernel.id,
+        agentId,
+        ...(opts.sessionId ? { sid: opts.sessionId } : {}),
+        ...(opts.traceparent ? { traceparent: opts.traceparent } : {}),
+      });
+    }
 
     tt('kt.start', { agent: agentId, turn, sid: opts.sessionId, threadId, tools: req.tools?.length });
     let deltas = 0;
@@ -139,6 +160,8 @@ export async function runKernelTurn(opts: KernelTurnOpts): Promise<{ aborted: bo
           error = `${ev.error.code}: ${ev.error.message}`;
           break;
         case 'turn.done':
+          reason = (ev as { reason?: string }).reason; // kernel.turn 结束原因(stop/max_turns/cancelled…)
+          break;
         case 'stored-event':
         // x.* 扩展事件:UI 路径不消费,忽略。
         default:
@@ -149,6 +172,17 @@ export async function runKernelTurn(opts: KernelTurnOpts): Promise<{ aborted: bo
   } catch (err) {
     if (!signal.aborted) error = (err as Error).message;
     tt('kt.catch', { agent: agentId, turn, aborted: signal.aborted, error: (err as Error).message });
+  } finally {
+    // 第 2 层:收尾 CLI 内核 kernel.turn span(status/reason/usage/model 落 trace+log)。
+    //   即便上面 throw / abort 也保证收口,避免假性「永不收口」误报。
+    const doneReason = reason ?? (signal.aborted ? 'cancelled' : error ? 'error' : undefined);
+    cliTrace?.end({
+      ok: !error,
+      ...(doneReason ? { reason: doneReason } : {}),
+      ...(opts.model ? { model: opts.model } : {}),
+      ...(usage ? { usage } : {}),
+      ...(error ? { error } : {}),
+    });
   }
 
   // 终态:累计文本作为 assistant 消息发出(落 ledger + 渲染提交)。

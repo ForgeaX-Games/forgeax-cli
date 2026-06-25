@@ -94,6 +94,9 @@ export interface ComposeInput {
    *  组成 image content block 送模型。形状开放(contract `InputMessage.attachments`):
    *  `{ kind:'image', mediaType, data?(base64) | path?(host 文件) }`。 */
   attachments?: TurnRequest['input']['attachments'];
+  /** 全链路 trace:上游(浏览器 ui.request)的 W3C traceparent;透传进 TurnRequest,
+   *  内核 facade 把 kernel.turn 挂成它的 child。缺省 ⇒ kernel.turn 自建 root。 */
+  traceparent?: string;
 }
 
 export async function composeTurnRequest(input: ComposeInput): Promise<TurnRequest> {
@@ -204,6 +207,7 @@ export async function composeTurnRequest(input: ComposeInput): Promise<TurnReque
     budget: record.budget ?? {},
     trustTier: record.trustTier,
     ...(input.sessionId ? { hostSessionId: input.sessionId } : {}),
+    ...(input.traceparent ? { traceparent: input.traceparent } : {}),
     ...(model ? { model } : {}),
     ...(fallbackModels && fallbackModels.length ? { fallbackModels } : {}),
     ...(history && history.length ? { history } : {}),
