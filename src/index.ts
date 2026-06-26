@@ -18,7 +18,7 @@ export { initSessionManager, getSessionManager } from './core/session-manager';
 export { bootCliProviders } from './cli-providers';
 export { reloadPlugins } from './plugins/registry';
 export { loadBrand, createBrandRouter } from './brand';
-export { getVersion } from './api/version';
+export { getVersion } from '@forgeax/platform-io';
 export { listAllCommands } from './commands/runner';
 
 // WS + watcher primitives the shell wires into Bun.serve.
@@ -26,6 +26,6 @@ export { WsHub, createWsHandler, type WsClientData } from './ws';
 export { FsWatcher } from './api/lib/watcher';
 
 // Path helpers.
-export { defaultProjectRoot } from './api/lib/safe-path';
-export { friendlyPath } from './api/lib/friendly-path';
-export { mp, interfaceDist } from './lib/asset-root';
+export { defaultProjectRoot } from '@forgeax/platform-io';
+export { friendlyPath } from '@forgeax/platform-io';
+export { mp, interfaceDist } from '@forgeax/platform-io';

@@ -26,7 +26,7 @@ import type {
   ResourceKind,
 } from "./types.js";
 import { resolveUserDir } from "./user-dir.js";
-import { defaultProjectRoot } from "../api/lib/safe-path.js";
+import { defaultProjectRoot } from '@forgeax/platform-io';
 
 // ─── Builtin root (fixed) ────────────────────────────────────────────────────
 

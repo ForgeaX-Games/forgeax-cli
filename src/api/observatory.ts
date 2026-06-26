@@ -21,7 +21,7 @@ import { adapt, createAdapterState, makeInitEvent, type AgentEventOut } from '..
 import { inspectAgentPrompt } from '../observatory/prompt-modules';
 import { replaySessionEvents } from '../observatory/ledger-replay';
 import { detectActiveSlug } from './lib/active-slug';
-import { defaultProjectRoot } from './lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import type { Event } from '../core/types';
 
 interface SessionEntry {

@@ -23,7 +23,7 @@ import { Hono } from 'hono';
 import { getEventBus } from '../events/bus';
 import { scanAllLayers } from '../plugins/scanner';
 import { mergeManifests } from '../plugins/merger';
-import { defaultProjectRoot } from './lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import { computeAgentNaming, pickPersonName } from './lib/agent-naming';
 
 interface PluginManifest {

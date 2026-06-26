@@ -38,7 +38,7 @@ import {
   mapCodexEvent,
   type CodexRawEvent,
 } from './codex-profile';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import { CodexAppServerClient, type ServerRequest } from './codex-appserver-client';
 import {
   AppServerUnavailable,

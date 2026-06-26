@@ -21,8 +21,8 @@ import type { SkillRef } from '@forgeax/types';
 import { pickI18n } from '@forgeax/types';
 import type { AgentEntry, SkillEntry } from '../plugins/kinds';
 import { getPluginSnapshot } from '../plugins/registry';
-import { defaultProjectRoot } from '../api/lib/safe-path';
-import { assetRoot } from '../lib/asset-root';
+import { defaultProjectRoot } from '@forgeax/platform-io';
+import { assetRoot } from '@forgeax/platform-io';
 
 export interface ComposedSystemPrompt {
   agentId: string;

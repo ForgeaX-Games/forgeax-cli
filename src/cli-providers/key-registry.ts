@@ -30,7 +30,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 
 /** Wire protocols a provider endpoint can speak. Consumers declare which one
  *  they need; the registry checks `supports` includes it before resolving. */

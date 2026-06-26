@@ -20,7 +20,7 @@ import type { AgentJson, Event } from '../core/types';
 import { ensureAgentScaffold, isValidAgentName } from '../core/agent-scaffold';
 import { resolvePersonaForAgent } from '../agents/loader';
 import { findMarketplaceManifest } from './lib/marketplace-manifest';
-import { defaultProjectRoot } from './lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getActiveGame } from './lib/active-game';
 import { resolveAsk } from '../core/ask-user-registry';
 import { randomUUID } from 'node:crypto';

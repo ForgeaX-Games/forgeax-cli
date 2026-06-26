@@ -12,7 +12,7 @@
 import type { TurnRequest, TurnMessage } from '@forgeax/agent-runtime';
 import { existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getActiveGame } from '../api/lib/active-game';
 import { getSessionManager } from '../core/session-registry';
 import { getPathManager } from '../fs/path-manager';

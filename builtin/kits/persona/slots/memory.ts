@@ -20,7 +20,7 @@ import { isAbsolute, resolve, join } from "node:path";
 import type { ContextSlot } from "../../../../src/kits/slot/types";
 import { SlotPriority } from "../../../../src/kits/slot/types";
 import type { AgentContext } from "../../../../src/core/types";
-import { defaultProjectRoot } from "../../../../src/api/lib/safe-path";
+import { defaultProjectRoot } from '@forgeax/platform-io';
 
 function findMarketplaceRoot(): string | null {
   const root = defaultProjectRoot();

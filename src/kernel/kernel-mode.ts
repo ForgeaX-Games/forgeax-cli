@@ -11,7 +11,7 @@
  */
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 
 export function kernelEnabled(projectRoot?: string): boolean {
   const k = (process.env.FORGEAX_KERNEL ?? '').trim();

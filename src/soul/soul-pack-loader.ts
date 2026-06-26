@@ -23,8 +23,8 @@ import {
   statSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { defaultProjectRoot } from '../api/lib/safe-path';
-import { assetRoot } from '../lib/asset-root';
+import { defaultProjectRoot } from '@forgeax/platform-io';
+import { assetRoot } from '@forgeax/platform-io';
 import { composeSystemPrompt, parseSkillFrontmatter, resolvePersonaForAgent } from '../agents/loader';
 import { emitLifeEvent } from './life-events';
 import { soulMemoryRoot } from './layered-memory';

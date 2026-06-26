@@ -14,8 +14,8 @@ import { Hono } from 'hono';
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { defaultProjectRoot } from './lib/safe-path';
-import { friendlyPath } from './lib/friendly-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
+import { friendlyPath } from '@forgeax/platform-io';
 import { getSessionManager } from '../core/session-manager';
 
 const SAFE_ENV_KEYS = new Set([

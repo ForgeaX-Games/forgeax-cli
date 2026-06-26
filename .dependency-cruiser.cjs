@@ -56,13 +56,14 @@ module.exports = {
       name: 'cli-allowed-forgeax-only',
       severity: 'error',
       comment:
-        '@forgeax/* 范围内只允许 agent-runtime(契约)与 types(schema);' +
+        '@forgeax/* 范围内只允许 agent-runtime(契约)、types(schema)与 ' +
+        'platform-io(后L1 文件/IO 基建,R1 抽出,cli 后L2→后L1 合法下行);' +
         '其余 @forgeax 包一律禁止。注意:@forgeax/engine-*、@forgeax/game-types ' +
         '若仅出现在 prompt 模板字符串里(非真实 import)不会被算作依赖。',
       from: { path: '^src/' },
       to: {
         path: '^@forgeax/',
-        pathNot: '^@forgeax/(agent-runtime|types)(/|$)',
+        pathNot: '^@forgeax/(agent-runtime|types|platform-io)(/|$)',
       },
     },
     {

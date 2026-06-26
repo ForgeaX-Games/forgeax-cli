@@ -38,7 +38,7 @@ import {
   mapClaudeEvent,
   type ClaudeRawEvent,
 } from '../cli-providers/shared/claude-code-mapper';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import {
   buildCcArgs,
   buildSessionArgs,

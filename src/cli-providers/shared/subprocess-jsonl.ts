@@ -6,7 +6,7 @@
 // and converts each parsed JSON line into a ChatEvent.
 
 // friendlyPath 已搬到 api/lib/ (commit 64078a4); cli-providers 复活时 reuse 那一份。
-import { friendlyPath } from '../../api/lib/friendly-path';
+import { friendlyPath } from '@forgeax/platform-io';
 
 export interface SpawnJsonlOptions {
   /** Absolute path or PATH-resolvable binary name. */

@@ -22,7 +22,7 @@ import { exportPack, closureFrom } from '../packs/exporter';
 import { inspectPack, installPack } from '../packs/importer';
 import { readInstalled } from '../packs/ledger';
 import { reloadPlugins } from '../plugins/registry';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 
 interface ParsedArgs {
   cmd: string;

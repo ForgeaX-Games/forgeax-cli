@@ -28,7 +28,7 @@ import type { ToolCall, ToolResult, ImageGen } from '@forgeax/types';
 import { getEventBus } from '../events/bus';
 import { isPaused } from '../runtime/pause';
 import { createImageGen } from '../lib/image-gateway/create-image-gen';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 
 export type ToolHandler = (
   args: unknown,

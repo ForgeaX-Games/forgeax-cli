@@ -29,7 +29,7 @@ import type {
 } from '@forgeax/agent-runtime';
 import { spawnJsonl, scrubbedSecretEnv } from '../cli-providers/shared/subprocess-jsonl';
 import { resolveBinary } from '../cli-providers/shared/resolve-binary';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import {
   buildCursorArgs,
   createCursorMapperState,

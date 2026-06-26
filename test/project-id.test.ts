@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { PROJECT_ID_RE } from '../src/api/projects';
+import { PROJECT_ID_RE } from '@forgeax/platform-io';
 import { GAME_SLUG_RE } from '../src/api/workbench';
 
 // Locks /^[a-z0-9][a-z0-9-_]{1,40}$/ used by POST /api/projects and

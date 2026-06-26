@@ -17,7 +17,7 @@ import { loadAgentRecord } from '../soul';
 import { checkKernelTool } from './trust-gate';
 import { requestToolApproval } from './tool-approval';
 import { executeTool } from '../kits/tool/tool-executor';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getActiveGame } from '../api/lib/active-game';
 import { tt } from '../lib/turn-trace';
 

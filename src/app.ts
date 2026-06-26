@@ -11,18 +11,18 @@
 
 import { Hono } from 'hono';
 
-import { createFilesRouter } from './api/files';
-import { createAssetsRouter } from './api/assets';
+import { createFilesRouter } from '@forgeax/platform-io';
+import { createAssetsRouter } from '@forgeax/platform-io';
 import { createWorkbenchRouter } from './api/workbench';
-import { createProjectsRouter } from './api/projects';
-import { createFsBrowserRouter } from './api/fs-browser';
+import { createProjectsRouter } from '@forgeax/platform-io';
+import { createFsBrowserRouter } from '@forgeax/platform-io';
 import { createWorkspacesRouter } from './api/workspaces';
 import { createSettingsRouter } from './api/settings';
-import { createBootSplashRouter } from './api/boot-splash';
-import { createVersionRouter } from './api/version';
-import { createChangelogRouter } from './api/changelog';
+import { createBootSplashRouter } from '@forgeax/platform-io';
+import { createVersionRouter } from '@forgeax/platform-io';
+import { createChangelogRouter } from '@forgeax/platform-io';
 import { createSessionsRouter } from './api/sessions';
-import { createLogsRouter } from './api/logs';
+import { createLogsRouter } from '@forgeax/platform-io';
 import { createCommandsApiRouter } from './api/commands';
 import { createCliRouter } from './api/cli/chat';
 import { createBrandRouter, loadBrand } from './brand';
@@ -42,8 +42,8 @@ import { createPacksRouter } from './api/packs';
 import { createRuntimeRouter } from './api/runtime';
 import { createObservatoryRouter } from './api/observatory';
 import { createCeApiShimRouter, type UiAssetCleanup } from './api/ce-api-shim';
-import { createGameAssetsRouter } from './api/game-assets';
-import { createPrefsRouter } from './api/prefs';
+import { createGameAssetsRouter } from '@forgeax/platform-io';
+import { createPrefsRouter } from '@forgeax/platform-io';
 import { sessionScope } from './api/lib/session-scope';
 import { bootCliProviders } from './cli-providers';
 import { initPathManager } from './fs/path-manager';

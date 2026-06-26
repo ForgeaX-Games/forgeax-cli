@@ -9,7 +9,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { defaultProjectRoot } from "../api/lib/safe-path";
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getPluginSnapshot } from "../plugins/registry";
 import { pickI18n } from "@forgeax/types";
 

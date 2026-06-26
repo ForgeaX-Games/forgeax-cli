@@ -23,6 +23,7 @@
   "dependencies": {
     "@forgeax/agent-host": "workspace:*",
     "@forgeax/agent-runtime": "workspace:*",
+    "@forgeax/platform-io": "workspace:*",
     "@forgeax/types": "workspace:*",
     "@ag-ui/core": "^0.0.53",
     "@google/genai": "^1.0.0",

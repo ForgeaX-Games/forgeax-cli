@@ -10,9 +10,9 @@ import { resolve, basename, join } from 'node:path';
 // Bun.spawn / Bun.file in main.ts/files.ts/spawn helpers), so this is
 // consistent with the rest of the codebase.
 import { Glob } from 'bun';
-import { defaultProjectRoot } from './lib/safe-path';
-import { assetRoot } from '../lib/asset-root';
-import { friendlyPath } from './lib/friendly-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
+import { assetRoot } from '@forgeax/platform-io';
+import { friendlyPath } from '@forgeax/platform-io';
 import { getActiveGame, setActiveGame, clearActiveGameIf } from '../api/lib/active-game';
 import { findMarketplaceManifest } from './lib/marketplace-manifest';
 import { computeAgentNaming, pickPersonName, type AgentNaming } from './lib/agent-naming';

@@ -28,7 +28,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
 import type { ChatEvent } from '../cli-providers/types';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 
 const SERVER_PORT = process.env.FORGEAX_SERVER_PORT ?? '18900';
 

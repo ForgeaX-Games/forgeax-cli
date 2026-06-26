@@ -16,7 +16,7 @@ import {
   type AgentAvatarRules,
   type AgentAvatarState,
 } from '@forgeax/types';
-import { assetRoot } from '../../lib/asset-root';
+import { assetRoot } from '@forgeax/platform-io';
 
 const FRONTMATTER_RX = /^---\s*\n([\s\S]+?)\n---\s*\n([\s\S]*)$/;
 

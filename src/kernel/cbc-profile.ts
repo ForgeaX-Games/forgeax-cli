@@ -28,7 +28,7 @@ import type { TurnRequest } from '@forgeax/agent-runtime';
 import { existsSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 // 复用 cc-profile 的稳定件(cbc 与 cc 完全一致):线事件→KernelEvent 映射、
 // permission-mode 枚举翻译、跨进程权限闸 registry。单一来源,避免 drift。
 import {

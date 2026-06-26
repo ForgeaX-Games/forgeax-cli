@@ -13,8 +13,8 @@
 
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { friendlyPath } from './friendly-path';
-import { assetRoot } from '../../lib/asset-root';
+import { friendlyPath } from '@forgeax/platform-io';
+import { assetRoot } from '@forgeax/platform-io';
 
 export function marketplaceManifestCandidates(projectRoot: string): string[] {
   return [

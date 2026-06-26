@@ -25,9 +25,9 @@ import type {
 import { spawnJsonl } from '../shared/subprocess-jsonl';
 // friendlyPath 已被搬到 api/lib/（commit 64078a4 cleanup）; cli-providers 复活时
 // 直接 reuse 那一份，不再维护 cli-providers/shared/friendly-path.ts。
-import { friendlyPath } from '../../api/lib/friendly-path';
+import { friendlyPath } from '@forgeax/platform-io';
 import { resolveBinary } from '../shared/resolve-binary';
-import { defaultProjectRoot } from '../../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getActiveGame } from '../../api/lib/active-game';
 import { getSessionManager } from '../../core/session-manager';
 import { existsSync, appendFileSync, writeFileSync } from 'node:fs';

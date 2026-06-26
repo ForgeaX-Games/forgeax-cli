@@ -15,8 +15,8 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { parseManifest } from '@forgeax/types';
 import type { PluginManifest } from '@forgeax/types';
-import { defaultProjectRoot } from '../api/lib/safe-path';
-import { assetRoot } from '../lib/asset-root';
+import { defaultProjectRoot } from '@forgeax/platform-io';
+import { assetRoot } from '@forgeax/platform-io';
 
 export type PluginLayer = 'L0' | 'L1' | 'L2';
 

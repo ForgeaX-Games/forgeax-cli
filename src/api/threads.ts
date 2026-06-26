@@ -20,7 +20,7 @@ import { Hono } from 'hono';
 import { readFileSync } from 'node:fs';
 import { getSessionManager } from '../core/session-manager';
 import { findMarketplaceManifest } from './lib/marketplace-manifest';
-import { defaultProjectRoot } from './lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 
 /** Read marketplace manifest once per request to identify the orchestrator
  *  (`default: true`). Tree-depth alone can't tell us — `delegate_to_subagent`

@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Hono } from 'hono';
-import { createGameAssetsRouter } from '../src/api/game-assets';
+import { createGameAssetsRouter } from '@forgeax/platform-io';
 
 let projectRoot: string;
 let prevEnv: string | undefined;

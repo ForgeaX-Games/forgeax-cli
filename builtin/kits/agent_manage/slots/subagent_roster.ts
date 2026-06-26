@@ -21,8 +21,8 @@ import { SlotPriority } from "../../../../src/kits/slot/types";
 import type { AgentContext } from "../../../../src/core/types";
 import { listAgents } from "../../../../src/agents/loader";
 import { getPluginSnapshot } from "../../../../src/plugins/registry";
-import { defaultProjectRoot } from "../../../../src/api/lib/safe-path";
-import { readUninstalledAgentIds } from "../../../../src/api/lib/agent-prefs";
+import { defaultProjectRoot } from '@forgeax/platform-io';
+import { readUninstalledAgentIds } from '@forgeax/platform-io';
 import { pickI18n } from "@forgeax/types";
 
 interface RosterRow {

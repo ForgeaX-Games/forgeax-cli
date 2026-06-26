@@ -22,7 +22,7 @@ import { extractMessageBodyText } from '../llm/thinking';
 import { createProvider } from '../llm/provider';
 import { assembleResponse } from '../llm/stream';
 import { normalizeContent } from '../message/modality';
-import { defaultProjectRoot } from '../api/lib/safe-path';
+import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getActiveGame } from '../api/lib/active-game';
 import { classifyAndWrite, soulMemoryRoot } from './layered-memory';
 import { upsertUserFacts, type UserFact } from './user-profile';
