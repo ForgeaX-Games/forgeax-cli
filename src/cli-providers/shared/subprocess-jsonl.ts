@@ -61,6 +61,7 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
     }
   }
 
+  const isWindows = process.platform === 'win32';
   const proc = Bun.spawn({
     cmd: [cmd, ...args],
     cwd: cwd ?? process.cwd(),
@@ -68,12 +69,16 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
     stdin: stdin !== undefined ? 'pipe' : 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
-    // ★ 关键:detached → 子进程 setsid 成新 session/进程组、**脱离控制终端**。
+    // ★ 关键(POSIX):detached → 子进程 setsid 成新 session/进程组、**脱离控制终端**。
     //   否则 CLI 内核(codebuddy / claude-code 等)作为 server 的后台进程组子进程,一旦碰
     //   控制终端(查终端尺寸/title 等),内核会发 SIGTTOU/SIGTTIN 给**整个进程组**,把 server
     //   一起冻成 STAT T(stopped)—— 表现为「选 codebuddy 发送即整页卡死、刷新都无响应」。
     //   对齐 agent-host/kernel-process.ts 的 detached 隔离(forgeax-core 正因走它而不中招)。
-    detached: true,
+    //   Windows:无 SIGTTOU/进程组语义,且 detached=DETACHED_PROCESS 会**每轮 spawn 新开一个
+    //   控制台窗口**(实测:选 codebuddy/cursor 发送即弹 PS 窗口);故仅 POSIX 用 detached,
+    //   Windows 改用 windowsHide 抑制控制台窗口(整组杀在 Windows 经 -pid 抛错回退单进程杀)。
+    detached: !isWindows,
+    ...(isWindows ? { windowsHide: true } : {}),
   });
 
   // Stdin payload + EOF
