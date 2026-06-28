@@ -20,40 +20,70 @@ import { executeTool } from '../kits/tool/tool-executor';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getActiveGame } from '../api/lib/active-game';
 import { tt } from '../lib/turn-trace';
+import { appendToolAudit } from './tool-audit';
 
 /** 与原生内核约定的 host 工具执行签名(结构化,不 import 内核包的类型)。
  *  `agentId` = 本轮真实发起工具的 agent(委派轮里即被委派方,如 mochi);缺省回落 defaultAgentPath。 */
 export type HostExecuteToolFn = (name: string, args: unknown, sid?: string, agentId?: string) => Promise<unknown>;
 
+/** 桥的可注入协作方(显式声明的输入,Pipeline Isolation)。生产路径全部省略 → 用真实 cli
+ *  内部实现;单测可注入桩驱动各决策出口,免起活 session、零全局 mock。`appendToolAudit`
+ *  始终走真实实现(其副作用即被断言的审计行)。 */
+export interface HostToolBridgeDeps {
+  getSessionManager: typeof getSessionManager;
+  loadAgentRecord: typeof loadAgentRecord;
+  checkKernelTool: typeof checkKernelTool;
+  requestToolApproval: typeof requestToolApproval;
+  executeTool: typeof executeTool;
+}
+
 /** in-process host-tool 桥:与 `POST /:sid/kernel-tool` 同一信任闸口(T-D),免 HTTP。 */
-export function makeInProcessExecuteTool(defaultAgentPath = 'forge'): HostExecuteToolFn {
+export function makeInProcessExecuteTool(
+  defaultAgentPath = 'forge',
+  deps: Partial<HostToolBridgeDeps> = {},
+): HostExecuteToolFn {
+  const _getSessionManager = deps.getSessionManager ?? getSessionManager;
+  const _loadAgentRecord = deps.loadAgentRecord ?? loadAgentRecord;
+  const _checkKernelTool = deps.checkKernelTool ?? checkKernelTool;
+  const _requestToolApproval = deps.requestToolApproval ?? requestToolApproval;
+  const _executeTool = deps.executeTool ?? executeTool;
   return async (name: string, args: unknown, sid?: string, agentId?: string): Promise<unknown> => {
     if (!sid) throw new Error('forgeax-core kernel: missing hostSessionId for host-tool bridge');
+    // 审计同 `POST /:sid/kernel-tool`:单 start 计 durationMs,每个决策出口恰追加一行(append-only)。
+    const start = Date.now();
     // 用本轮真实 agent(委派轮 = mochi 等)而非写死 defaultAgentPath:trustTier 求值、
     // requestToolApproval 卡片归属(agent→WS fan-out / owner)、executeTool 执行 context 都按它走。
     // 写死成 'forge' 会让被委派 agent 的权限卡错记到主 agent,turn 收尾的
     // denyPermissionsForSession(sid,'forge') 误杀其 pending,用户回答 resolve 不回去 → 卡死。
     const agentPath = agentId?.trim() || defaultAgentPath;
-    const session = getSessionManager().peek(sid) ?? (await getSessionManager().open(sid));
+    const session = _getSessionManager().peek(sid) ?? (await _getSessionManager().open(sid));
     const agent = session.scheduler.getAgent(agentPath);
-    if (!agent) throw new Error(`forgeax-core kernel: agent '${agentPath}' not live in session ${sid}`);
+    if (!agent) {
+      // agent 不在线 —— trustTier 尚未求得,与 sessions.ts 一致记 'unknown' / allow=false。
+      appendToolAudit({ sid, agent: agentPath, tool: name, trustTier: 'unknown', allow: false, error: `agent '${agentPath}' not live in session`, durationMs: Date.now() - start, ts: start });
+      throw new Error(`forgeax-core kernel: agent '${agentPath}' not live in session ${sid}`);
+    }
 
     // 信任闸:own=full;imported=deny 危险集。权威 trustTier 按加载路径求(fail-closed)。
     let trustTier: 'own' | 'imported' = 'imported';
     try {
-      trustTier = (await loadAgentRecord(agentPath, { projectRoot: defaultProjectRoot() })).trustTier;
+      trustTier = (await _loadAgentRecord(agentPath, { projectRoot: defaultProjectRoot() })).trustTier;
     } catch {
       /* fail-closed → imported */
     }
     // R2-08:imported 写禁但「当前游戏目录内」豁免 —— 传 args/projectRoot/activeGame 供作用域判定。
     const projectRoot = defaultProjectRoot();
-    const decision = checkKernelTool(trustTier, name, { args, projectRoot, activeGame: getActiveGame(projectRoot) });
+    const decision = _checkKernelTool(trustTier, name, { args, projectRoot, activeGame: getActiveGame(projectRoot) });
     tt('htb.decision', { name, agent: agentPath, sid, trustTier, outcome: decision.outcome, cap: decision.capability });
-    if (decision.outcome === 'deny') throw new Error(decision.reason ?? `denied by trust tier: ${name}`);
+    if (decision.outcome === 'deny') {
+      // 信任闸硬拒 —— 审计记录 allow=false。
+      appendToolAudit({ sid, agent: agentPath, tool: name, trustTier, allow: false, error: decision.reason ?? `denied by trust tier: ${name}`, durationMs: Date.now() - start, ts: start });
+      throw new Error(decision.reason ?? `denied by trust tier: ${name}`);
+    }
     // ask:弹权限卡阻塞等用户(命中本会话 remember 直放);拒绝/超时 → 抛(fail-closed)。
     if (decision.outcome === 'ask') {
       tt('htb.approval-wait', { name, agent: agentPath, sid, cap: decision.capability });
-      const approved = await requestToolApproval({
+      const approved = await _requestToolApproval({
         eventBus: session.eventBus,
         sid,
         agent: agentPath,
@@ -63,22 +93,29 @@ export function makeInProcessExecuteTool(defaultAgentPath = 'forge'): HostExecut
         ...(decision.reason ? { reason: decision.reason } : {}),
       });
       tt('htb.approval-result', { name, agent: agentPath, approved });
-      if (!approved) throw new Error(`denied by user: ${name}`);
+      if (!approved) {
+        // 用户拒绝 —— 审计记录 allow=false。
+        appendToolAudit({ sid, agent: agentPath, tool: name, trustTier, allow: false, error: 'denied by user', durationMs: Date.now() - start, ts: start });
+        throw new Error(`denied by user: ${name}`);
+      }
     }
 
     tt('htb.exec-start', { name, agent: agentPath });
-    const _t0 = Date.now();
     try {
-      const out = await executeTool(
+      const out = await _executeTool(
         name,
         (args ?? {}) as Record<string, unknown>,
         agent.agentContext.tools.list(),
         agent.agentContext,
       );
-      tt('htb.exec-done', { name, agent: agentPath, ms: Date.now() - _t0 });
+      tt('htb.exec-done', { name, agent: agentPath, ms: Date.now() - start });
+      // 工具执行成功 —— allow=true / ok=true。
+      appendToolAudit({ sid, agent: agentPath, tool: name, trustTier, allow: true, ok: true, durationMs: Date.now() - start, ts: start });
       return out;
     } catch (e) {
-      tt('htb.exec-error', { name, agent: agentPath, ms: Date.now() - _t0, err: (e as Error).message });
+      tt('htb.exec-error', { name, agent: agentPath, ms: Date.now() - start, err: (e as Error).message });
+      // 工具执行抛出 —— allow=true / ok=false,审计后照旧 rethrow。
+      appendToolAudit({ sid, agent: agentPath, tool: name, trustTier, allow: true, ok: false, error: (e as Error).message, durationMs: Date.now() - start, ts: start });
       throw e;
     }
   };

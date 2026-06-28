@@ -324,9 +324,15 @@ export function mapClaudeEvent(raw: ClaudeRawEvent, state: ClaudeMapperState): C
 }
 
 /** Drain a final 'done' if the stream ended without a `result` event
- *  (e.g. the subprocess exited cleanly but we never saw the closing line). */
-export function flushClaudeMapper(state: ClaudeMapperState): ChatEvent[] {
+ *  (e.g. the subprocess exited cleanly but we never saw the closing line).
+ *  `stopReason` defaults to 'end_turn'; pass 'cancelled' on the abort path so
+ *  the kernel collapses a killed-by-abort exit into turn.done{cancelled}
+ *  (instead of an `error`) — same `done` shape, reason chosen by the caller. */
+export function flushClaudeMapper(
+  state: ClaudeMapperState,
+  stopReason: 'end_turn' | 'cancelled' = 'end_turn',
+): ChatEvent[] {
   if (state.doneEmitted) return [];
   state.doneEmitted = true;
-  return [{ type: 'done', stopReason: 'end_turn' }];
+  return [{ type: 'done', stopReason }];
 }

@@ -12,9 +12,10 @@
  *   - `own`(builtin/forge):读/写/编辑/委派/**exec/network 直放**(写代码 + 跑 shell/curl
  *     是 Forge 主循环,本机用户主动发起,不打断);**只有 `{credential, delete}` → `ask`**
  *     (读密钥/token/env、显式删除工具需确认)。破坏性操作另由 charter prompt 约束。
- *   - `imported`(marketplace/用户导入):读/委派 **直放**;`credential` **硬 deny**(绝不给不可信
+ *   - `imported`(marketplace/用户导入):**只**读/委派 **直放**;`credential` **硬 deny**(绝不给不可信
  *     pack 真凭据);`{exec, network}` → `ask`;`{write, delete}` 走 R2-08 游戏目录作用域:
- *     **目录内 → `ask`、目录外 → `deny`**。
+ *     **目录内 → `ask`、目录外 → `deny`**;**其余一切(含未命名分类 `other`)→ fail-closed `deny`**
+ *     —— 不可信 pack 上叫不出名字的工具没资格静默放行(R2-09)。
  *
  * R2-08 写/删作用域:目标路径解析进当前激活游戏目录 `.forgeax/games/<slug>/` 之内才在沙箱内;
  * 拿不到路径/projectRoot ⇒ fail-closed(deny)。
@@ -78,6 +79,19 @@ const TIER_DENY: Record<TrustTier, ReadonlySet<Capability>> = {
   imported: new Set<Capability>(['credential']),
 };
 
+/** per-tier「直放」能力集(经前面各档过滤后仍可静默放行的能力)。
+ *  own:自己的可信 agent,除 ask 集外其余(读/写/编辑/exec/network/委派/other)全直放 → `null` 表通配。
+ *  imported:不可信 pack,**只**显式信任 `read`/`delegate`;凡不在此集、又未被前面分支处理的
+ *    能力(尤其 `other` 这类叫不出名字的工具)→ **弹卡交人判断(ask)**,而非静默放行(R2-09:
+ *    不可信工具默认不直放)。选 ask 不选 deny:deny 无回退路径(无发卡 / 无 remember / 无 per-tool
+ *    allowlist,唯一"解"是把整包升 own,代价过大),ask 把否决权交还用户且支持本会话 remember
+ *    (§8 人为最终权威 / §9 优雅降级)。凭据(硬 deny)与作用域外写删(deny)等真危险已在前档拦死。
+ *    `delegate` 原语实际由 ALWAYS_ALLOW 提前短路,列于此处仅为「读表即知 imported 信任面」的 SSOT。 */
+const TIER_ALLOW: Record<TrustTier, ReadonlySet<Capability> | null> = {
+  own: null,
+  imported: new Set<Capability>(['read', 'delegate']),
+};
+
 /** 走 R2-08 游戏目录作用域判定的能力(imported 专属:目录内→ask,目录外→deny)。 */
 const SCOPED_CAPS: ReadonlySet<Capability> = new Set<Capability>(['write', 'delete']);
 
@@ -112,7 +126,8 @@ export interface TrustContext {
 }
 
 /** 闸口判定(三档):allowlist > 硬 deny > imported write/delete 作用域(内 ask / 外 deny)
- *  > tier ask 集 > 直放。 */
+ *  > tier ask 集 > per-tier 直放集(own 通配 / imported 仅 {read,delegate});其余(imported 未知能力)
+ *  → ask 交人判断(不静默放行、也不静默拒,§8/§9)。 */
 export function checkKernelTool(
   trustTier: TrustTier | undefined,
   toolName: string,
@@ -140,8 +155,14 @@ export function checkKernelTool(
     return decide('ask', cap, `confirm ${cap}: ${toolName}`);
   }
 
-  // 4) 其余直放(read / own 的 write / delegate / other)。
-  return decide('allow', cap);
+  // 4) per-tier 直放集:own=通配(null)直放;imported 只直放显式信任的 {read, delegate}。
+  const allowSet = TIER_ALLOW[tier];
+  if (allowSet === null || allowSet.has(cap)) return decide('allow', cap);
+  // 不在直放集、又未被前面 1)-3) 处理的能力(imported 的 `other` 等叫不出名字的工具):
+  //   **不静默放行、也不静默 deny**,而是弹卡交人判断(ask)。理由见 TIER_ALLOW 注释:
+  //   deny 无回退路径(代价是整包升 own),ask 保留用户否决权 + 本会话 remember(§8/§9)。
+  //   ask 的 allow 字段仍为 false → 旧只看 .allow 的调用方依旧不会误自动放行(fail-closed 姿态不变)。
+  return decide('ask', cap, `confirm untrusted ${cap} tool: ${toolName}`);
 }
 
 /** 工具入参里可能携带目标路径的字段(按惯例)。 */

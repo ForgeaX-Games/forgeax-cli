@@ -286,19 +286,26 @@ export class CodexKernel implements AgentKernel {
         }
       } catch (streamErr) {
         if (!state.doneEmitted) {
-          yield { kind: 'turn.usage' };
-          yield {
-            kind: 'error',
-            error: { code: 'protocol', message: `codex stream error: ${(streamErr as Error).message}` },
-          };
-          yield { kind: 'turn.done', reason: 'error' };
+          if (ac.signal.aborted) {
+            // 取消杀进程会把读流打断成异常 —— 这是主动中断,收口为 cancelled 而非 error
+            // (R4-05)。复用 flushCodexMapper 的 cancelled 分支,不手搓终态形状。
+            for (const ev of flushCodexMapper(state, { code: 0, stderr: '' }, true)) yield ev;
+          } else {
+            yield { kind: 'turn.usage' };
+            yield {
+              kind: 'error',
+              error: { code: 'protocol', message: `codex stream error: ${(streamErr as Error).message}` },
+            };
+            yield { kind: 'turn.done', reason: 'error' };
+          }
         }
         return;
       }
 
       const exitInfo = await exit;
       // 兜底:进程退出但 mapper 从未发过终态(无 turn.completed/failed)。
-      for (const ev of flushCodexMapper(state, exitInfo)) yield ev;
+      // 被取消杀进程(ac.signal.aborted)→ 收口 cancelled 而非 exit-code error。
+      for (const ev of flushCodexMapper(state, exitInfo, ac.signal.aborted)) yield ev;
     } finally {
       if (credToken) revokeToken(credToken);
       if (req.callId) CodexKernel.inflight.delete(req.callId);

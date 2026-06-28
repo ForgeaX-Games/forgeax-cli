@@ -139,7 +139,14 @@ export class ClaudeCodeKernel implements AgentKernel {
 
       const exitInfo = await exit;
       if (!state.doneEmitted) {
-        if (exitInfo.code !== 0) {
+        if (signal.aborted) {
+          // 取消语义(R4-05):杀进程导致 exitInfo.code !== 0,但这是「用户/编排层
+          // 主动中断」而非真崩溃 —— 必须收口为 turn.done{cancelled},而非 error。
+          // 经 cc profile 的 done 路径(stopReason:'cancelled' → wireStopToKernel
+          // → 'cancelled')复用同一终态构造,保持 DRY、不手搓 raw 事件形状。
+          // flushClaudeMapper 自身置 doneEmitted,无需在此重复。
+          for (const ev of flushClaudeMapper(state, 'cancelled')) yield* chatEventToKernel(ev);
+        } else if (exitInfo.code !== 0) {
           const tail = exitInfo.stderr.split('\n').filter(Boolean).slice(-3).join(' | ').trim();
           yield* chatEventToKernel({ type: 'error', message: `claude exited ${exitInfo.code}${tail ? ': ' + tail : ''}` });
         } else {

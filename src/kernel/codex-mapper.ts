@@ -209,13 +209,19 @@ export function* mapCodexEvent(raw: CodexRawEvent, state: CodexMapperState): Gen
 }
 
 /** 进程退出但从未发过终态(无 turn.completed/failed)时的兜底。
- *  保证不变量:turn.usage 必在 turn.done 之前。 */
+ *  保证不变量:turn.usage 必在 turn.done 之前。
+ *  `aborted=true`(被取消杀进程)时:exit.code 必非零,但这是主动中断而非真崩溃 ——
+ *  收口为 turn.done{cancelled}(R4-05:取消后最后一个事件必须是 cancelled,而非 error)。 */
 export function* flushCodexMapper(
   state: CodexMapperState,
   exit: { code: number; stderr: string },
+  aborted = false,
 ): Generator<KernelEvent> {
   if (state.doneEmitted) return;
-  if (exit.code === 0) {
+  if (aborted) {
+    yield { kind: 'turn.usage' };
+    yield { kind: 'turn.done', reason: 'cancelled' };
+  } else if (exit.code === 0) {
     yield { kind: 'turn.usage' };
     yield { kind: 'turn.done', reason: 'stop' };
   } else {
