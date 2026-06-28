@@ -102,21 +102,25 @@ export class CheckpointManager {
     let sc = this.sessions.get(session.sid);
     if (!sc) {
       const pm = getPathManager();
+      // 绑定 game slug 由路径派生(PR2):derived defaultDir = basename(sessionWorkDir)。
+      // 无 slug(纯会话/无 game)或该 slug 无 game 目录 → 纯会话模式,不做盘面快照。
       const slug = session.config.defaultDir;
       let gameDir: string | null = null;
       let store: SnapshotStore | null = null;
-      try {
-        const dir = pm.user().gameDir(slug);
-        if (existsSync(dir)) {
-          gameDir = dir;
-          store = this.stores.get(slug) ?? null;
-          if (!store) {
-            store = new SnapshotStore(`${pm.user().root()}/checkpoints/${slug}`);
-            this.stores.set(slug, store);
+      if (slug) {
+        try {
+          const dir = pm.user().gameDir(slug);
+          if (existsSync(dir)) {
+            gameDir = dir;
+            store = this.stores.get(slug) ?? null;
+            if (!store) {
+              store = new SnapshotStore(`${pm.user().root()}/checkpoints/${slug}`);
+              this.stores.set(slug, store);
+            }
           }
+        } catch {
+          /* defaultDir 不是合法 slug → 纯会话模式 */
         }
-      } catch {
-        /* defaultDir 不是合法 slug('default' 无目录等)→ 纯会话模式 */
       }
       sc = new SessionCheckpoints(
         session.sid,

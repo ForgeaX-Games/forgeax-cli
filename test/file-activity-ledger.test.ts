@@ -52,7 +52,7 @@ async function createSessionWithGame(
   const gameDir = pm.user().gameDir(slug);
   mkdirSync(gameDir, { recursive: true });
   writeFileSync(join(gameDir, "forge.json"), "{}\n", "utf-8");
-  const initial = await sm.create({ displayName: slug, defaultDir: slug });
+  const initial = await sm.create({ displayName: slug });
   const sid = initial.sid;
   await sm.close(sid);
   const agentRoot = pm.session(sid).agent("root");
@@ -86,7 +86,9 @@ describe("file-activity ledger", () => {
     expect(rec.op).toBe("write");
     expect(rec.isCreate).toBe(true);
     expect(typeof rec.path).toBe("string");
-    expect((rec.path as string).endsWith("/.forgeax/games/fileact-1/src/foo.ts")).toBe(true);
+    // PR2: agent cwd = layout.sessionWorkDir (generic harness = projectRoot); the
+    // write resolves under cwd. Assert the relative tail, not a game-dir prefix.
+    expect((rec.path as string).endsWith("/src/foo.ts")).toBe(true);
     expect(rec.bytes).toBe("export const x = 1;\n".length);
 
     // lock should be released after the write returns

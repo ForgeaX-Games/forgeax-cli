@@ -72,17 +72,26 @@ export function createSessionsRouter() {
 
   r.get('/', (c) => {
     const sm = getSessionManager();
-    return c.json({ sessions: sm.list() });
+    // Scope the list to a single game (整个 session 面板按 game 收口). `?game=<slug>`
+    // wins; absent → fall back to the active game so every surface (TopBar dropdown
+    // / TabStrip) only ever shows the current game's sessions. The bound game slug
+    // is the path-derived `defaultDir` carried on each list entry. No game resolvable
+    // (generic / brand-new workspace with no active game) → return everything,
+    // preserving the un-scoped behaviour.
+    const game = c.req.query('game') || getActiveGame(defaultProjectRoot()) || null;
+    const all = sm.list();
+    const sessions = game ? all.filter((e) => e.defaultDir === game) : all;
+    return c.json({ sessions });
   });
 
   r.post('/', async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const sm = getSessionManager();
-    // defaultDir precedence: explicit body value → the workspace's active game
-    // (so a new session's cli opens in whatever game the user is on) → 'default'.
+    // Permanent binding (plan B PR2): the new session is bound to the current
+    // active game by the injected SessionLayout (paths.allocate) — its home
+    // becomes <games>/<activeSlug>/sessions/<sid>/. No defaultDir is passed/stored.
     const session = await sm.create({
       displayName: body.displayName,
-      defaultDir: body.defaultDir ?? getActiveGame(defaultProjectRoot()) ?? 'default',
       defaultModels: body.defaultModels,
       timezone: body.timezone,
       autoStart: body.autoStart,
@@ -248,6 +257,11 @@ export function createSessionsRouter() {
     if (typeof content !== 'string' || !content) {
       return c.json({ error: 'content (string) required' }, 400);
     }
+    // 写时迁移(plan B PR2-compat):这是 UI 的主发消息端点。若 sid 还是 pre-PR2 老 session
+    // (home/扁平),先把整份目录迁进当前项目 games/<bound-slug>/sessions/<sid>/,确保老历史 +
+    // 新记录都落项目下。幂等;已在项目内 / 非老 session → no-op。必须在 open 之前(迁移会先
+    // close 再 move,open 随后从新位置 hydrate)。
+    await sm.prepareForWrite(sid);
     const session = await sm.open(sid);
     session.scheduler.start();
 
@@ -492,9 +506,12 @@ export function createSessionsRouter() {
     } catch {
       /* fail-closed → imported */
     }
-    // R2-08:imported 写禁但「当前游戏目录内」豁免 —— 传 args/projectRoot/activeGame 供作用域判定。
+    // R2-08:imported 写禁但「该 session 绑定的 game 目录内」豁免。永久绑定(PR2)下豁免基准
+    // 必须是 session 自己绑的 game(config.defaultDir 由路径派生),**不是**全局 active game——
+    // 否则绑 A、active 切 B 时会误判 A 自己的写。session 未绑则回落 active game。
     const projectRoot = defaultProjectRoot();
-    const decision = checkKernelTool(trustTier, toolName, { args, projectRoot, activeGame: getActiveGame(projectRoot) });
+    const scopeGame = session.config?.defaultDir ?? getActiveGame(projectRoot);
+    const decision = checkKernelTool(trustTier, toolName, { args, projectRoot, activeGame: scopeGame });
     if (decision.outcome === 'deny') {
       // 信任闸硬拒 —— 审计记录 allow=false
       appendToolAudit({ sid, agent: agentPath, tool: toolName, trustTier, allow: false, error: decision.reason ?? 'denied by trust tier', durationMs: Date.now() - start, ts: start });

@@ -45,7 +45,7 @@ async function createSessionWithRootAndTeammate(displayName: string, slug: strin
   mkdirSync(gameDir, { recursive: true });
 
   const sm = initSessionManager(pm);
-  const initial = await sm.create({ displayName, defaultDir: slug });
+  const initial = await sm.create({ displayName });
   const sid = initial.sid;
   await sm.close(sid);
 

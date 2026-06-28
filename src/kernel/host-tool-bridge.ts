@@ -71,9 +71,12 @@ export function makeInProcessExecuteTool(
     } catch {
       /* fail-closed → imported */
     }
-    // R2-08:imported 写禁但「当前游戏目录内」豁免 —— 传 args/projectRoot/activeGame 供作用域判定。
+    // R2-08:imported 写禁但「该 session 绑定的 game 目录内」豁免。永久绑定(PR2)下豁免基准
+    // 是 session 自己绑的 game(config.defaultDir 由路径派生),非全局 active game——绑 A、
+    // active 切 B 时不会误判 A 自己的写。session 未绑则回落 active game。
     const projectRoot = defaultProjectRoot();
-    const decision = _checkKernelTool(trustTier, name, { args, projectRoot, activeGame: getActiveGame(projectRoot) });
+    const scopeGame = session.config?.defaultDir ?? getActiveGame(projectRoot);
+    const decision = _checkKernelTool(trustTier, name, { args, projectRoot, activeGame: scopeGame });
     tt('htb.decision', { name, agent: agentPath, sid, trustTier, outcome: decision.outcome, cap: decision.capability });
     if (decision.outcome === 'deny') {
       // 信任闸硬拒 —— 审计记录 allow=false。

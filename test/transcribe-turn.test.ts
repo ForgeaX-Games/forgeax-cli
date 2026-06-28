@@ -34,7 +34,7 @@ afterEach(async () => {
 
 describe("transcribeKernelTurn — host-owned, kernel-agnostic ledger", () => {
   test("一轮(user+工具往返+assistant)写进 agentId 账本,形状对齐 replay,且不落 root", async () => {
-    const session = await getSessionManager().create({ defaultDir: "demo-game", displayName: "t" });
+    const session = await getSessionManager().create({ displayName: "t" });
     const sid = session.sid;
     // agentId 故意取一个**未 scaffold、不在 tree** 的 marketplace persona id ——
     // 复现旧启发式会落到 depth-1(root) 的场景;修复后应写到 "mochi" 自身。
@@ -84,7 +84,7 @@ describe("transcribeKernelTurn — host-owned, kernel-agnostic ledger", () => {
   });
 
   test("providerId 写进 hook:turnStart + hook:assistantMessage 账本(刷新后还原来源 badge)", async () => {
-    const session = await getSessionManager().create({ defaultDir: "demo-game", displayName: "tp" });
+    const session = await getSessionManager().create({ displayName: "tp" });
     transcribeKernelTurn(session, "forge", {
       message: "hi",
       asstText: "yo",
@@ -101,7 +101,7 @@ describe("transcribeKernelTurn — host-owned, kernel-agnostic ledger", () => {
   });
 
   test("不传 providerId → 账本不带该键(向后兼容,不污染)", async () => {
-    const session = await getSessionManager().create({ defaultDir: "demo-game", displayName: "tp2" });
+    const session = await getSessionManager().create({ displayName: "tp2" });
     transcribeKernelTurn(session, "forge", {
       message: "hi",
       asstText: "yo",
@@ -115,7 +115,7 @@ describe("transcribeKernelTurn — host-owned, kernel-agnostic ledger", () => {
   });
 
   test("空轮(无文本/思考/工具)不落噪声", async () => {
-    const session = await getSessionManager().create({ defaultDir: "demo-game", displayName: "t2" });
+    const session = await getSessionManager().create({ displayName: "t2" });
     transcribeKernelTurn(session, "forge", {
       message: "ping",
       asstText: "",

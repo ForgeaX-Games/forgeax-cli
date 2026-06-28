@@ -34,15 +34,11 @@ const flushMicrotasks = () => new Promise<void>((r) => setImmediate(r));
  *  agent.json synchronously — no reliance on chokidar event delivery. */
 async function createSessionWithRoot(
   sm: ReturnType<typeof initSessionManager>,
-  opts: { displayName: string; defaultDir: string },
+  opts: { displayName: string },
 ): Promise<Session> {
-  // Bug-20260522: agent factory resolves defaultDir slug to an absolute
-  // game root via pm.user().gameDir(slug) and checks existsSync. Pre-create
-  // the game directory so the e2e agent spawn does not hit GAME_NOT_FOUND.
+  // PR2: the session's home + cwd come from the injected SessionLayout (no
+  // defaultDir). The agent's cwd = layout.sessionWorkDir(sid).
   const pm = getPathManager();
-  const gameDir = pm.user().gameDir(opts.defaultDir);
-  mkdirSync(gameDir, { recursive: true });
-
   const initial = await sm.create(opts);
   const sid = initial.sid;
   await sm.close(sid);
@@ -59,8 +55,7 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
 
     const session = await createSessionWithRoot(sm, {
       displayName: "smoke",
-      defaultDir: "smoke-game",
-    });
+      });
 
     // 直接通过 bus 模拟「用户喂一句话给 root」—— 这条 routed event
     // 应该被 _bindLedgerPersistence 捕到，并落到 root 的 ledger 里。
@@ -99,7 +94,7 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
   test("stream:* 事件不落 ledger（per ref _bindEventBus 行为）", async () => {
     const pm = (await import("../src/fs/path-manager")).getPathManager();
     const sm = initSessionManager(pm);
-    const session = await createSessionWithRoot(sm, { displayName: "no-stream", defaultDir: "x" });
+    const session = await createSessionWithRoot(sm, { displayName: "no-stream" });
 
     session.eventBus.emit({
       source: "agent:root",
@@ -132,7 +127,7 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
     // AGENT_DEFAULTS 兜底，逻辑等价于"自动 scaffold conscious"。
     const pm = (await import("../src/fs/path-manager")).getPathManager();
     const sm = initSessionManager(pm);
-    const session = await createSessionWithRoot(sm, { displayName: "scaffold", defaultDir: "x" });
+    const session = await createSessionWithRoot(sm, { displayName: "scaffold" });
 
     const ioriDir = pm.session(session.sid).agent("root/agents/iori").root();
     mkdirSync(ioriDir, { recursive: true });
@@ -157,7 +152,7 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
     // 走 "layer === agent → 永远 visible" 分支，不依赖 kits.user/session 开关。
     const pm = (await import("../src/fs/path-manager")).getPathManager();
     const sm = initSessionManager(pm);
-    const session = await createSessionWithRoot(sm, { displayName: "kit", defaultDir: "x" });
+    const session = await createSessionWithRoot(sm, { displayName: "kit" });
 
     // Drop a valid tool kit under root agent's `kits/demo/tools/echo.ts`.
     const rootLayer = pm.session(session.sid).agent("root");
@@ -198,7 +193,7 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
     // 把 v1 装进 registry），之后改内容再 flushReloads 验证 polling 出新版本。
     const pm = (await import("../src/fs/path-manager")).getPathManager();
     const sm = initSessionManager(pm);
-    const session = await createSessionWithRoot(sm, { displayName: "hot1", defaultDir: "x" });
+    const session = await createSessionWithRoot(sm, { displayName: "hot1" });
 
     const rootLayer = pm.session(session.sid).agent("root");
     const kitToolsDir = join(rootLayer.resourceDir("kits"), "hot", "tools");
@@ -262,7 +257,7 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
     const sm = initSessionManager(pm);
     expect(sm.logger).toBeDefined();
 
-    const session = await createSessionWithRoot(sm, { displayName: "log", defaultDir: "x" });
+    const session = await createSessionWithRoot(sm, { displayName: "log" });
     const layer = pm.session(session.sid);
 
     // 业务代码直接调 session.logger.info（plumbing / scheduler 路径）
@@ -305,7 +300,7 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
     const pm = (await import("../src/fs/path-manager")).getPathManager();
     const { runWithSession } = await import("../src/core/logger");
     const sm = initSessionManager(pm);
-    const s = await sm.create({ displayName: "R", defaultDir: "r-game" });
+    const s = await sm.create({ displayName: "R" });
 
     runWithSession(s.sid, () => console.warn("from-session"));
     console.log("from-global");
@@ -328,12 +323,12 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
     const pm = (await import("../src/fs/path-manager")).getPathManager();
     const sm = initSessionManager(pm, { maxSessions: 1 });
 
-    const a = await sm.create({ displayName: "a", defaultDir: "a" });
+    const a = await sm.create({ displayName: "a" });
     const aSid = a.sid;
     // 即使有 cli 在订阅 eventBus，也不影响淘汰决策 —— 订阅状态由外层（如 WsHub）自管。
     const unsubscribe = a.eventBus.observe(() => {});
 
-    await sm.create({ displayName: "b", defaultDir: "b" });
+    await sm.create({ displayName: "b" });
 
     // a 已经被 LRU 软 close；reopen 会从盘 hydrate 出新实例
     const aReopen = await sm.open(aSid);
@@ -344,35 +339,30 @@ describe("Session E2E — bus → ledger → reopen → replay", () => {
     await sm.close(aSid);
   });
 
-  test("AC-02 full-chain cwd: session.json defaultDir → game dir exists → agent boots → ctx.cwd === game absolute path", async () => {
-    // Create a session bound to 'test-game' defaultDir. The helper
-    // createSessionWithRoot calls sm.create -> sm.close -> sm.open which
-    // triggers attachAgent internally. After attach, agentContext.cwd must
-    // equal pm.user().gameDir('test-game') via realpath normalization.
-    const pm = (await import("../src/fs/path-manager")).getPathManager();
+  test("AC-02 full-chain cwd: injected layout.sessionWorkDir → agent boots → ctx.cwd === that dir", async () => {
+    // PR2: cwd no longer comes from a stored defaultDir; it comes from the
+    // injected SessionLayout. Inject a layout whose sessionWorkDir is a real
+    // game dir and assert the booted agent's ctx.cwd equals it.
+    const { initPathManager, getPathManager } = await import("../src/fs/path-manager");
+    const { FlatSessionLayout } = await import("../src/fs/session-layout");
+    const sessionsRoot = join(userRoot, "sessions");
+    const gameDir = join(userRoot, "games", "test-game");
+    mkdirSync(gameDir, { recursive: true });
+    initPathManager({ userRoot, layout: new FlatSessionLayout(sessionsRoot, gameDir) });
+    const pm = getPathManager();
     const sm = initSessionManager(pm);
 
-    const session = await createSessionWithRoot(sm, {
-      displayName: "cwd-test",
-      defaultDir: "test-game",
-    });
+    const session = await createSessionWithRoot(sm, { displayName: "cwd-test" });
 
-    // attachAgent builds a FreshBaseAgent via the agentFactory injected by
-    // _buildSession — that factory resolves session.config.defaultDir into
-    // sessionCwd and passes it to the agent constructor.
     await session.scheduler.attachAgent("root");
     const agent = session.scheduler.getAgent("root");
     expect(agent).not.toBeNull();
-
-    const expected = pm.user().gameDir("test-game");
     const ctx = agent!.agentContext;
 
-    // AC-02: agentContext.cwd IS the resolved game root absolute path.
-    expect(ctx.cwd).toBe(expected);
-
+    // AC-02: agentContext.cwd IS the injected sessionWorkDir (absolute).
+    expect(ctx.cwd).toBe(gameDir);
     // AC-03 / AC-04 (fs-bridge view): fs.resolve('.') === cwd.
-    const resolved = ctx.fs.resolve(".");
-    expect(resolved).toBe(ctx.cwd);
+    expect(ctx.fs.resolve(".")).toBe(ctx.cwd);
 
     await sm.close(session.sid);
   });

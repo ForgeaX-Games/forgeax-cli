@@ -141,10 +141,12 @@ export interface AgentJson {
 export interface SessionConfig {
   /** UI display name; may be empty. */
   displayName?: string;
-  /** game-project slug locked to this session. Resolved at agent boot by
-   *  `_buildSession` via `pm.user().gameDir(defaultDir)` and accessible as
-   *  `agentContext.cwd`. Required at create() time. */
-  defaultDir: string;
+  /** game-project slug bound to this session. **Derived** (not persisted): the
+   *  binding lives in the session's on-disk path (path-as-SSOT, plan B PR2) and
+   *  SessionManager fills this in-memory field as `basename(sessionWorkDir(sid))`
+   *  for readers that want the slug. The agent's cwd comes from
+   *  `paths.sessionWorkDir(sid)`, not from this field. */
+  defaultDir?: string;
   /** Inherited by agent.json::models when an agent leaves the field unset. */
   defaultModels?: ModelsConfig;
   timezone?: string;

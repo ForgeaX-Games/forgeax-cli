@@ -47,6 +47,7 @@ import { createPrefsRouter } from '@forgeax/platform-io';
 import { sessionScope } from './api/lib/session-scope';
 import { bootCliProviders } from './cli-providers';
 import { initPathManager } from './fs/path-manager';
+import type { SessionLayout } from './fs/session-layout';
 import { ensureUserDirDefaults } from './defaults/scaffold';
 import { initSessionManager } from './core/session-manager';
 import './llm/register-all';
@@ -74,6 +75,11 @@ export interface ProductContext {
   /** UI 资产清洗能力(marketplace 后端),由产品壳注入 —— 编排层不直接依赖 marketplace。
    *  缺省 ⇒ /__ce-api__ 的资产清洗步骤跳过(用原图)。 */
   uiAssetCleanup?: UiAssetCleanup;
+  /** Where session state trees land + how sessions are enumerated. Injected by
+   *  the product shell (studio = project-local `.forgeax/sessions/<sid>`).
+   *  Omitted ⇒ generic layout (`<userRoot>/sessions/<sid>`), i.e. forgeax-cli
+   *  runs game-agnostic as a standalone CLI. */
+  sessionLayout?: SessionLayout;
 }
 
 export interface ForgeaxApp {
@@ -99,7 +105,7 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
     /* non-fatal at boot; settings UI can fix brand */
   }
 
-  const pm = initPathManager({ projectRoot });
+  const pm = initPathManager({ projectRoot, layout: ctx.sessionLayout });
   await ensureUserDirDefaults(pm);
   const sm = initSessionManager(pm);
   const restored = await sm.bootAutoStart();

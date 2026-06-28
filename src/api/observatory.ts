@@ -16,7 +16,7 @@ import { streamSSE } from 'hono/streaming';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSessionManager } from '../core/session-manager';
-import { initPathManager } from '../fs/path-manager';
+import { getPathManager } from '../fs/path-manager';
 import { adapt, createAdapterState, makeInitEvent, type AgentEventOut } from '../observatory/event-adapter';
 import { inspectAgentPrompt } from '../observatory/prompt-modules';
 import { replaySessionEvents } from '../observatory/ledger-replay';
@@ -55,11 +55,10 @@ function newestMtimeUnder(dir: string): number {
 
 function listSessionsWithMtime(): SessionEntry[] {
   const sm = getSessionManager();
-  const pm = initPathManager();
-  const root = pm.user().sessionsDir();
+  const pm = getPathManager();
   const out: SessionEntry[] = [];
   for (const entry of sm.list()) {
-    const sessionDir = join(root, entry.sid);
+    const sessionDir = pm.session(entry.sid).root();
     let updated: number | undefined;
     let created: number | undefined;
     try {
@@ -92,7 +91,7 @@ function resolveSid(raw: string | undefined | null): string | null {
 
 export function createObservatoryRouter() {
   const r = new Hono();
-  const pm = initPathManager();
+  const pm = getPathManager();
 
   r.get('/sessions', (c) => {
     // Flat array; frontend's useSessionList expects `[{id, displayName?, defaultDir?, updated?, created?}]`.

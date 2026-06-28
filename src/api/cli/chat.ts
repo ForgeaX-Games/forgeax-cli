@@ -139,6 +139,14 @@ export function createCliRouter() {
       return c.json({ ok: false, error: "message (non-empty string) required" }, 400);
     }
 
+    // 写时迁移(plan B PR2-compat):若这是对一个 pre-PR2 老 session 发新消息,先把整份
+    // 老 session 目录搬进当前项目 games/<slug>/sessions/<sid>/,确保新老记录都落项目下。
+    // 幂等:已在项目内 / 非老 session → no-op。读路径(list/open 预览)不经此。
+    if (body.sessionId) {
+      try { await getSessionManager().prepareForWrite(body.sessionId); }
+      catch (e) { console.warn(`[chat] prepareForWrite(${body.sessionId}) failed: ${(e as Error).message}`); }
+    }
+
     // ── M1:新内核路径(FORGEAX_KERNEL=kernel)。compose → resolveKernel.runTurn →
     //    toWireEvents → SSE。前端按 event 名消费,零改。旧 cli-provider 路径见下方(默认 fallback)。
     if (kernelEnabled()) {

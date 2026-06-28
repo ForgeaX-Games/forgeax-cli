@@ -4,9 +4,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { aggregateUsage } from '../src/api/usage';
+import { listSessionDirs } from '../src/fs/session-layout';
 
 const TMP = `/tmp/forgeax-usage-${process.pid}`;
 const SESSIONS = join(TMP, 'sessions');
+
+/** Build aggregateUsage opts from a flat sessions root (mirrors how the router
+ *  derives them from the active SessionLayout). */
+function opts(root: string, extra?: { sid?: string; since?: number }) {
+  return { sessionIds: listSessionDirs(root), sessionRoot: (s: string) => join(root, s), ...extra };
+}
 
 function writeEvents(sid: string, agentPath: string, lines: any[]) {
   const dir = join(SESSIONS, sid, 'agents', agentPath, 'events');
@@ -39,7 +46,7 @@ afterEach(() => {
 
 describe('aggregateUsage', async () => {
   it('returns zeroed report when sessions dir is missing', async () => {
-    const r = await aggregateUsage({ sessionsDir: join(TMP, 'nope') });
+    const r = await aggregateUsage(opts(join(TMP, 'nope')));
     expect(r.totals).toEqual({ calls: 0, inputTokens: 0, outputTokens: 0 });
     expect(r.byModel).toEqual([]);
     expect(r.sourcedFrom.sessionsScanned).toBe(0);
@@ -55,7 +62,7 @@ describe('aggregateUsage', async () => {
       asstMsg('claude-opus', 200, 40, T0),
     ]);
 
-    const r = await aggregateUsage({ sessionsDir: SESSIONS });
+    const r = await aggregateUsage(opts(SESSIONS));
 
     expect(r.totals).toEqual({ calls: 4, inputTokens: 380, outputTokens: 75 });
     expect(r.sourcedFrom.sessionsScanned).toBe(2);
@@ -86,7 +93,7 @@ describe('aggregateUsage', async () => {
         JSON.stringify({ type: 'hook:assistantMessage', ts: T0, payload: {} }),
       ].join('\n'),
     );
-    const r = await aggregateUsage({ sessionsDir: SESSIONS });
+    const r = await aggregateUsage(opts(SESSIONS));
     expect(r.totals.calls).toBe(1);
     expect(r.totals.inputTokens).toBe(10);
   });
@@ -94,7 +101,7 @@ describe('aggregateUsage', async () => {
   it('filters by sid', async () => {
     writeEvents('keep', 'root', [asstMsg('m', 1, 1, T0)]);
     writeEvents('drop', 'root', [asstMsg('m', 99, 99, T0)]);
-    const r = await aggregateUsage({ sessionsDir: SESSIONS, sid: 'keep' });
+    const r = await aggregateUsage(opts(SESSIONS, { sid: 'keep' }));
     expect(r.totals).toEqual({ calls: 1, inputTokens: 1, outputTokens: 1 });
     expect(r.bySession.map((s) => s.sid)).toEqual(['keep']);
   });
@@ -104,14 +111,14 @@ describe('aggregateUsage', async () => {
       asstMsg('m', 1, 1, T0),
       asstMsg('m', 2, 2, T1),
     ]);
-    const r = await aggregateUsage({ sessionsDir: SESSIONS, since: T1 });
+    const r = await aggregateUsage(opts(SESSIONS, { since: T1 }));
     expect(r.totals).toEqual({ calls: 1, inputTokens: 2, outputTokens: 2 });
   });
 
   it('walks nested sub-agents', async () => {
     writeEvents('s1', 'root', [asstMsg('m', 1, 1, T0)]);
     writeEvents('s1', 'root/agents/child', [asstMsg('m', 5, 5, T0)]);
-    const r = await aggregateUsage({ sessionsDir: SESSIONS });
+    const r = await aggregateUsage(opts(SESSIONS));
     expect(r.totals).toEqual({ calls: 2, inputTokens: 6, outputTokens: 6 });
   });
 
@@ -126,7 +133,7 @@ describe('aggregateUsage', async () => {
         payload: { usage: { inputTokens: 7, outputTokens: 3 } },
       }) + '\n',
     );
-    const r = await aggregateUsage({ sessionsDir: SESSIONS });
+    const r = await aggregateUsage(opts(SESSIONS));
     expect(r.byModel).toEqual([{ model: 'unknown', calls: 1, inputTokens: 7, outputTokens: 3 }]);
   });
 });

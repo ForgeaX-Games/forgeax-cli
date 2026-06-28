@@ -72,7 +72,6 @@ async function makeSidWithRootAgent(): Promise<{ sid: string; agentPath: string 
   // session 容器走 SessionManager（不再有 commands/sessions 模块）—— 用户钉死
   // 的边界：容器 CRUD 走 REST/SM，commands 只承载 agent 树 + 历史查询。
   const session = await getSessionManager().create({
-    defaultDir: "demo-game",
     displayName: "hist",
   });
   // scaffold root agent on disk —— hist 测试不跑 LLM，只读 ledger，所以不必

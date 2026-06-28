@@ -74,7 +74,11 @@ async function* walkAgentEventFiles(agentDir: string): AsyncGenerator<string> {
 }
 
 export async function aggregateUsage(opts: {
-  sessionsDir: string;
+  /** Ids of the sessions to aggregate (from the active SessionLayout). */
+  sessionIds: string[];
+  /** Resolve a session id to its on-disk root. Decoupled from any single
+   *  physical "sessions" parent dir so this survives a per-game layout. */
+  sessionRoot: (sid: string) => string;
   sid?: string;
   since?: number;
 }): Promise<UsageReport> {
@@ -85,11 +89,9 @@ export async function aggregateUsage(opts: {
   let sessionsScanned = 0;
   let eventsScanned = 0;
 
-  const sids = opts.sid
-    ? [opts.sid]
-    : (await readDirEntries(opts.sessionsDir)).map((e) => e.name);
+  const sids = opts.sid ? [opts.sid] : opts.sessionIds;
   for (const sid of sids) {
-    const agentsDir = join(opts.sessionsDir, sid, 'agents');
+    const agentsDir = join(opts.sessionRoot(sid), 'agents');
     let agentTops: Dirent[];
     try { agentTops = await readdir(agentsDir, { withFileTypes: true }); } catch { continue; }
     sessionsScanned += 1;
@@ -152,8 +154,13 @@ export function createUsageRouter() {
     const sid = c.req.query('sid') || undefined;
     const sinceRaw = c.req.query('since');
     const since = sinceRaw ? Number(sinceRaw) : undefined;
-    const sessionsDir = getPathManager().user().sessionsDir();
-    const report = await aggregateUsage({ sessionsDir, sid, since: Number.isFinite(since) ? since : undefined });
+    const pm = getPathManager();
+    const report = await aggregateUsage({
+      sessionIds: pm.listSessionIds(),
+      sessionRoot: (s) => pm.session(s).root(),
+      sid,
+      since: Number.isFinite(since) ? since : undefined,
+    });
     return c.json(report);
   });
   return r;

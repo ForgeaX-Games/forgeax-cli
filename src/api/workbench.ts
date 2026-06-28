@@ -248,59 +248,6 @@ async function listAllGames(root: string): Promise<Array<{ slug: string; name: s
   return out;
 }
 
-/**
- * Make every live session's cli follow a newly-active game.
- *
- * The active game is now an explicit, persisted binding (active-game.json).
- * But each *running* session also carries its own `config.defaultDir` slug
- * (drives the native agent's terminal cwd) and a long-lived bash shell whose
- * working directory is "sticky" (cached process + persisted .shell_state/cwd +
- * in-memory blackboard CURRENT_DIR). Recording the new active game alone would
- * only affect *future* sessions; the session the user is actively chatting in
- * would stay glued to the old game's dir. So for each in-memory session we:
- *   1. setDefaultDir(slug)         — persist + hot-reload session.json so a
- *                                    later agent (re)boot resolves the new cwd;
- *   2. repoint blackboard CURRENT_DIR → new game dir for every agent, so the
- *                                    next shell command's initialCwd is correct;
- *   3. reset the agent's sticky terminal so a fresh shell spawns at that cwd.
- *
- * Resident sessions (peek != null) are relocated live (config + blackboard +
- * terminal). Non-resident sessions get only their on-disk defaultDir rewritten
- * (setDefaultDirOnDisk) — no hydration — so their next open() boots in the new
- * active game. Active game is workspace-global: every session follows it.
- */
-async function propagateActiveGame(projectRoot: string, slug: string): Promise<void> {
-  let gameDir: string;
-  try {
-    gameDir = getPathManager().user().gameDir(slug);
-  } catch {
-    return; // invalid slug — nothing to point at
-  }
-  if (!existsSync(gameDir)) return;
-
-  const sm = getSessionManager();
-  const tm = getTerminalManager();
-  for (const entry of sm.list()) {
-    const session = sm.peek(entry.sid);
-    if (!session) {
-      // Not resident — no live shell/blackboard to relocate, but we still
-      // rewrite the stored defaultDir so the next open() boots its agent in
-      // the new active game instead of the slug it was created with. (Active
-      // game is workspace-global; every session follows it.)
-      try { sm.setDefaultDirOnDisk(entry.sid, slug); } catch { /* skip bad session */ }
-      continue;
-    }
-    try {
-      await sm.setDefaultDir(entry.sid, slug);
-      for (const node of session.tree.list()) {
-        session.blackboard.set(node.path, BLACKBOARD_KEYS.CURRENT_DIR, gameDir, { persist: false });
-        await tm.resetAgentCwd(node.path);
-      }
-    } catch {
-      // a single bad session shouldn't block the rest of the propagation
-    }
-  }
-}
 
 export function createWorkbenchRouter(): Hono {
   const router = new Hono();
@@ -595,7 +542,6 @@ export function createWorkbenchRouter(): Hono {
       // it as the explicit active game and relocate live sessions' cli there,
       // so the agent's shell stops resolving against the previous game.
       setActiveGame(projectRoot, slug);
-      await propagateActiveGame(projectRoot, slug);
       return c.json({ ok: true, slug, gameDir: friendlyPath(gameDir) });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 500);
@@ -617,7 +563,6 @@ export function createWorkbenchRouter(): Hono {
       return c.json({ error: `.forgeax/games/${slug} not found`, slug }, 404);
     }
     setActiveGame(projectRoot, slug);
-    await propagateActiveGame(projectRoot, slug);
     return c.json({ ok: true, activeSlug: slug });
   });
 

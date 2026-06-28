@@ -27,6 +27,8 @@ import type {
 } from "./types.js";
 import { resolveUserDir } from "./user-dir.js";
 import { defaultProjectRoot } from '@forgeax/platform-io';
+import { safeSegment } from "./safe-segment.js";
+import { FlatSessionLayout, type SessionLayout } from "./session-layout.js";
 
 // ─── Builtin root (fixed) ────────────────────────────────────────────────────
 
@@ -80,10 +82,11 @@ class UserLayer implements UserLayerAPI {
 }
 
 class SessionLayer implements SessionLayerAPI {
-  private readonly _root: string;
-  constructor(private readonly _sid: string, userRoot: string) {
-    this._root = join(userRoot, "sessions", safeSegment(_sid));
-  }
+  /** `root` is the fully-resolved session-tree root, computed by the active
+   *  SessionLayout (sid already traversal-guarded there). SessionLayer no longer
+   *  knows it lives under `<userRoot>/sessions` — that decision moved to the
+   *  injected layout. */
+  constructor(private readonly _sid: string, private readonly _root: string) {}
   sid() { return this._sid; }
   root() { return this._root; }
   configFile() { return join(this._root, "session.json"); }
@@ -131,19 +134,41 @@ class AgentLayer implements AgentLayerAPI {
 class PathManager implements PathManagerAPI {
   private readonly _builtin: BuiltinLayer;
   private readonly _user: UserLayer;
+  /** Where session state trees land + how sessions are enumerated. Injected by
+   *  the product shell (studio = project-local); defaults to the generic
+   *  layout (`<userRoot>/sessions`) so a standalone, game-agnostic cli runs
+   *  exactly as before the seam existed. */
+  private readonly _layout: SessionLayout;
 
-  constructor(opts: { builtinRoot?: string; userRoot?: string; projectRoot?: string } = {}) {
+  constructor(opts: { builtinRoot?: string; userRoot?: string; projectRoot?: string; layout?: SessionLayout } = {}) {
+    const projectRoot = resolve(opts.projectRoot ?? defaultProjectRoot());
     this._builtin = new BuiltinLayer(resolve(opts.builtinRoot ?? defaultBuiltinRoot()));
-    this._user = new UserLayer(
-      resolve(opts.userRoot ?? resolveUserDir()),
-      resolve(opts.projectRoot ?? defaultProjectRoot()),
-    );
+    this._user = new UserLayer(resolve(opts.userRoot ?? resolveUserDir()), projectRoot);
+    // generic default: sessions flat under <userRoot>/sessions, agent cwd = projectRoot.
+    this._layout = opts.layout ?? new FlatSessionLayout(this._user.sessionsDir(), projectRoot);
   }
 
   builtin(): BuiltinLayerAPI { return this._builtin; }
   user(): UserLayerAPI { return this._user; }
   session(sid: string): SessionLayerAPI {
-    return new SessionLayer(sid, this._user.root());
+    return new SessionLayer(sid, this._layout.sessionRoot(sid));
+  }
+  /** Establish a new session's home (binding + dir) via the active layout. */
+  allocate(sid: string): { sessionRoot: string; workDir: string } {
+    return this._layout.allocate(sid);
+  }
+  /** The agent working directory for a session (studio = its bound game dir). */
+  sessionWorkDir(sid: string): string {
+    return this._layout.sessionWorkDir(sid);
+  }
+  listSessionIds(): string[] {
+    return this._layout.listSessionIds();
+  }
+  isLegacySession(sid: string): boolean {
+    return this._layout.isLegacySession?.(sid) ?? false;
+  }
+  migrateLegacyIntoProject(sid: string): void {
+    this._layout.migrateLegacyIntoProject?.(sid);
   }
 }
 
@@ -151,7 +176,7 @@ class PathManager implements PathManagerAPI {
 
 let _instance: PathManager | null = null;
 
-export function initPathManager(opts?: { builtinRoot?: string; userRoot?: string; projectRoot?: string }): PathManager {
+export function initPathManager(opts?: { builtinRoot?: string; userRoot?: string; projectRoot?: string; layout?: SessionLayout }): PathManager {
   _instance = new PathManager(opts);
   return _instance;
 }
@@ -167,16 +192,6 @@ export function resetPathManager(): void {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Reject path segments that would escape their parent (slashes, `..`, abs).
- *  Loaders accept user-provided names (slug / agent name / kit id) — this is
- *  the cheap defense against directory traversal. */
-function safeSegment(name: string): string {
-  if (!name || name.includes("/") || name.includes("\\") || name === ".." || isAbsolute(name)) {
-    throw new Error(`PathManager: unsafe path segment ${JSON.stringify(name)}`);
-  }
-  return name;
-}
 
 /** Normalize an agent path like "iori/agents/suzu" — accepts `/` separators only,
  *  forbids absolute / parent traversal. 套娃形态由 caller 显式带 "agents/" 段。 */

@@ -103,6 +103,25 @@ export interface PathManagerAPI {
   builtin(): BuiltinLayerAPI;
   user(): UserLayerAPI;
   session(sid: string): SessionLayerAPI;
+  /** Establish a new session's home (binding + dir) via the active SessionLayout
+   *  (studio = bind to current active game). Returns its state-tree root + the
+   *  agent working directory. The single writer; call before session(sid). */
+  allocate(sid: string): { sessionRoot: string; workDir: string };
+  /** Agent working directory for a session (studio = its bound game dir;
+   *  generic = projectRoot). */
+  sessionWorkDir(sid: string): string;
+  /** Ids of every session on disk, per the active SessionLayout (generic =
+   *  scan `<userRoot>/sessions`; studio = its game-nested layout). Callers
+   *  filter (e.g. by session.json presence) as before. */
+  listSessionIds(): string[];
+  /** Is `sid` currently stored in a legacy (pre-PR2) location rather than under
+   *  the project? Delegates to the layout; `false` for layouts without a legacy
+   *  notion (generic). */
+  isLegacySession(sid: string): boolean;
+  /** Move a legacy session's whole dir into the project + rebind (studio).
+   *  No-op when the layout has no legacy notion or the session is already local.
+   *  Precondition: caller released open handles. */
+  migrateLegacyIntoProject(sid: string): void;
 }
 
 // ─── FSWatcher ───────────────────────────────────────────────────────────────

@@ -56,6 +56,11 @@ export function createWsHandler(hub: WsHub): WebSocketHandler<WsClientData> {
       if (!sid) return;
 
       try {
+        // 写时迁移(plan B PR2-compat)前移到 WS 连接时:打开老 session 的聊天连接即把它迁入
+        // 当前项目 games/<bound-slug>/sessions/<sid>/,**在订阅 eventBus 之前**完成。否则若等到
+        // 发消息时才迁移,prepareForWrite 的 close+reopen 会换掉 session 实例 + eventBus,本 WS
+        // 仍盯着旧(已 dispose 的)eventBus → 实时回复推不到前端(看似卡死)。幂等;非老 session no-op。
+        await getSessionManager().prepareForWrite(sid);
         const session = await getSessionManager().open(sid);
         session.scheduler.start();
         const dispose = session.eventBus.observe((event: Event, emitterId?: string) => {

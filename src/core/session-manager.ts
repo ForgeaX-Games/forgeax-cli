@@ -11,20 +11,22 @@
  *  - **create only builds an empty session container**: writes session.json +
  *    blackboard.json, never writes any agent.json. Agents are created via a separate
  *    path (spawn / hand-write agent.json); AgentTree only grows nodes when it sees
- *    agent.json. Game-project slug is resolved at agent boot in
- *    `_buildSession.agentFactory` via `pm.user().gameDir(slug)` and injected as
- *    `agentContext.cwd`. No symlink under session dir.
+ *    agent.json. The agent's working directory is the session's `sessionWorkDir`
+ *    (studio = its permanently-bound game dir), injected as `agentContext.cwd`.
+ *  - **permanent binding (plan B PR2)**: a session is bound to its game at create
+ *    time by the injected SessionLayout (path-as-SSOT). There is no `setDefaultDir`
+ *    rebind and no stored `defaultDir` field — the bound slug is *derived* from the
+ *    session's on-disk path (`basename(sessionWorkDir)`) and surfaced on the
+ *    in-memory `config.defaultDir` for readers that still want the slug.
  *
- *  接口（plan §3.1.2）：create / open / close / delete / list / setDefaultDir /
- *  bootAutoStart。 */
+ *  接口：create / open / close / delete / list / bootAutoStart。 */
 
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ConsciousAgent } from "./conscious-agent";
 import { Session } from "./session";
-import { GameDirResolutionError } from "../fs/errors";
 import { setSessionManager, peekSessionManager, clearSessionManager } from "./session-registry";
 import type { AgentFactory } from "./scheduler";
 import type { BaseAgent } from "./base-agent";
@@ -46,20 +48,15 @@ import { createOrGetFSWatcher } from "../fs/watcher";
 import { recoverAgentLedger } from "../ledger/ledger-recovery";
 
 // create() only builds an empty session container (session.json +
-// blackboard.json). Agents are created via a separate path (spawn /
-// hand-write agent.json) — Session imposes no "top-level agent" assumption;
-// AgentTree only grows nodes when it sees agent.json. Game-project slug is
-// resolved at agent boot in `_buildSession.agentFactory` via
-// `pm.user().gameDir(slug)` and injected as `agentContext.cwd`. No symlink
-// under session dir.
+// blackboard.json). The session's home + game binding are established by the
+// injected SessionLayout via `paths.allocate(sid)` (studio = bind to the current
+// active game, creating <games>/<slug>/sessions/<sid>/). The agent's cwd is the
+// session's `sessionWorkDir` (the bound game dir). No symlink under session dir.
 
 // ─── 类型 ───────────────────────────────────────────────────────────────
 
 export interface CreateSessionOpts {
   displayName?: string;
-  /** game-project slug. Resolved at agent boot in `_buildSession.agentFactory`
-   *  via `pm.user().gameDir(slug)` and injected as `agentContext.cwd`. */
-  defaultDir: string;
   defaultModels?: ModelsConfig;
   timezone?: string;
   /** 缺省 true；显式 false 才跳过 boot autoStart。 */
@@ -69,7 +66,9 @@ export interface CreateSessionOpts {
 export interface SessionListEntry {
   sid: string;
   displayName?: string;
-  defaultDir: string;
+  /** Bound game slug, derived from the session's path (may be undefined for a
+   *  generic/unbound session). */
+  defaultDir?: string;
   autoStart: boolean;
   /** Epoch ms of the session's last on-disk activity — newest mtime across
    *  the session's agents/ tree (where ledger / event jsonl land on each
@@ -205,23 +204,26 @@ export class SessionManager {
 
   async create(opts: CreateSessionOpts): Promise<Session> {
     const sid = randomUUID();
+    // Establish the session's home + game binding (studio = current active game).
+    // allocate is the single writer + creates the dir; path is the SSOT of the
+    // binding afterward (no defaultDir persisted).
+    const { workDir } = this.paths.allocate(sid);
     const layer = this.paths.session(sid);
-    await mkdir(layer.root(), { recursive: true });
 
-    // 1) session.json
-    const config: SessionConfig = {
+    // 1) session.json —— **不**持久化 defaultDir(绑定由路径派生);只存稳定字段。
+    const persisted = {
       displayName: opts.displayName,
-      defaultDir: opts.defaultDir,
       defaultModels: opts.defaultModels,
       timezone: opts.timezone,
       autoStart: opts.autoStart ?? true,
     };
-    writeFileSync(layer.configFile(), JSON.stringify(config, null, 2) + "\n", "utf-8");
+    writeFileSync(layer.configFile(), JSON.stringify(persisted, null, 2) + "\n", "utf-8");
 
     // 2) blackboard.json（空）
     writeFileSync(join(layer.root(), "blackboard.json"), "{}\n", "utf-8");
 
-    // 3) 内存态 Session
+    // 3) 内存态 Session —— config.defaultDir 派生自绑定 workDir(供 readers)。
+    const config: SessionConfig = { ...persisted, defaultDir: basename(workDir) };
     const session = this._buildSession(sid, config);
     this.map.set(sid, session);
     this.lru.touch(sid);
@@ -245,7 +247,9 @@ export class SessionManager {
     if (!existsSync(layer.configFile())) {
       throw new Error(`SessionManager.open: session not found '${sid}'`);
     }
-    const config = JSON.parse(readFileSync(layer.configFile(), "utf-8")) as SessionConfig;
+    const persisted = JSON.parse(readFileSync(layer.configFile(), "utf-8")) as SessionConfig;
+    // defaultDir 派生自绑定路径(path-as-SSOT),不从盘读。
+    const config: SessionConfig = { ...persisted, defaultDir: this._deriveSlug(sid) };
     const session = this._buildSession(sid, config);
     this.map.set(sid, session);
     this.lru.touch(sid);
@@ -279,11 +283,10 @@ export class SessionManager {
 
   list(): SessionListEntry[] {
     const out: SessionListEntry[] = [];
-    const sessionsDir = this.paths.user().sessionsDir();
-    if (!existsSync(sessionsDir)) return out;
-    let entries: string[];
-    try { entries = readdirSync(sessionsDir); }
-    catch { return out; }
+    // Enumeration goes through the active SessionLayout (generic = scan
+    // <userRoot>/sessions; studio = its project-local layout), so list() never
+    // assumes a single physical sessions root.
+    const entries = this.paths.listSessionIds();
 
     for (const sid of entries) {
       const layer = this.paths.session(sid);
@@ -298,7 +301,7 @@ export class SessionManager {
       // listSessionsWithMtime, but kept here so /api/sessions (single source
       // of truth for tabs) carries the field too — observatory remains its
       // own dashboard-focused view.
-      const sessionDir = join(sessionsDir, sid);
+      const sessionDir = layer.root();
       let lastActivityAt: number | undefined;
       try {
         const agentsMtime = newestMtimeUnder(join(sessionDir, "agents"));
@@ -311,7 +314,8 @@ export class SessionManager {
       out.push({
         sid,
         displayName: cfg.displayName,
-        defaultDir: cfg.defaultDir,
+        // 绑定 game slug 由路径派生(path-as-SSOT),不读盘上字段。
+        defaultDir: this._deriveSlug(sid),
         autoStart: cfg.autoStart ?? true,
         lastActivityAt,
       });
@@ -319,38 +323,14 @@ export class SessionManager {
     return out;
   }
 
-  /** Rewrite a session's defaultDir on disk WITHOUT hydrating it into memory.
-   *  Used by propagateActiveGame for non-resident sessions: their next open()
-   *  must boot the agent in the new active game rather than the (possibly stale)
-   *  slug they were created with. Resident sessions go through setDefaultDir
-   *  instead (in-memory config + default_dir_changed event + live relocation).
-   *  No-op when the config is unreadable or already on `slug`. */
-  setDefaultDirOnDisk(sid: string, slug: string): void {
-    const cfgFile = this.paths.session(sid).configFile();
-    let cfg: SessionConfig;
-    try { cfg = JSON.parse(readFileSync(cfgFile, "utf-8")) as SessionConfig; }
-    catch { return; }
-    if (cfg.defaultDir === slug) return;
-    cfg.defaultDir = slug;
-    writeFileSync(cfgFile, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
-  }
-
-  /** 切 game-project slug —— 写 session.json + publish event 让 sandbox 重 acquire。
-   *  sandbox 替换 / blackboard / tree / ledger 一律不动（plan §4.2）。 */
-  async setDefaultDir(sid: string, slug: string): Promise<void> {
-    const session = await this.open(sid);
-    session.config = { ...session.config, defaultDir: slug };
-    writeFileSync(
-      this.paths.session(sid).configFile(),
-      JSON.stringify(session.config, null, 2) + "\n",
-      "utf-8",
-    );
-    session.eventBus.publish({
-      source: "session",
-      type: "default_dir_changed",
-      ts: Date.now(),
-      payload: { content: slug },
-    });
+  /** 写前迁移(plan B PR2-compat):在对**老 session** 写新内容前调用。若该 sid 还在
+   *  legacy 位置(pre-PR2 的 home/扁平),先 close(flush WAL + 释放句柄)再把整份目录 move
+   *  进项目 `games/<slug>/sessions/<sid>/`,使新老记录都落当前项目。已在项目内 / generic
+   *  layout / 非老 session → no-op。读路径不触发(只有写消息才迁移)。caller 随后正常 open。 */
+  async prepareForWrite(sid: string): Promise<void> {
+    if (!this.paths.isLegacySession(sid)) return; // 已项目本地 / 无 legacy 概念
+    if (this.map.has(sid)) await this.close(sid); // 释放句柄后再搬目录
+    this.paths.migrateLegacyIntoProject(sid);
   }
 
   /** Server boot 扫 sessions/，对 autoStart !== false 的全 open。caller 自己决定
@@ -396,35 +376,30 @@ export class SessionManager {
         );
       }
 
-      // Resolve sessionCwd from session.config.defaultDir slug (bug-20260522).
-      // Missing defaultDir → undefined → agent falls back to agentDir.
-      // Stale slug → log warn + fall back to undefined. Throwing here would
-      // kill agentFactory before ConsciousAgent ctor, leaving no per-agent
-      // queue registered → user_input emits silently drop and no turn ever
-      // runs. Graceful Degradation principle: a missing game dir should not
-      // brick the entire chat path; agentDir is a perfectly usable fallback.
+      // Agent cwd = the session's bound working directory (studio = its game dir),
+      // resolved from the injected SessionLayout (path-as-SSOT) — no stored slug.
+      // Missing/invalid → undefined → agent falls back to agentDir. Never throw
+      // here: that would kill agentFactory before ConsciousAgent ctor, leaving no
+      // per-agent queue → user_input drops silently. Graceful Degradation: a
+      // missing work dir must not brick the chat path; agentDir is a fine fallback.
       let sessionCwd: string | undefined;
-      const slug = session.config.defaultDir;
-      if (slug) {
-        try {
-          const gameRoot = this.paths.user().gameDir(slug);
-          if (existsSync(gameRoot)) {
-            sessionCwd = gameRoot;
-          } else {
-            session.logger.warn(
-              agentPath,
-              undefined,
-              `defaultDir slug "${slug}" → ${gameRoot} does not exist; falling back to agentDir`,
-            );
-          }
-        } catch (err: any) {
-          // safeSegment / paths.user().gameDir() throws on invalid slug
+      try {
+        const workDir = this.paths.sessionWorkDir(sid);
+        if (existsSync(workDir)) {
+          sessionCwd = workDir;
+        } else {
           session.logger.warn(
             agentPath,
             undefined,
-            `defaultDir slug "${slug}" invalid (${err?.message ?? err}); falling back to agentDir`,
+            `session workDir "${workDir}" does not exist; falling back to agentDir`,
           );
         }
+      } catch (err: any) {
+        session.logger.warn(
+          agentPath,
+          undefined,
+          `session workDir resolution failed (${err?.message ?? err}); falling back to agentDir`,
+        );
       }
 
       return new ConsciousAgent({
@@ -483,18 +458,26 @@ export class SessionManager {
     // 里会反注册（见 close()）。
     registerSessionLogger(sid, session.logger);
 
-    // Watch session.json for hot-reload of defaultDir / defaultModels / autoStart.
+    // Watch session.json for hot-reload of defaultModels / autoStart. defaultDir
+    // is NOT persisted (permanent binding, derived from path) — preserve the
+    // derived value across reloads so readers keep seeing the bound slug.
     const configFile = this.paths.session(sid).configFile();
     createOrGetFSWatcher().watchFile(configFile, () => {
       try {
         const updated = JSON.parse(readFileSync(configFile, "utf-8")) as SessionConfig;
-        session.config = updated;
+        session.config = { ...updated, defaultDir: session.config.defaultDir };
       } catch (err: any) {
         process.stderr.write(`[session-manager] session.json reload failed for '${sid}': ${err?.message ?? err}\n`);
       }
     }, { ownerId: `session:${sid}` });
 
     return session;
+  }
+
+  /** 派生绑定 game slug = basename(sessionWorkDir(sid))(path-as-SSOT)。防御性:
+   *  layout 解析失败(非法 slug 等)→ undefined,绝不让 session open/list 崩。 */
+  private _deriveSlug(sid: string): string | undefined {
+    try { return basename(this.paths.sessionWorkDir(sid)); } catch { return undefined; }
   }
 
   /** 读 + AGENT_DEFAULTS deep-merge。文件缺失时返回空 merge（让 BaseAgent 走全默认）。 */
