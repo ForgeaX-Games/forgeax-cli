@@ -9,8 +9,8 @@
  *
  * cursor 执行面与 CC/codex 的关键差异(供薄脊梁理解):
  *  - 驱动:`cursor-agent -p --output-format stream-json --stream-partial-output`;
- *    会话连续靠 cursor 自己的 chat id —— 首轮 `create-chat` 拿到 id(脊梁里做),
- *    后续 `--resume <id>`。
+ *    会话连续靠 cursor 自己的 chat id —— 首轮无 `--resume`(cursor 隐式新建 chat 并在
+ *    `system.init` 里自带 id,脊梁回填),后续 `--resume <id>`。
  *  - systemPrompt 无 flag(无 --append-system-prompt)→ 把 charter+persona 作「指令」
  *    前置进**首轮**消息(后续轮经 --resume 继承)。
  *  - headless 放行:`--trust`(headless 必需)+ `--force`(平滑基线,= acceptEdits 类比);
@@ -35,7 +35,7 @@ export {
 
 /**
  * 从中立 TurnRequest 拼 `cursor-agent -p ...` argv。
- * `cursorChatId` 非空 → resume(由脊梁首轮 create-chat 后回传);为空 = 首轮,
+ * `cursorChatId` 非空 → resume(由脊梁从上一轮 `system.init` 回填);为空 = 首轮,
  * 把 systemPrompt(charter/persona)前置进消息。
  */
 export function buildCursorArgs(req: TurnRequest, cursorChatId: string | undefined): string[] {

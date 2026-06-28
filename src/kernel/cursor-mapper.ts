@@ -67,10 +67,15 @@ export interface CursorMapperState {
   sessionId?: string;
   doneEmitted: boolean;
   lastUsage?: MappedUsage;
+  /** 本轮是否已发过至少一条 assistant `message.delta`。用于 `result` 兜底:cursor
+   *  偶尔(短/快回答)不发流式 delta,只发「最终整轮快照」(无 timestamp_ms,被去重
+   *  规则丢弃)→ 全程零 delta。此时拿 `result.result`(整轮全文)补一条 delta,
+   *  避免回答被静默吞掉。正常情况(已流式发过)则不补,防止整段重播。 */
+  emittedText: boolean;
 }
 
 export function createCursorMapperState(): CursorMapperState {
-  return { sessionId: undefined, doneEmitted: false, lastUsage: undefined };
+  return { sessionId: undefined, doneEmitted: false, lastUsage: undefined, emittedText: false };
 }
 
 function captureUsage(state: CursorMapperState, raw: RawUsage | undefined): void {
@@ -161,6 +166,7 @@ export function mapCursorEvent(raw: CursorRawEvent, state: CursorMapperState): K
         for (const block of content) {
           if (block?.type === 'text' && typeof block.text === 'string' && block.text) {
             out.push({ kind: 'message.delta', role: 'assistant', text: block.text });
+            state.emittedText = true;
           }
         }
       }
@@ -207,6 +213,11 @@ export function mapCursorEvent(raw: CursorRawEvent, state: CursorMapperState): K
         });
         out.push({ kind: 'turn.done', reason: 'error' });
       } else {
+        // 兜底:全程零流式 delta(短/快回答只有最终快照被去重丢弃)→ 用 result 全文补一条。
+        if (!state.emittedText && typeof raw.result === 'string' && raw.result) {
+          out.push({ kind: 'message.delta', role: 'assistant', text: raw.result });
+          state.emittedText = true;
+        }
         out.push({ kind: 'turn.usage', ...usageFields(state, raw) });
         out.push({ kind: 'turn.done', reason: 'stop' });
       }

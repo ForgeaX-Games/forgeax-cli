@@ -3,11 +3,18 @@
  * stream-json`)适配成中立 `AgentKernel`,与 ClaudeCodeKernel / CodexKernel 并列的
  * 第三个内核实现。
  *
- * **薄脊梁(spine)**:本文件只剩 cursor 执行面的「流程骨架」—— 首轮 `create-chat`
- * 拿 chat id(供 --resume) / spawn / ndjson → KernelEvent 的搬运 / 取消。**所有
- * cursor-isms(argv、systemPrompt 注入、ndjson→KernelEvent 映射)都锁在
- * `cursor-profile.ts`(+ `cursor-mapper.ts`)**。日后整对外迁到
- * `packages/kernel-adaptors/cursor` 时搬那两件,spine 上的中立契约不动。
+ * **薄脊梁(spine)**:本文件只剩 cursor 执行面的「流程骨架」—— spawn / ndjson →
+ * KernelEvent 的搬运 / 会话续接 / 取消。**所有 cursor-isms(argv、systemPrompt
+ * 注入、ndjson→KernelEvent 映射)都锁在 `cursor-profile.ts`(+ `cursor-mapper.ts`)**。
+ * 日后整对外迁到 `packages/kernel-adaptors/cursor` 时搬那两件,spine 上的中立契约不动。
+ *
+ * **会话续接 = 从首轮自带的 session_id 续接(不再额外 `create-chat` 预铸)**:
+ * cursor 在首轮 turn 的 `system.init` 事件里**自带** minted `session_id`(mapper 已
+ * 捕进 `state.sessionId`)。首轮直接发 turn(无 `--resume`,cursor 隐式新建 chat 并
+ * 回报 id),turn 结束后把该 id 记进 `threadToCursor`,后续轮 `--resume` 续接。这省掉
+ * 了每条 thread 首条消息约 2s 的冗余 `create-chat` 冷启动 spawn(它纯属重复——turn 流
+ * 本就携带同一个 id),并修复了「预铸 id 让 `isFirstTurn` 恒 false → charter/persona
+ * 从不注入」的隐性 bug。
  *
  * 「组装一轮」(systemPrompt/charter/persona)由编排层 `composeTurnRequest` 提供;
  * 本内核只负责 cursor 执行面。从 server 旧 cli-provider `providers/cursor-agent.ts`
@@ -37,6 +44,7 @@ import {
   mapCursorEvent,
   type CursorRawEvent,
 } from './cursor-profile';
+import { buildCursorHomeWithoutUserMcp, disposeCursorHome } from './cursor-home';
 
 export class CursorKernel implements AgentKernel {
   // id MUST match the UI's providerOverride for cursor (interface uses
@@ -52,7 +60,7 @@ export class CursorKernel implements AgentKernel {
   };
 
   private binaryPromise?: Promise<string>;
-  /** threadId → cursor 的 chat id(create-chat 后记下,用于 --resume)。 */
+  /** threadId → cursor 的 chat id(首轮从 `system.init` 回填,用于 --resume)。 */
   private readonly threadToCursor = new Map<string, string>();
   /** callId → 在飞 turn 的 AbortController(供 openHandle().cancel 杀进程)。 */
   private static readonly inflight = new Map<string, AbortController>();
@@ -64,57 +72,43 @@ export class CursorKernel implements AgentKernel {
     }));
   }
 
-  /** `cursor-agent create-chat` → 新 chat id(单独一行的 UUID)。失败返回
-   *  undefined,调用方退回无会话(--resume 缺省)单轮。 */
-  private async createChat(binary: string, env: Record<string, string>, cwd: string): Promise<string | undefined> {
-    try {
-      const proc = Bun.spawn({
-        cmd: [binary, 'create-chat'],
-        cwd,
-        env: { ...process.env, ...env },
-        stdout: 'pipe',
-        stderr: 'ignore',
-      });
-      const t = setTimeout(() => { try { proc.kill(); } catch { /* ignore */ } }, 15_000);
-      const out = (await new Response(proc.stdout).text()).trim();
-      const code = await proc.exited;
-      clearTimeout(t);
-      if (code !== 0) return undefined;
-      const m = out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-      return m?.[0];
-    } catch {
-      return undefined;
-    }
-  }
-
   async *runTurn(req: TurnRequest, signal: AbortSignal): AsyncIterable<KernelEvent> {
     const ac = new AbortController();
     if (signal.aborted) ac.abort();
     else signal.addEventListener('abort', () => ac.abort(), { once: true });
     if (req.callId) CursorKernel.inflight.set(req.callId, ac);
 
+    // tid + mapper state 提到 try 外:首轮无 chat id,turn 结束后要从 state.sessionId
+    // (cursor 在 system.init 里铸出的 id)回填 threadToCursor 供下一轮 --resume —— 回填
+    // 放在 finally,确保即使 turn 中途出错、只要已收到 system.init 也能续接。
+    const tid = req.session.threadId?.trim();
+    const state = createCursorMapperState();
+    // 加速(opt-in,默认关):仅当 FORGEAX_CURSOR_ISOLATE_MCP=1 时,用镜像 HOME 屏蔽用户个人
+    // 全局 `~/.cursor/mcp.json`(那些远程 MCP server 每轮握手 ~5s,与游戏开发无关)。默认/失败/
+    // Windows 返回 undefined → 退回真实 HOME(原有逻辑不变)。turn 结束 finally 清理。
+    let isoHome: string | undefined;
     try {
       const binary = await this.binary();
       const projectRoot = defaultProjectRoot();
+      isoHome = buildCursorHomeWithoutUserMcp();
 
       // cursor auth：CURSOR_API_KEY 透传(无则靠 `cursor-agent login`);imported pack 凭据地板：scrub。
       let env: Record<string, string> = {};
       if (process.env.CURSOR_API_KEY) env.CURSOR_API_KEY = process.env.CURSOR_API_KEY;
+      if (isoHome) env.HOME = isoHome;
       let envOverride: Record<string, string | undefined> | undefined;
       if (req.trustTier === 'imported') {
         envOverride = scrubbedSecretEnv();
         // scrub 后仍保留 cursor 自己的 key（非模型 key），否则无可用鉴权路径。
         if (process.env.CURSOR_API_KEY) envOverride = { ...envOverride, CURSOR_API_KEY: process.env.CURSOR_API_KEY };
+        if (isoHome) envOverride = { ...envOverride, HOME: isoHome };
         env = {};
       }
 
-      // 会话连续：首轮 create-chat 拿 cursor chat id 并记下；后续轮 --resume 复用。
-      const tid = req.session.threadId?.trim();
-      let cursorChatId = tid ? this.threadToCursor.get(tid) : undefined;
-      if (!cursorChatId) {
-        cursorChatId = await this.createChat(binary, env, projectRoot);
-        if (cursorChatId && tid) this.threadToCursor.set(tid, cursorChatId);
-      }
+      // 会话连续:本 thread 之前跑过 → 用记下的 cursor chat id `--resume`;首轮则
+      // cursorChatId=undefined(无 `--resume`,且 buildCursorArgs 据此前置 charter/persona)。
+      // 不再额外 spawn `create-chat` 预铸 id —— turn 自带的 system.init 已携带同一 id。
+      const cursorChatId = tid ? this.threadToCursor.get(tid) : undefined;
 
       const args = buildCursorArgs(req, cursorChatId);
       const { lines, exit } = spawnJsonl<CursorRawEvent>({
@@ -126,7 +120,6 @@ export class CursorKernel implements AgentKernel {
         ...(envOverride ? { envOverride } : {}),
       });
 
-      const state = createCursorMapperState();
       try {
         for await (const raw of lines) {
           for (const ev of mapCursorEvent(raw, state)) yield ev;
@@ -161,6 +154,13 @@ export class CursorKernel implements AgentKernel {
         }
       }
     } finally {
+      // 回填 cursor 在 system.init 里铸出的 chat id → 本 thread 下一轮 `--resume` 续接。
+      // 只在首次(尚无映射)写入,后续轮 resume 的同一 id 无需重写。
+      if (tid && state.sessionId && !this.threadToCursor.has(tid)) {
+        this.threadToCursor.set(tid, state.sessionId);
+      }
+      // 清理镜像 HOME(只删 symlink,绝不动真实 target)。
+      disposeCursorHome(isoHome);
       if (req.callId) CursorKernel.inflight.delete(req.callId);
     }
   }

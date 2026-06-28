@@ -84,6 +84,8 @@ describe('cursor-mapper', () => {
 
   test('result success → turn.usage BEFORE turn.done(stop), with token usage', () => {
     const { out, state } = run([
+      // normal case: text already streamed → result must NOT re-emit it as a fallback delta.
+      { type: 'assistant', timestamp_ms: 1, message: { content: [{ type: 'text', text: 'done' }] } },
       {
         type: 'result',
         subtype: 'success',
@@ -91,12 +93,32 @@ describe('cursor-mapper', () => {
         result: 'done',
         duration_ms: 1234,
         usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 5 },
-      } as CursorRawEvent,
-    ]);
-    expect(out).toHaveLength(2);
-    expect(out[0]).toEqual({ kind: 'turn.usage', inputTokens: 10, outputTokens: 20, cacheRead: 5, durationMs: 1234 });
-    expect(out[1]).toEqual({ kind: 'turn.done', reason: 'stop' });
+      },
+    ] as CursorRawEvent[]);
+    // 1 streamed delta + turn.usage + turn.done — no duplicate fallback delta.
+    expect(out.map((e) => e.kind)).toEqual(['message.delta', 'turn.usage', 'turn.done']);
+    expect(out[1]).toEqual({ kind: 'turn.usage', inputTokens: 10, outputTokens: 20, cacheRead: 5, durationMs: 1234 });
+    expect(out[2]).toEqual({ kind: 'turn.done', reason: 'stop' });
     expect(state.doneEmitted).toBe(true);
+  });
+
+  test('result fallback: zero streamed deltas → result.result becomes one message.delta', () => {
+    // cursor 短/快回答偶尔只发「最终快照」(无 timestamp_ms,被去重丢弃)→ 全程零 delta;
+    // 此时拿 result.result 兜底,回答不被静默吞掉。
+    const { out } = run([
+      // final snapshot only (no timestamp_ms) → dropped by dedupe
+      { type: 'assistant', message: { content: [{ type: 'text', text: '42' }] } },
+      { type: 'result', subtype: 'success', is_error: false, result: '42' },
+    ] as CursorRawEvent[]);
+    expect(out.map((e) => e.kind)).toEqual(['message.delta', 'turn.usage', 'turn.done']);
+    expect(out[0]).toEqual({ kind: 'message.delta', role: 'assistant', text: '42' });
+  });
+
+  test('result fallback does NOT fire on error subtype (only success path)', () => {
+    const { out } = run([
+      { type: 'result', subtype: 'error', is_error: true, result: 'boom' },
+    ] as CursorRawEvent[]);
+    expect(out.map((e) => e.kind)).toEqual(['turn.usage', 'error', 'turn.done']);
   });
 
   test('result error → turn.usage, error, turn.done(error)', () => {
