@@ -16,10 +16,10 @@ import { $ } from 'bun';
 //   <worktreeRoot>/                                    ← worktree root
 //   <worktreeRoot>/packages/server/test/<this-file>    ← import.meta.dir
 //   <worktreeRoot>/packages/server/src/api/workbench.ts
-//   <worktreeRoot>/packages/engine/packages/<pkg>/dist/index.d.ts
+//   <worktreeRoot>/packages/editor/packages/engine/packages/<pkg>/dist/index.d.ts
 
 const WORKTREE_ROOT = resolve(import.meta.dir, '..', '..', '..');
-const ENGINE_PKGS = join(WORKTREE_ROOT, 'packages', 'engine', 'packages');
+const ENGINE_PKGS = join(WORKTREE_ROOT, 'packages', 'editor', 'packages', 'engine', 'packages');
 
 function engineDtsPath(pkg: string): string {
   return join(ENGINE_PKGS, pkg, 'dist', 'index.d.ts');
@@ -46,7 +46,7 @@ function findTsc(): string {
 
 // The scaffold is no longer an inline `const main = \`...\`` literal in
 // workbench.ts — game creation now COPIES a template directory (see
-// workbench.ts::resolveGameTemplate → packages/engine/templates/game-default/).
+// workbench.ts::resolveGameTemplate → packages/editor/packages/engine/templates/game-default/).
 // The scaffold source of truth is that template's main.ts.
 function templateMainPath(): string {
   return join(ENGINE_PKGS, '..', 'templates', 'game-default', 'main.ts');

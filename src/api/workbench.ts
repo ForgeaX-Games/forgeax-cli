@@ -22,6 +22,8 @@ import { getSessionManager } from '../core/session-manager';
 import { getTerminalManager } from '../terminal/manager';
 import { BLACKBOARD_KEYS } from '../defaults/blackboard-vars';
 import type { FileActivityRecord } from '../ledger/file-activity-ledger';
+import { registry, listHistory, deleteHistory, createJob, getJob, updateJob, makeProgressFn, detectEngineRoots } from '../packager';
+import type { TargetPlatform } from '../packager';
 
 /**
  * Valid game slug: 2-41 chars, [a-z0-9] first then [a-z0-9-]*. No
@@ -89,7 +91,8 @@ function resolveGameTemplate(projectRoot: string): string | null {
   if (existsSync(userOverride)) return userOverride;
   // Use assetRoot() to locate the builtin template across all platforms/modes
   // (dev source tree, or packaged app). assetRoot() points to the 'packages' level.
-  const builtin = resolve(assetRoot(), '..', 'packages', 'engine', 'templates', 'game-default');
+  // Engine is now the editor's nested submodule (top-level packages/engine removed).
+  const builtin = resolve(assetRoot(), '..', 'packages', 'editor', 'packages', 'engine', 'templates', 'game-default');
   if (existsSync(builtin)) return builtin;
   return null;
 }
@@ -516,7 +519,7 @@ export function createWorkbenchRouter(): Hono {
     }
     const templateDir = resolveGameTemplate(projectRoot);
     if (!templateDir) {
-      return c.json({ error: 'game template not found — expected .forgeax/games/_template/ or packages/engine/templates/game-default/' }, 500);
+      return c.json({ error: 'game template not found — expected .forgeax/games/_template/ or packages/editor/packages/engine/templates/game-default/' }, 500);
     }
     try {
       await cp(templateDir, gameDir, { recursive: true });
@@ -609,7 +612,7 @@ export function createWorkbenchRouter(): Hono {
       // Run via its bin (Bun.spawn) so the ~2s compile stays off the event loop
       // and behind a process boundary; skip gracefully if the engine isn't built.
       try {
-        const tcBin = resolve(projectRoot, 'packages/engine/packages/engine-project/dist/cli.mjs');
+        const tcBin = resolve(projectRoot, 'packages/editor/packages/engine/packages/engine-project/dist/cli.mjs');
         if (existsSync(tcBin)) {
           const proc = Bun.spawn({
             cmd: [process.execPath || 'bun', tcBin, gameDir, '--json'],
@@ -636,66 +639,119 @@ export function createWorkbenchRouter(): Hono {
     }
   });
 
-  // ── POST /games/:slug/package — build a standalone, locally-runnable bundle ──
-  // Packages the game at .forgeax/games/<slug>/ into a self-contained static
-  // site under .forgeax/exports/<slug>/ (engine runtime + game + assets +
-  // shaders + a serve.sh). Runs the engine's export build script via bun.
+  // ── POST /games/:slug/package — cross-platform game packaging ──
+  // Body: { targetPlatform?, rebuildEngine?, forceRebuild? }
+  // Web builds are synchronous. Windows (and future native) builds run
+  // asynchronously — response returns a jobId immediately for polling.
   router.post('/games/:slug/package', async (c) => {
     const slug = c.req.param('slug');
     if (!GAME_SLUG_RE.test(slug ?? '')) {
       return c.json({ error: 'invalid slug' }, 400);
     }
+
+    let targetPlatform: TargetPlatform = 'web';
+    let rebuildEngine = false;
+    let forceRebuild = false;
+    let engineRoot: string | undefined;
+    try {
+      const body = await c.req.json() as {
+        targetPlatform?: string;
+        rebuildEngine?: boolean;
+        forceRebuild?: boolean;
+        engineRoot?: string;
+      } | null;
+      if (body?.targetPlatform) targetPlatform = body.targetPlatform as TargetPlatform;
+      if (body?.rebuildEngine) rebuildEngine = true;
+      if (body?.forceRebuild) forceRebuild = true;
+      if (body?.engineRoot) engineRoot = body.engineRoot;
+    } catch { /* default to 'web' */ }
+
     const projectRoot = defaultProjectRoot();
     const gameDir = resolve(projectRoot, '.forgeax/games', slug);
-    if (!existsSync(gameDir)) {
-      return c.json({ error: `.forgeax/games/${slug} not found`, slug }, 404);
+
+    // Windows / native platforms: async job
+    if (targetPlatform !== 'web') {
+      const job = createJob(slug!, targetPlatform);
+      const outDir = resolve(projectRoot, '.forgeax/exports', `${slug}-${targetPlatform}`);
+      const onProgress = makeProgressFn(job.id);
+
+      // Fire-and-forget — run in background
+      (async () => {
+        updateJob(job.id, { status: 'running', phase: 'starting' });
+        try {
+          const result = await registry.build({
+            slug: slug!,
+            gameDir,
+            projectRoot,
+            outDir,
+            platform: targetPlatform,
+            rebuildEngine,
+            forceRebuild,
+            engineRoot,
+            onProgress,
+          });
+          updateJob(job.id, {
+            status: result.ok ? 'success' : 'failed',
+            phase: result.ok ? 'done' : 'failed',
+            finishedAt: Date.now(),
+            result: result as unknown as Record<string, unknown>,
+          });
+        } catch (e) {
+          updateJob(job.id, {
+            status: 'failed',
+            phase: 'error',
+            finishedAt: Date.now(),
+            result: { ok: false, error: e instanceof Error ? e.message : String(e) },
+          });
+        }
+      })();
+
+      return c.json({ async: true, jobId: job.id, slug, platform: targetPlatform });
     }
-    // Route B: 影游(wb-reel)走专用 reel bundler，产物是无需 WebGPU 的独立影游站点；
-    // 普通 3D 引擎 game 走既有 build-standalone。检测仅看 reel/scenarios.json 的 activeId。
-    const reel = isReelGame(gameDir);
-    const buildSrc = resolve(
-      projectRoot,
-      reel ? 'packages/build/reel-src' : 'packages/build/engine-src',
-    );
-    const scriptRel = reel ? 'export/build-reel-standalone.ts' : 'export/build-standalone.ts';
-    if (!existsSync(resolve(buildSrc, scriptRel))) {
-      return c.json(
-        {
-          error: `export build script not found (packages/build/${reel ? 'reel-src' : 'engine-src'}/${scriptRel})`,
-        },
-        500,
-      );
-    }
+
+    // Web: synchronous
     const outDir = resolve(projectRoot, '.forgeax/exports', slug);
-    const bunBin = process.execPath || 'bun';
-    try {
-      const proc = Bun.spawn({
-        cmd: [bunBin, scriptRel, slug!, outDir],
-        cwd: buildSrc,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      if (code !== 0) {
-        return c.json({
-          error: 'standalone build failed',
-          exitCode: code,
-          detail: (stderr || stdout).split('\n').slice(-40).join('\n'),
-        }, 500);
-      }
-      return c.json({
-        ok: true,
-        slug,
-        outDir: friendlyPath(outDir),
-        runHint: `cd ${friendlyPath(outDir)} && ./serve.sh   # then open http://localhost:8123`,
-      });
-    } catch (e) {
-      return c.json({ error: (e as Error).message }, 500);
+    const result = await registry.build({
+      slug: slug!,
+      gameDir,
+      projectRoot,
+      outDir,
+      platform: targetPlatform,
+      rebuildEngine,
+      forceRebuild,
+      engineRoot,
+    });
+
+    if (!result.ok) {
+      const status = result.error?.includes('not found') ? 404 : 500;
+      return c.json(result, status);
     }
+    return c.json(result);
+  });
+
+  // ── GET /package/jobs/:id — poll async job progress ──
+  router.get('/package/jobs/:id', (c) => {
+    const job = getJob(c.req.param('id'));
+    if (!job) return c.json({ error: 'job not found' }, 404);
+    return c.json(job);
+  });
+
+  // ── GET /package/engine-roots — detect engine-root candidates for export ──
+  router.get('/package/engine-roots', (c) => {
+    return c.json({ roots: detectEngineRoots(resolve(assetRoot(), '..')) });
+  });
+
+  // ── GET /package/history — list packaging history ──
+  router.get('/package/history', (c) => {
+    return c.json({ records: listHistory() });
+  });
+
+  // ── DELETE /package/history/:id — delete a single history record ──
+  router.delete('/package/history/:id', (c) => {
+    const clean = c.req.query('clean') === '1';
+    const ok = deleteHistory(c.req.param('id'), clean);
+    if (!ok) return c.json({ error: 'record not found' }, 404);
+    return c.json({ ok: true });
   });
 
   // ── GET /events/recent — recent file activity across .forgeax/games/, with agent attribution ──
