@@ -21,12 +21,13 @@ import { ensureAgentScaffold, isValidAgentName } from '../core/agent-scaffold';
 import { resolvePersonaForAgent } from '../agents/loader';
 import { findMarketplaceManifest } from './lib/marketplace-manifest';
 import { defaultProjectRoot } from '@forgeax/platform-io';
-import { getActiveGame } from './lib/active-game';
+import { getPathManager } from '../fs/path-manager';
 import { resolveAsk } from '../core/ask-user-registry';
 import { randomUUID } from 'node:crypto';
 import { registerPermission, resolvePermission } from '../core/permission-registry';
 import { registerPerception, resolvePerception, pushPerceptionNote } from './lib/perception-registry';
 import { executeTool } from '../kits/tool/tool-executor';
+import { isForgeaxBuiltinTool, runForgeaxBuiltinTool } from '../kernel/forgeax-builtin-tools';
 import { checkKernelTool } from '../kernel/trust-gate';
 import { requestToolApproval, applyRememberOnReply } from '../kernel/tool-approval';
 import { getCheckpointManager, type RewindMode } from '../checkpoint/checkpoint-manager';
@@ -78,7 +79,7 @@ export function createSessionsRouter() {
     // is the path-derived `defaultDir` carried on each list entry. No game resolvable
     // (generic / brand-new workspace with no active game) → return everything,
     // preserving the un-scoped behaviour.
-    const game = c.req.query('game') || getActiveGame(defaultProjectRoot()) || null;
+    const game = c.req.query('game') || getPathManager().resolveScope() || null;
     const all = sm.list();
     const sessions = game ? all.filter((e) => e.defaultDir === game) : all;
     return c.json({ sessions });
@@ -510,7 +511,7 @@ export function createSessionsRouter() {
     // 必须是 session 自己绑的 game(config.defaultDir 由路径派生),**不是**全局 active game——
     // 否则绑 A、active 切 B 时会误判 A 自己的写。session 未绑则回落 active game。
     const projectRoot = defaultProjectRoot();
-    const scopeGame = session.config?.defaultDir ?? getActiveGame(projectRoot);
+    const scopeGame = session.config?.defaultDir ?? getPathManager().resolveScope();
     const decision = checkKernelTool(trustTier, toolName, { args, projectRoot, activeGame: scopeGame });
     if (decision.outcome === 'deny') {
       // 信任闸硬拒 —— 审计记录 allow=false
@@ -535,7 +536,18 @@ export function createSessionsRouter() {
     }
 
     try {
-      const out = await executeTool(toolName, args, agent.agentContext.tools.list(), agent.agentContext);
+      // 内置 forgeax 工具走宿主侧实现(remember/memory_search/list_games/query_world/
+      //   capture_frame/echo);其余查 agent kit 注册表。与 host-tool-bridge 同口径(对称的两个
+      //   host 工具执行口)。cc/cbc/codex 内核在 .mjs 本地跑这批工具、从不桥到这里 → 此支只服务
+      //   将来可能经 HTTP 回打的内置工具,行为不变。
+      const out = isForgeaxBuiltinTool(toolName)
+        ? await runForgeaxBuiltinTool(toolName, args, {
+            projectRoot,
+            agentId: agentPath,
+            ...(scopeGame ? { game: scopeGame } : {}),
+            eventBus: session.eventBus,
+          })
+        : await executeTool(toolName, args, agent.agentContext.tools.list(), agent.agentContext);
       if (out && typeof out === 'object' && !Array.isArray(out) && 'error' in out) {
         const errMsg = String((out as { error: unknown }).error);
         // 工具执行返回 error 字段 —— ok=false

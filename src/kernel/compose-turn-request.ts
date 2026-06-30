@@ -1,10 +1,10 @@
 /**
  * composeTurnRequest — 编排层把一次 chat 组装成中立 `TurnRequest`(喂内核)。
  *
- * M2:**编排层真正拥有"组装一轮"**——systemPrompt(游戏宪章 charter + persona)
- * 在此构建,内核只执行。来源与旧 claude-code provider 一致(`buildGameCharter` +
- * `buildActiveGameNote` + `composeSystemPrompt`),所以从老路径切过来 prompt 不变。
- *   - charter:游戏宪章 + 当前激活游戏 note(稳定缓存前缀)
+ * M2:**编排层真正拥有"组装一轮"**——systemPrompt(charter + persona)在此拼装,
+ * 内核只执行。charter/environment/note 来自注入的产品壳 composer(阶段A §3.2),编排层
+ * 自身不含游戏宪章内容,故业务无关。
+ *   - charter:产品壳宪章 + 当前激活 scope note(稳定缓存前缀)
  *   - persona:marketplace agent 的人格(default/root 无)
  *   - model:优先 body.model,否则读 agent.json::models.model(ModelPicker 不回归)
  *   - tools:M2 仍空(CC 自带工具);MCP 工具下发在 M3。
@@ -13,13 +13,11 @@ import type { TurnRequest, TurnMessage } from '@forgeax/agent-runtime';
 import { existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { defaultProjectRoot } from '@forgeax/platform-io';
-import { getActiveGame } from '../api/lib/active-game';
 import { getSessionManager } from '../core/session-registry';
 import { getPathManager } from '../fs/path-manager';
 import { ContextWindow } from '../context-window/context-window';
 import { llmMessagesToTurnHistory } from './llm-history';
-import { buildGameCharter, buildActiveGameNote } from '../agents/game-charter';
-import { renderEnvironmentText } from '../agents/environment';
+import { getSystemPromptComposer } from '../orchestration-seams';
 import {
   loadAgentRecord,
   composeStableMemory,
@@ -29,10 +27,6 @@ import {
 } from '../soul';
 import { drainPerceptionNotes } from '../api/lib/perception-registry';
 import type { SkillRefLite } from '../soul/types';
-
-const SERVER_PORT = process.env.FORGEAX_SERVER_PORT ?? '18900';
-const INTERFACE_PORT = process.env.FORGEAX_INTERFACE_PORT ?? '18920';
-const GAME_CHARTER = buildGameCharter({ serverPort: SERVER_PORT, interfacePort: INTERFACE_PORT });
 
 /** P3(B 路径):core 有 builtin 实现的「安全类」工具集。own trustTier 下这些标
  *  `delivery:'local'`(forgeax-core 内核本进程直跑)。name 与 core builtin 对齐,且
@@ -101,20 +95,21 @@ export interface ComposeInput {
 
 export async function composeTurnRequest(input: ComposeInput): Promise<TurnRequest> {
   const projectRoot = defaultProjectRoot();
-  const scopeSlug = sessionScopeSlug(input.sessionId ?? input.threadId) ?? getActiveGame(projectRoot);
-  const note = buildActiveGameNote(scopeSlug);
-  // environment(Paths / 当前游戏 / Workbench 插件 / Skills 目录)。重构切到 core 内核后
-  //   这块整段没了 —— 老 claude-code 路径有 <environment>,新装配器从未构建它,导致模型不知道
-  //   项目根绝对路径、有哪些工作台/技能。Working directory = projectRoot:core 文件工具相对
-  //   process.cwd()(serve.ts 即 projectRoot)解析,与 charter「starts at project root」一致。
-  //   best-effort:plugin registry 未就绪等异常 → 跳过 environment,不挡本轮。
+  // charter / environment / note 由注入的产品壳 composer 提供(阶段A §3.2)——编排层不再
+  // 硬编码游戏宪章。无注入(standalone game-agnostic cli)⇒ composer 缺省 ⇒ 三段皆空。
+  const composer = getSystemPromptComposer();
+  const scopeSlug = sessionScopeSlug(input.sessionId ?? input.threadId) ?? getPathManager().resolveScope();
+  const note = composer?.activeGameNote(scopeSlug) ?? '';
+  // environment(Paths / 当前游戏 / Workbench 插件 / Skills 目录)。Working directory =
+  //   projectRoot:core 文件工具相对 process.cwd()(serve.ts 即 projectRoot)解析,与 charter
+  //   「starts at project root」一致。best-effort:composer 未就绪/异常 → 跳过 environment,不挡本轮。
   let environment = '';
   try {
-    environment = renderEnvironmentText({ cwd: projectRoot, projectRoot, slug: scopeSlug ?? null });
+    environment = composer?.environment({ cwd: projectRoot, projectRoot, slug: scopeSlug ?? null }) ?? '';
   } catch {
     environment = '';
   }
-  const charter = [GAME_CHARTER, environment, note].filter((s) => s && s.trim()).join('\n\n');
+  const charter = [composer?.charter() ?? '', environment, note].filter((s) => s && s.trim()).join('\n\n');
 
   // R6 数字生命:把 agentId「重生」成 AgentRecord(persona + 分层记忆 + 信任档)。
   //  - persona(stable 前缀)= soul persona + identity/traits + MEMORY.md 索引
@@ -249,8 +244,8 @@ function sessionScopeSlug(sid?: string): string | undefined {
   try {
     const slug = getSessionManager().peek(sid)?.config.defaultDir;
     if (!slug || slug === 'default') return undefined;
-    const dir = resolvePath(defaultProjectRoot(), '.forgeax/games', slug);
-    return existsSync(dir) ? slug : undefined;
+    // existence guard via PathManager (path-segments, no `.forgeax/games` literal).
+    return existsSync(getPathManager().user().gameDir(slug)) ? slug : undefined;
   } catch {
     return undefined;
   }

@@ -9,6 +9,9 @@
     ".": "./src/index.ts",
     "./brand": "./src/brand/index.ts",
     "./cli-providers": "./src/cli-providers/index.ts",
+    "./builtin/*": "./builtin/*.ts",
+    "./lib/llm-gateway": "./src/lib/llm-gateway/index.ts",
+    "./lib/image-gateway": "./src/lib/image-gateway/index.ts",
     "./*": ["./src/*.ts", "./src/*/index.ts"]
   },
   "bin": {
@@ -18,14 +21,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src"
+    "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src",
+    "check:business-agnostic": "bun scripts/check-business-agnostic.mjs"
   },
   "dependencies": {
     "@forgeax/agent-host": "workspace:*",
     "@forgeax/agent-runtime": "workspace:*",
     "@forgeax/platform-io": "workspace:*",
     "@forgeax/types": "workspace:*",
-    "@ag-ui/core": "^0.0.53",
     "@google/genai": "^1.0.0",
     "chokidar": "^4.0.0",
     "hono": "^4.6.0",

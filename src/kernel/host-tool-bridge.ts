@@ -17,8 +17,9 @@ import { loadAgentRecord } from '../soul';
 import { checkKernelTool } from './trust-gate';
 import { requestToolApproval } from './tool-approval';
 import { executeTool } from '../kits/tool/tool-executor';
+import { isForgeaxBuiltinTool, runForgeaxBuiltinTool } from './forgeax-builtin-tools';
 import { defaultProjectRoot } from '@forgeax/platform-io';
-import { getActiveGame } from '../api/lib/active-game';
+import { getPathManager } from '../fs/path-manager';
 import { tt } from '../lib/turn-trace';
 import { appendToolAudit } from './tool-audit';
 
@@ -75,7 +76,7 @@ export function makeInProcessExecuteTool(
     // 是 session 自己绑的 game(config.defaultDir 由路径派生),非全局 active game——绑 A、
     // active 切 B 时不会误判 A 自己的写。session 未绑则回落 active game。
     const projectRoot = defaultProjectRoot();
-    const scopeGame = session.config?.defaultDir ?? getActiveGame(projectRoot);
+    const scopeGame = session.config?.defaultDir ?? getPathManager().resolveScope();
     const decision = _checkKernelTool(trustTier, name, { args, projectRoot, activeGame: scopeGame });
     tt('htb.decision', { name, agent: agentPath, sid, trustTier, outcome: decision.outcome, cap: decision.capability });
     if (decision.outcome === 'deny') {
@@ -105,12 +106,28 @@ export function makeInProcessExecuteTool(
 
     tt('htb.exec-start', { name, agent: agentPath });
     try {
-      const out = await _executeTool(
-        name,
-        (args ?? {}) as Record<string, unknown>,
-        agent.agentContext.tools.list(),
-        agent.agentContext,
-      );
+      // 内置 forgeax 工具(remember/memory_search/list_games/query_world/capture_frame/echo)
+      //   走宿主侧实现;其余查 agent 的 kit 注册表。两者 schema 都由 compose-turn-request 出墙,
+      //   但内置工具不在 kit 注册表里 → 不补这一支 executeTool 会返回 "Unknown tool"。
+      const out = isForgeaxBuiltinTool(name)
+        ? await runForgeaxBuiltinTool(name, (args ?? {}) as Record<string, unknown>, {
+            projectRoot,
+            agentId: agentPath,
+            ...(scopeGame ? { game: scopeGame } : {}),
+            eventBus: session.eventBus,
+          })
+        : await _executeTool(
+            name,
+            (args ?? {}) as Record<string, unknown>,
+            agent.agentContext.tools.list(),
+            agent.agentContext,
+          );
+      // 工具返回 `{error}` 形状 = 失败(与 `:sid/kernel-tool` 同口径:Unknown tool / 校验失败 /
+      //   工具内 throw 都落此形状)。翻成 throw → 下方 catch 记**唯一**一行 ok:false 审计 +
+      //   rethrow → RPC reject → 内核标 isError(而非 ok:true 夹 error,§5 fail-fast)。
+      if (out && typeof out === 'object' && !Array.isArray(out) && 'error' in out) {
+        throw new Error(String((out as { error: unknown }).error));
+      }
       tt('htb.exec-done', { name, agent: agentPath, ms: Date.now() - start });
       // 工具执行成功 —— allow=true / ok=true。
       appendToolAudit({ sid, agent: agentPath, tool: name, trustTier, allow: true, ok: true, durationMs: Date.now() - start, ts: start });

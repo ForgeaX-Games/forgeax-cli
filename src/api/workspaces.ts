@@ -37,8 +37,8 @@ import { friendlyPath } from '@forgeax/platform-io';
 import { addKnown } from '@forgeax/platform-io';
 import { scaffoldDefaultWorkspace } from '@forgeax/platform-io';
 import { repointEngineForgeaXSymlink } from './lib/engine-symlink';
-import { getActiveGame } from '../api/lib/active-game';
-import { initPathManager } from '../fs/path-manager';
+import { initPathManager, getPathManager } from '../fs/path-manager';
+import type { SessionLayout } from '../fs/session-layout';
 
 const DIR_BLOCKLIST_PREFIXES = [
   '/proc', '/sys', '/dev', '/etc', '/var/run', '/var/lib/docker', '/run', '/boot',
@@ -84,6 +84,12 @@ export interface WorkspacesRouterDeps {
    *  it the watcher stays bound to the original projectRoot, so file events from
    *  the activated workspace's .forgeax/games never reach live tabs. */
   rebindWatcher?: (rootDir: string) => void | Promise<void>;
+  /** Rebuild the SessionLayout for the switched-to root. Injected by the product
+   *  shell (studio = GameSessionLayout). Without it, re-initing the PathManager on
+   *  a workspace switch drops the layout to the flat default and game-nested
+   *  sessions vanish from /api/sessions (→ UI sees empty list, mints new empty
+   *  sessions, loses history on refresh). Omitted ⇒ generic flat layout. */
+  sessionLayoutFactory?: (projectRoot: string) => SessionLayout;
 }
 
 export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
@@ -134,7 +140,9 @@ export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
 
     // 2. Update env BEFORE restarting children — children inherit current env.
     process.env.FORGEAX_PROJECT_ROOT = abs;
-    initPathManager({ projectRoot: abs });
+    // Re-inject the layout for the new root — a bare initPathManager would drop the
+    // studio GameSessionLayout back to the flat default, hiding game-nested sessions.
+    initPathManager({ projectRoot: abs, layout: deps.sessionLayoutFactory?.(abs) });
 
     // 3. Repoint engine .forgeax symlink. Engine vite uses polling so the
     //    next watcher tick picks up new files; the explicit child restart
@@ -144,7 +152,7 @@ export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
     } catch (e) {
       // Roll back env so the rest of the server still points at the old root.
       process.env.FORGEAX_PROJECT_ROOT = oldRoot;
-      initPathManager({ projectRoot: oldRoot });
+      initPathManager({ projectRoot: oldRoot, layout: deps.sessionLayoutFactory?.(oldRoot) });
       return c.json({ error: `symlink swap failed: ${(e as Error).message}` }, 500);
     }
 
@@ -164,7 +172,7 @@ export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
     //    fallback second) — the same SSOT every other consumer reads — so the
     //    pinned slug can't diverge from the workspace's recorded active game.
     //    Fall back to the scaffold's known slug when we just created it.
-    const activeSlug = getActiveGame(abs) ?? (scaffolded ? 'workspace' : undefined);
+    const activeSlug = getPathManager().resolveScope(undefined, abs) ?? (scaffolded ? 'workspace' : undefined);
 
     // 7. Broadcast (UI listens via /ws and will reload).
     try {

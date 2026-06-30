@@ -23,7 +23,7 @@ import { createProvider } from '../llm/provider';
 import { assembleResponse } from '../llm/stream';
 import { normalizeContent } from '../message/modality';
 import { defaultProjectRoot } from '@forgeax/platform-io';
-import { getActiveGame } from '../api/lib/active-game';
+import { getPathManager } from '../fs/path-manager';
 import { getSessionManager } from '../core/session-registry';
 import { classifyAndWrite, soulMemoryRoot } from './layered-memory';
 import { upsertUserFacts, type UserFact } from './user-profile';
@@ -167,7 +167,7 @@ export async function runAutoExtract(input: AutoExtractInput): Promise<void> {
       const soulId = input.agentPath.split('/').pop() || input.agentPath;
       // 永久绑定(PR2):game episode 落该 session 绑定的 game(config.defaultDir 由路径派生),
       // 非全局 active game——否则切 game 后旧 session 的记忆会写错 game。未绑则回落 active。
-      const game = getSessionManager().peek(input.sid)?.config.defaultDir ?? getActiveGame(projectRoot);
+      const game = getSessionManager().peek(input.sid)?.config.defaultDir ?? getPathManager().resolveScope();
       classifyAndWrite({ root: soulMemoryRoot(projectRoot, soulId), ...(game ? { game } : {}) }, layered);
     }
   } catch {

@@ -18,15 +18,15 @@
 import type { ContextSlot } from "../../../../src/kits/slot/types";
 import { SlotPriority } from "../../../../src/kits/slot/types";
 import type { AgentContext } from "../../../../src/core/types";
-import { defaultProjectRoot } from '@forgeax/platform-io';
-import { getActiveGame } from "../../../../src/api/lib/active-game";
-import { buildGameCharter, buildActiveGameNote } from "../../../../src/agents/game-charter";
+import { getSystemPromptComposer } from "../../../../src/orchestration-seams";
+import { getPathManager } from "../../../../src/fs/path-manager";
 
+// charter + active-game note come from the injected product-shell composer
+// (Stage A §3.2). No shell injected (standalone game-agnostic cli) ⇒ empty slot.
 function render(): string {
-  const serverPort = process.env.FORGEAX_SERVER_PORT ?? "18900";
-  const interfacePort = process.env.FORGEAX_INTERFACE_PORT ?? "18920";
-  const charter = buildGameCharter({ serverPort, interfacePort });
-  const note = buildActiveGameNote(getActiveGame(defaultProjectRoot()));
+  const composer = getSystemPromptComposer();
+  const charter = composer?.charter() ?? "";
+  const note = composer?.activeGameNote(getPathManager().resolveScope()) ?? "";
   return note ? `${charter}\n\n${note}` : charter;
 }
 

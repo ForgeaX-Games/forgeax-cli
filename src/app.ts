@@ -13,7 +13,6 @@ import { Hono } from 'hono';
 
 import { createFilesRouter } from '@forgeax/platform-io';
 import { createAssetsRouter } from '@forgeax/platform-io';
-import { createWorkbenchRouter } from './api/workbench';
 import { createProjectsRouter } from '@forgeax/platform-io';
 import { createFsBrowserRouter } from '@forgeax/platform-io';
 import { createWorkspacesRouter } from './api/workspaces';
@@ -31,8 +30,6 @@ import { createPluginsRouter } from './api/plugins';
 import { reloadPlugins, onPluginsReloaded } from './plugins/registry';
 import { syncEventTriggerBindings } from './skills/event-bridge';
 import { createThreadsRouter } from './api/threads';
-import { createCharacterRouter } from './api/wb-character';
-import { createBgmRouter } from './api/wb-bgm';
 import { createLlmTestRouter } from './api/llm-test';
 import { createUsageRouter } from './api/usage';
 import { createToolsRouter } from './api/tools';
@@ -41,13 +38,18 @@ import { createSkillsRouter } from './api/skills';
 import { createPacksRouter } from './api/packs';
 import { createRuntimeRouter } from './api/runtime';
 import { createObservatoryRouter } from './api/observatory';
-import { createCeApiShimRouter, type UiAssetCleanup } from './api/ce-api-shim';
 import { createGameAssetsRouter } from '@forgeax/platform-io';
 import { createPrefsRouter } from '@forgeax/platform-io';
 import { sessionScope } from './api/lib/session-scope';
 import { bootCliProviders } from './cli-providers';
 import { initPathManager } from './fs/path-manager';
 import type { SessionLayout } from './fs/session-layout';
+import {
+  initOrchestrationSeams,
+  type SystemPromptComposer,
+  type HostToolSpec,
+  type AssetPathPolicy,
+} from './orchestration-seams';
 import { ensureUserDirDefaults } from './defaults/scaffold';
 import { initSessionManager } from './core/session-manager';
 import './llm/register-all';
@@ -72,14 +74,32 @@ export interface ProductContext {
   broadcast?: (msg: unknown) => void;
   /** Rebind the filesystem watcher to a new root (provided by the shell). */
   rebindWatcher?: (root: string) => void;
-  /** UI 资产清洗能力(marketplace 后端),由产品壳注入 —— 编排层不直接依赖 marketplace。
-   *  缺省 ⇒ /__ce-api__ 的资产清洗步骤跳过(用原图)。 */
-  uiAssetCleanup?: UiAssetCleanup;
-  /** Where session state trees land + how sessions are enumerated. Injected by
-   *  the product shell (studio = project-local `.forgeax/sessions/<sid>`).
-   *  Omitted ⇒ generic layout (`<userRoot>/sessions/<sid>`), i.e. forgeax-cli
-   *  runs game-agnostic as a standalone CLI. */
-  sessionLayout?: SessionLayout;
+  /** How session state trees land + how sessions are enumerated, as a **factory**
+   *  keyed by project root. Injected by the product shell (studio = game-nested
+   *  `.forgeax/games/<slug>/sessions/<sid>`). A factory (not a single instance) so
+   *  a workspace/project-root switch can rebuild the layout for the new root —
+   *  re-initing the PathManager with a bare projectRoot would otherwise drop the
+   *  layout back to the flat default and hide game-nested sessions. Omitted ⇒
+   *  generic flat layout (`<userRoot>/sessions/<sid>`), i.e. forgeax-cli runs
+   *  game-agnostic as a standalone CLI. */
+  sessionLayoutFactory?: (projectRoot: string) => SessionLayout;
+  /** Business routers injected by the shell, mounted after the static cli routers
+   *  (order/path unchanged for the static set). Replaces the per-feature static
+   *  mounts as business migrates out of cli (Stage A §3). Each entry mounts at
+   *  its `path`; `needsAssetPolicy` marks asset-serving routers that REQUIRE
+   *  `assetPathPolicy` (boot throws if missing — §3.4 fail-fast). */
+  routers?: Array<{ path: string; router: Hono; needsAssetPolicy?: boolean }>;
+  /** System-prompt charter composer (charter + environment + note, fixed order,
+   *  typed stable/dynamic split for prompt-cache). Omitted ⇒ cli uses its
+   *  generic built-in prompt. (Stage A §3.2) */
+  systemPromptComposer?: SystemPromptComposer;
+  /** Host-only tool specs (list_games / query_world / capture_frame …) exposed
+   *  to agents and gated by the host-tool bridge. (Stage A §3, §2.4) */
+  hostTools?: HostToolSpec[];
+  /** Asset path policy replacing the `.forgeax/games` whitelist. Default CLOSED;
+   *  the shell opens roots explicitly. Conditionally required + fail-fast when
+   *  asset routers are injected (§3.4). */
+  assetPathPolicy?: AssetPathPolicy;
 }
 
 export interface ForgeaxApp {
@@ -105,7 +125,14 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
     /* non-fatal at boot; settings UI can fix brand */
   }
 
-  const pm = initPathManager({ projectRoot, layout: ctx.sessionLayout });
+  const pm = initPathManager({ projectRoot, layout: ctx.sessionLayoutFactory?.(projectRoot) });
+  // Install shell-injected orchestration seams once at boot (same idiom as the
+  // path/session managers above). Read-only on the hot path thereafter.
+  initOrchestrationSeams({
+    systemPromptComposer: ctx.systemPromptComposer,
+    hostTools: ctx.hostTools,
+    assetPathPolicy: ctx.assetPathPolicy,
+  });
   await ensureUserDirDefaults(pm);
   const sm = initSessionManager(pm);
   const restored = await sm.bootAutoStart();
@@ -127,12 +154,15 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
   app.route('/api/files', createFilesRouter());
   app.route('/api/games', createGameAssetsRouter());
   app.route('/api/assets', createAssetsRouter());
-  app.route('/api/workbench', createWorkbenchRouter());
   app.route('/api/projects', createProjectsRouter());
   app.route('/api/fs', createFsBrowserRouter());
   app.route('/api/workspaces', createWorkspacesRouter({
     broadcast: ctx.broadcast,
     rebindWatcher: ctx.rebindWatcher,
+    // Rebuild the session layout for the switched-to root so /api/sessions keeps
+    // enumerating game-nested sessions after a workspace change (else it drops to
+    // the flat default layout and the UI sees an empty list → loses history).
+    sessionLayoutFactory: ctx.sessionLayoutFactory,
   }));
   app.route('/api/settings', createSettingsRouter());
   app.route('/api/boot-splash', createBootSplashRouter());
@@ -147,10 +177,6 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
   app.route('/api/bus', createBusRouter());
   app.route('/api/plugins', createPluginsRouter());
   app.route('/api/threads', createThreadsRouter());
-  app.route('/api/wb/character', createCharacterRouter({
-    projectRoot,
-    env: process.env as Record<string, string | undefined>,
-  }));
   app.route('/api/llm', createLlmTestRouter());
   app.route('/api/usage', createUsageRouter());
   app.route('/api/tools', createToolsRouter());
@@ -159,12 +185,20 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
   app.route('/api/packs', createPacksRouter());
   app.route('/api/runtime', createRuntimeRouter());
   app.route('/api/observatory', createObservatoryRouter());
-  app.route('/api/wb/bgm', createBgmRouter());
-  app.route('/__ce-api__', createCeApiShimRouter({
-    projectRoot,
-    env: process.env as Record<string, string | undefined>,
-    uiAssetCleanup: ctx.uiAssetCleanup,
-  }));
+
+  // Shell-injected business routers (mounted after the static cli set). As
+  // business migrates out of cli (§3) the static mounts above shrink and these
+  // grow — the product's overall route table stays identical. §3.4 fail-fast:
+  // an asset-serving router that forgot its policy must crash boot, not run open.
+  for (const r of ctx.routers ?? []) {
+    if (r.needsAssetPolicy && !ctx.assetPathPolicy) {
+      throw new Error(
+        `createForgeaxApp: injected router "${r.path}" needs assetPathPolicy but none was provided ` +
+          `(asset path whitelist must be explicit — refusing to boot open). See Stage A §3.4.`,
+      );
+    }
+    app.route(r.path, r.router);
+  }
 
   return { app };
 }

@@ -28,31 +28,19 @@ import { spawnJsonl } from '../shared/subprocess-jsonl';
 import { friendlyPath } from '@forgeax/platform-io';
 import { resolveBinary } from '../shared/resolve-binary';
 import { defaultProjectRoot } from '@forgeax/platform-io';
-import { getActiveGame } from '../../api/lib/active-game';
+import { getPathManager } from '../../fs/path-manager';
 import { getSessionManager } from '../../core/session-manager';
 import { existsSync, appendFileSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { composeSystemPrompt } from '../../agents/loader';
-import { buildGameCharter, buildActiveGameNote } from '../../agents/game-charter';
+import { getSystemPromptComposer } from '../../orchestration-seams';
 
-// Derived from env so the system prompt's URLs match the live ports. run.sh
-// honors both FORGEAX_SERVER_PORT (default 18900) + FORGEAX_INTERFACE_PORT
-// (default 18920); claude was previously told to hit hardcoded :18900/:18920
-// even if studio booted with overrides. Read at module load — server process
-// is restarted on env change. Tick cc-game/31.
-const SERVER_PORT = process.env.FORGEAX_SERVER_PORT ?? '18900';
-const INTERFACE_PORT = process.env.FORGEAX_INTERFACE_PORT ?? '18920';
-
-// System prompt appended to every claude-code turn so claude knows the
-// forgeax-studio convention. The contract body now lives in the shared SSOT
-// (../../agents/game-charter) so the native-agent slot path can't drift from
-// it. Without this, "zuo ge tan chi she" writes a standalone HTML to $HOME and
-// the studio Preview iframe can't see it. Tick cc-game/2.
-const FORGEAX_SYSTEM_PROMPT = buildGameCharter({
-  serverPort: SERVER_PORT,
-  interfacePort: INTERFACE_PORT,
-});
+// The game-authoring charter + active-game note now come from the injected
+// product-shell composer (Stage A §3.2) — the orchestration layer no longer
+// hardcodes the contract. Ports are baked into the composer at shell boot, so
+// the charter bytes match the live studio. No shell injected (standalone
+// game-agnostic cli) ⇒ no charter appended.
 
 /**
  * Build the final --append-system-prompt arg. When the studio has a current
@@ -69,16 +57,18 @@ function sessionDefaultDir(sid: string | undefined): string | undefined {
   try {
     const slug = getSessionManager().peek(sid)?.config.defaultDir;
     if (!slug || slug === 'default') return undefined;
-    const dir = resolvePath(defaultProjectRoot(), '.forgeax/games', slug);
-    return existsSync(dir) ? slug : undefined;
+    // existence guard via PathManager (path-segments, no `.forgeax/games` literal).
+    return existsSync(getPathManager().user().gameDir(slug)) ? slug : undefined;
   } catch {
     return undefined;
   }
 }
 
 export function buildSystemPrompt(activeSlug?: string): string {
-  const note = buildActiveGameNote(activeSlug);
-  return note ? `${FORGEAX_SYSTEM_PROMPT}\n\n${note}` : FORGEAX_SYSTEM_PROMPT;
+  const composer = getSystemPromptComposer();
+  const charter = composer?.charter() ?? '';
+  const note = composer?.activeGameNote(activeSlug) ?? '';
+  return note ? `${charter}\n\n${note}` : charter;
 }
 
 /** Is there already an on-disk session file for this thread under `cwd`?
@@ -231,7 +221,7 @@ export class ClaudeCodeProvider implements CliProvider {
     // the single workspace-global active game regardless of which game that
     // tab was actually opened on. Session lookup is best-effort + peek-only
     // (never hydrates) so a missing/closed session just falls through.
-    const scopeSlug = sessionDefaultDir(req.sessionId ?? req.threadId) ?? getActiveGame(projectRoot);
+    const scopeSlug = sessionDefaultDir(req.sessionId ?? req.threadId) ?? getPathManager().resolveScope();
     let systemPrompt = buildSystemPrompt(scopeSlug);
     // Persona injection: req.agentId carries the marketplace agent id
     // (kotone / arin / yevi / …). composeSystemPrompt reads the plugin's

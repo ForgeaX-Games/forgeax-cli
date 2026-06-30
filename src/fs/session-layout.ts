@@ -4,7 +4,8 @@
  *
  *  cli/core only ever call this interface; they do NOT know about "game".
  *  The product shell (packages/server, studio) injects a concrete layout via
- *  `ProductContext.sessionLayout` → `initPathManager({ layout })`. When no
+ *  `ProductContext.sessionLayoutFactory(root)` → `initPathManager({ layout })`
+ *  (a factory keyed by project root so a workspace switch can rebuild it). When no
  *  layout is injected, PathManager falls back to `FlatSessionLayout`, which
  *  reproduces the pre-seam behavior (sessions under `<userRoot>/sessions/`) —
  *  this is what lets forgeax-cli run as a standalone, game-agnostic CLI.
@@ -54,6 +55,18 @@ export interface SessionLayout {
    *  caller has released any open handles on the session. Idempotent: no-op when
    *  the session is already project-local. */
   migrateLegacyIntoProject?(sid: string): void;
+
+  /** Optional (studio) — resolve the "current scope" slug for a session
+   *  (studio = the session's bound / active game). This is the SINGLE scope
+   *  authority cli reads from (compose-turn-request fallback, host-tool bridge,
+   *  …) instead of a parallel `getActiveGame` import or a separate scopeResolver
+   *  seam (SSOT, Stage A §3.3). Generic/flat layouts omit it → no scope (global).
+   *  `sessionId` undefined ⇒ the layout's notion of the *currently active* scope
+   *  (studio = active-game), which is exactly the old `getActiveGame()` fallback.
+   *  `root` (optional) ⇒ resolve the active scope under an explicit project root
+   *  rather than the default one (used by workspace activation, which queries the
+   *  just-activated workspace dir). */
+  resolveScope?(sessionId?: string, root?: string): string | undefined;
 }
 
 /** Shared scan: direct child directory names of `sessionsRoot`. Returns `[]`

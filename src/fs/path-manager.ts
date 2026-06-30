@@ -170,6 +170,12 @@ class PathManager implements PathManagerAPI {
   migrateLegacyIntoProject(sid: string): void {
     this._layout.migrateLegacyIntoProject?.(sid);
   }
+  /** Current scope slug for a session via the active layout (studio = active
+   *  game). undefined ⇒ generic/global (flat layout has no scope notion).
+   *  Single scope authority — see SessionLayout.resolveScope (Stage A §3.3). */
+  resolveScope(sid?: string, root?: string): string | undefined {
+    return this._layout.resolveScope?.(sid, root);
+  }
 }
 
 // ─── Singleton ───────────────────────────────────────────────────────────────

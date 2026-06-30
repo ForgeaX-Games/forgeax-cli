@@ -1,7 +1,7 @@
 import type { ContextSlot } from "../../../../src/kits/slot/types";
 import { SlotPriority } from "../../../../src/kits/slot/types";
 import type { AgentContext } from "../../../../src/core/types";
-import { renderEnvironmentText } from "../../../../src/agents/environment";
+import { getSystemPromptComposer } from "../../../../src/orchestration-seams";
 
 export default function environmentSlot(ctx: AgentContext): ContextSlot {
   return {
@@ -13,6 +13,6 @@ export default function environmentSlot(ctx: AgentContext): ContextSlot {
     priority: SlotPriority.STATIC_ENVIRONMENT,
     cacheHint: "stable",
     version: 1,
-    content: () => renderEnvironmentText({ cwd: ctx.cwd }),
+    content: () => getSystemPromptComposer()?.environment({ cwd: ctx.cwd }) ?? "",
   };
 }

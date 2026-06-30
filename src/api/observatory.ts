@@ -17,11 +17,11 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSessionManager } from '../core/session-manager';
 import { getPathManager } from '../fs/path-manager';
-import { adapt, createAdapterState, makeInitEvent, type AgentEventOut } from '../observatory/event-adapter';
+import { adapt, createAdapterState, makeInitEvent } from '../observatory/event-adapter';
 import { inspectAgentPrompt } from '../observatory/prompt-modules';
 import { replaySessionEvents } from '../observatory/ledger-replay';
-import { detectActiveSlug } from './lib/active-slug';
-import { defaultProjectRoot } from '@forgeax/platform-io';
+import { replaySessionTelemetry, tailSessionTelemetry } from '../observatory/telemetry-replay';
+import type { TelemetryRecord } from '@forgeax/types';
 import type { Event } from '../core/types';
 
 interface SessionEntry {
@@ -153,7 +153,7 @@ export function createObservatoryRouter() {
     const sessionSlug = (session.config as { defaultDir?: string } | undefined)?.defaultDir;
     const activeSlug = (sessionSlug && sessionSlug.trim())
       ? sessionSlug
-      : detectActiveSlug(defaultProjectRoot()) ?? undefined;
+      : getPathManager().resolveScope() ?? undefined;
 
     // Native agents (running in-process via ConsciousAgent/scheduler) assemble
     // their prompt via ContextEngine slots — they never see the FORGEAX_SYSTEM_PROMPT
@@ -215,6 +215,10 @@ export function createObservatoryRouter() {
         charCount: inspection.charCount + toolModules.reduce((s, m) => s + m.charCount, 0),
         estimatedTokens: inspection.estimatedTokens + toolModules.reduce((s, m) => s + m.estimatedTokens, 0),
       },
+      // Static telemetry snapshot for whole-graph colouring (todo 038 P1): the
+      // same full replay the /telemetry SSE streams, embedded so a one-shot
+      // inspect can paint span/log overlays without opening the stream.
+      telemetry: await replaySessionTelemetry(sid),
     });
   });
 
@@ -250,54 +254,115 @@ export function createObservatoryRouter() {
       const init = makeInitEvent(rootAgent);
       await stream.writeSSE({ data: JSON.stringify({ sessionId: sid, event: init, ts: Date.now() }) });
 
-      // Replay phase — drain ledger + global-events.jsonl.
+      // Replay phase — drain ledger + global-events.jsonl. `sentCount` marks how
+      // many ordered events we've emitted; the live phase emits only the tail past it.
+      let sentCount = 0;
       try {
         const replayed = await replaySessionEvents(sid, pm);
         for (const stored of replayed) {
-          const out = adapt(stored, state);
-          for (const ev of out) {
+          for (const ev of adapt(stored, state)) {
             await stream.writeSSE({ data: JSON.stringify({ sessionId: sid, event: ev, ts: stored.ts }) });
           }
+        }
+        sentCount = replayed.length;
+      } catch (err) {
+        await stream.writeSSE({ event: 'error', data: JSON.stringify({ error: (err as Error).message }) });
+      }
+
+      // Live phase — tail the LEDGER, not the in-process eventBus (todo 042).
+      // forgeax-core records its turn/tool/ask events by writing the ledger
+      // directly (transcribe-turn.ts, deliberately NOT via eventBus to avoid WS
+      // double-render), so an eventBus observer never sees them → nodes stuck
+      // "running" and later events never arrive live. Instead we re-replay the
+      // ledger whenever it changes on disk (mtime-gated) and emit only the new
+      // tail. This reuses replaySessionEvents' blob hydration + multi-agent shard
+      // walk and works uniformly for EVERY kernel (all persist to the ledger).
+      const sessionRoot = pm.session(sid).root();
+      let lastMtime = 0;
+      try { lastMtime = newestMtimeUnder(sessionRoot); } catch { /* ignore */ }
+      let aborted = false;
+      stream.onAbort(() => { aborted = true; });
+
+      const POLL_MS = 1500;
+      let sinceHeartbeatMs = 0;
+      while (!aborted) {
+        await stream.sleep(POLL_MS);
+        if (aborted) break;
+
+        // Only re-read the ledger when something under the session changed.
+        let mtime = lastMtime;
+        try { mtime = newestMtimeUnder(sessionRoot); } catch { /* ignore */ }
+        if (mtime > lastMtime) {
+          lastMtime = mtime;
+          try {
+            const all = await replaySessionEvents(sid, pm);
+            for (let i = sentCount; i < all.length; i++) {
+              const stored = all[i]!;
+              for (const ev of adapt(stored, state)) {
+                await stream.writeSSE({ data: JSON.stringify({ sessionId: sid, event: ev, ts: stored.ts }) });
+              }
+            }
+            if (all.length > sentCount) sentCount = all.length;
+          } catch { /* transient read error — retry next tick */ }
+        }
+
+        // Heartbeat (~15s) so reverse proxies don't kill the idle SSE connection.
+        sinceHeartbeatMs += POLL_MS;
+        if (sinceHeartbeatMs >= 15_000) {
+          sinceHeartbeatMs = 0;
+          await stream.writeSSE({ event: 'ping', data: String(Date.now()) });
+        }
+      }
+    }),
+  );
+
+  // Telemetry plane (todo 038 P1) — trace/log SSE paralleling /events, but the
+  // source is the on-disk `<sid>/logs/{trace,log}.jsonl` (replay) + fs.watch
+  // tail (live), NOT the in-process eventBus: forgeax-core telemetry reaches
+  // disk via RPC→sink, never the bus. Each frame carries one TelemetryRecord.
+  // Pure addition — any error here never touches /events or the trajectory plane.
+  r.get('/telemetry', (c) =>
+    streamSSE(c, async (stream) => {
+      const sid = resolveSid(c.req.query('session') ?? 'current');
+      if (!sid) {
+        await stream.writeSSE({ event: 'error', data: JSON.stringify({ error: 'no sessions available' }) });
+        return;
+      }
+
+      // Replay phase — full backlog, dedup provisional→final, sorted ascending.
+      try {
+        const records = await replaySessionTelemetry(sid);
+        for (const record of records) {
+          await stream.writeSSE({ data: JSON.stringify({ sessionId: sid, record }) });
         }
       } catch (err) {
         await stream.writeSSE({ event: 'error', data: JSON.stringify({ error: (err as Error).message }) });
       }
 
-      // Live phase — observe the per-session bus until client disconnects.
-      let unsub: (() => void) | null = null;
-      if (session) {
-        const queue: AgentEventOut[] = [];
-        let writing = false;
-        const flush = async () => {
-          if (writing) return;
-          writing = true;
-          while (queue.length > 0) {
-            const ev = queue.shift()!;
-            await stream.writeSSE({ data: JSON.stringify({ sessionId: sid, event: ev, ts: Date.now() }) });
-          }
-          writing = false;
-        };
-        unsub = session.eventBus.observe((event: Event, emitterId?: string) => {
-          const stored = {
-            type: event.type,
-            ts: event.ts,
-            source: event.source,
-            to: event.to,
-            emitterId,
-            priority: event.priority,
-            handoff: event.handoff,
-            payload: event.payload as Record<string, unknown> | undefined,
-          };
-          for (const ev of adapt(stored, state)) queue.push(ev);
-          void flush();
-        });
-      }
+      // Live phase — fs.watch tail of the two jsonl files until disconnect.
+      const queue: TelemetryRecord[] = [];
+      let writing = false;
+      const flush = async () => {
+        if (writing) return;
+        writing = true;
+        while (queue.length > 0) {
+          const record = queue.shift()!;
+          await stream.writeSSE({ data: JSON.stringify({ sessionId: sid, record }) });
+        }
+        writing = false;
+      };
+      const unsub = tailSessionTelemetry(sid, (rec) => { queue.push(rec); void flush(); });
+      let aborted = false;
+      stream.onAbort(() => { aborted = true; unsub(); });
 
-      stream.onAbort(() => { if (unsub) unsub(); });
-
-      // Heartbeat so reverse proxies don't kill idle SSE connections.
-      while (true) {
+      // Heartbeat so reverse proxies don't kill idle SSE connections. Abort-gated
+      // (same as /events): `stream.sleep` never rejects on disconnect and writeSSE
+      // swallows write errors, so a bare `while (true)` would spin forever after
+      // the client drops — leaking the async frame + a rescheduled 15s timer per
+      // dead connection. The gate lets the loop fall through to stream.close().
+      while (!aborted) {
         await stream.sleep(15_000);
+        if (aborted) break;
         await stream.writeSSE({ event: 'ping', data: String(Date.now()) });
       }
     }),

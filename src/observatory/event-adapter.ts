@@ -45,6 +45,11 @@ interface AdapterState {
   turnStartTsByEmitter: Map<string, number>;
   /** Whether we've already emitted the synthetic `system/init` for the stream. */
   initEmitted: boolean;
+  /** Open tool calls keyed by tool name → stack of their toolUseIds (LIFO).
+   *  Fallback correlation for `hook:toolResult` events that drop the id entirely
+   *  (e.g. claude-code MCP `mcp__fxt__*` results arrive as `{name,durationMs}`
+   *  with no callId) — without it those nodes never leave "running". */
+  openToolIdsByName: Map<string, string[]>;
 }
 
 export function createAdapterState(): AdapterState {
@@ -53,6 +58,7 @@ export function createAdapterState(): AdapterState {
     lastUsageByEmitter: new Map(),
     turnStartTsByEmitter: new Map(),
     initEmitted: false,
+    openToolIdsByName: new Map(),
   };
 }
 
@@ -167,21 +173,48 @@ export function adapt(stored: StoredEvent, state: AdapterState): AgentEventOut[]
     const tc = stored.payload?.toolCall as { id?: string; name?: string } | undefined;
     const toolUseId = tc?.id
       ?? (stored.payload?.toolCallId as string | undefined)
+      // forgeax-core carries the correlation id at top-level `callId`
+      // (its tool result mirrors it) — read it so call ↔ result line up.
+      ?? (stored.payload?.callId as string | undefined)
       ?? `tool-${stored.ts}`;
+    const name = (stored.payload?.name as string | undefined) ?? tc?.name ?? 'tool';
+    // Track the open call by name so an id-less result can still find it.
+    const stack = state.openToolIdsByName.get(name) ?? [];
+    stack.push(toolUseId);
+    state.openToolIdsByName.set(name, stack);
     return [{
       type: 'tool_use',
       toolUseId,
-      name: (stored.payload?.name as string | undefined) ?? tc?.name ?? 'tool',
+      name,
       input: stored.payload?.args ?? {},
     }];
   }
 
   // ─── hook:toolResult → tool_result ─────────────────────────────────────
   if (t === 'hook:toolResult') {
-    const toolUseId = (stored.payload?.toolUseId as string | undefined)
+    const resultName = stored.payload?.name as string | undefined;
+    let toolUseId = (stored.payload?.toolUseId as string | undefined)
       ?? (stored.payload?.toolCallId as string | undefined)
+      // forgeax-core tool result carries the id at top-level `callId` (matches
+      // its hook:toolCall) — without this the result resolves to '' and the
+      // observatory node never leaves "running" (e.g. ask_user stuck forever).
+      ?? (stored.payload?.callId as string | undefined)
       ?? (stored.payload?.llmMessage as { toolCallId?: string } | undefined)?.toolCallId
       ?? '';
+    // Last-resort correlation by name: some results drop the id entirely
+    // (claude-code MCP `mcp__fxt__*` → `{name,durationMs}`). Pop the most-recent
+    // open call of the same name so the node still completes instead of hanging.
+    if (!toolUseId && resultName) {
+      const stack = state.openToolIdsByName.get(resultName);
+      if (stack && stack.length) toolUseId = stack.pop() as string;
+    } else if (toolUseId && resultName) {
+      // keep the per-name stack tidy when we DO have an id
+      const stack = state.openToolIdsByName.get(resultName);
+      if (stack) {
+        const i = stack.lastIndexOf(toolUseId);
+        if (i >= 0) stack.splice(i, 1);
+      }
+    }
     const llmMsg = stored.payload?.llmMessage as { content?: Array<{ text?: string }>; toolStatus?: string } | undefined;
     const output = (stored.payload?.result as string | undefined)
       ?? (stored.payload?.output as string | undefined)
