@@ -9,6 +9,7 @@
 export { type TargetPlatform, type PackageOptions, type PackageResult, type IGamePackager } from './IGamePackager';
 export { GamePackagerProxy } from './GamePackagerProxy';
 export { listHistory, deleteHistory } from './history';
+export { cleanPackagingEnv, type CleanReport, type CleanedTarget } from './clean';
 export { createJob, getJob, updateJob, makeProgressFn, type JobRecord, type JobStatus } from './jobs';
 export { detectEngineRoots, recommendedEngineRoot, type EngineRootCandidate } from './engine-roots';
 

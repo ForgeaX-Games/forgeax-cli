@@ -22,7 +22,7 @@ import { getSessionManager } from '../core/session-manager';
 import { getTerminalManager } from '../terminal/manager';
 import { BLACKBOARD_KEYS } from '../defaults/blackboard-vars';
 import type { FileActivityRecord } from '../ledger/file-activity-ledger';
-import { registry, listHistory, deleteHistory, createJob, getJob, updateJob, makeProgressFn, detectEngineRoots } from '../packager';
+import { registry, listHistory, deleteHistory, cleanPackagingEnv, createJob, getJob, updateJob, makeProgressFn, detectEngineRoots } from '../packager';
 import type { TargetPlatform } from '../packager';
 
 /**
@@ -744,6 +744,13 @@ export function createWorkbenchRouter(): Hono {
   // ── GET /package/history — list packaging history ──
   router.get('/package/history', (c) => {
     return c.json({ records: listHistory() });
+  });
+
+  // ── POST /package/clean — wipe local packaging environment ──
+  // Removes the isolated Rust toolchain, launcher-shell cache and leftover
+  // .forgeax-export scratch dirs. Does NOT touch export products or history.
+  router.post('/package/clean', (c) => {
+    return c.json(cleanPackagingEnv());
   });
 
   // ── DELETE /package/history/:id — delete a single history record ──

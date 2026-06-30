@@ -18,7 +18,7 @@ function studioRoot(): string {
   return resolve(assetRoot(), '..');
 }
 
-const SHELL_VERSION = '2';
+const SHELL_VERSION = '5';
 const EXE_NAME = `forgeax-player-v${SHELL_VERSION}.exe`;
 const META_NAME = 'shell-meta.json';
 
