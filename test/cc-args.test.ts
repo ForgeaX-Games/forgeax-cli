@@ -7,7 +7,7 @@
  */
 import { describe, test, expect } from 'bun:test';
 import { tmpdir } from 'node:os';
-import type { TurnRequest, ComposedPrompt } from '../../agent-runtime/src/contract';
+import type { TurnRequest, ComposedPrompt } from '@forgeax/agent-runtime/contract';
 import { buildCcArgs } from '../src/kernel/cc-profile';
 
 const ROOT = tmpdir();

@@ -11,7 +11,7 @@ import {
   consultTurnGate,
   releaseTurnGate,
 } from '../src/kernel/cc-profile';
-import type { PermissionDecision } from '../../agent-runtime/src/contract';
+import type { PermissionDecision } from '@forgeax/agent-runtime/contract';
 
 const SID = 'sid-turn-gate-test';
 
