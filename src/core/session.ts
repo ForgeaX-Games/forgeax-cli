@@ -35,6 +35,8 @@ import { createOrGetFSWatcher } from "../fs/watcher";
 import { AgentKitReloadCoordinator } from "../kits/reload-coordinator";
 import { clearRememberedForSession } from "../kernel/tool-approval";
 import { runAutoExtract } from "../soul/auto-extract";
+import { tryKernelForkExtract } from "../soul/fork-extract";
+import { resolveKernel } from "../kernel/resolve-kernel";
 
 /** One pending delegate_to_subagent awaiting the sub-agent's turn-end.
  *  Keyed by sub-agent's `agentPath` (e.g. "suzu"). */
@@ -232,17 +234,27 @@ export class Session {
       const payload = (event.payload ?? {}) as { aborted?: boolean };
       if (payload.aborted) return;
       if (!this.tree.get(emitterId)) return; // 仅树内 agent
+      // stable-identity gate(对齐 cc 主-agent-only):只**顶层 persona**(有稳定 soul 身份)长记忆;
+      //   临时 subagent(路径含 `/agents/`)跳过 → 不产孤儿 soul(抽了也读不回,白烧 token)。
+      if (emitterId.includes("/agents/")) return;
       const agent = this.scheduler.getAgent(emitterId) as unknown as {
         agentContext?: { resolveModels?: () => ModelsConfig };
       } | null;
       const resolveModels = agent?.agentContext?.resolveModels;
       if (typeof resolveModels !== "function") return; // ScriptAgent / 无模型 → 跳过
-      void runAutoExtract({
-        sid: this.sid,
-        agentPath: emitterId,
-        ledger: this.getOrCreateLedger(emitterId),
-        resolveModels,
-      }).catch((err) => {
+      let kernelId: string | undefined;
+      try { kernelId = resolveKernel(emitterId).id; } catch { /* 无内核 → 按默认 gate */ }
+      void runAutoExtract(
+        {
+          sid: this.sid,
+          agentPath: emitterId,
+          ledger: this.getOrCreateLedger(emitterId),
+          resolveModels,
+          ...(kernelId ? { kernelId } : {}),
+        },
+        // cache-warm 优先:内核支持 forkExtract → 复用上一轮缓存前缀抽取;否则冷兜底。
+        { tryFork: () => tryKernelForkExtract({ sid: this.sid, agentPath: emitterId }) },
+      ).catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(emitterId, undefined, `auto-extract: ${msg}`);
       });

@@ -25,7 +25,8 @@ import { normalizeContent } from '../message/modality';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getPathManager } from '../fs/path-manager';
 import { getSessionManager } from '../core/session-registry';
-import { classifyAndWrite, soulMemoryRoot } from './layered-memory';
+import { classifyAndWrite, soulMemoryRoot, readMemoryIndex } from './layered-memory';
+import { autoExtractEnabledFor } from './memory-config';
 import { upsertUserFacts, type UserFact } from './user-profile';
 import type { MemoryFact } from './types';
 
@@ -81,12 +82,24 @@ export interface AutoExtractInput {
   ledger: LedgerReader;
   /** 该 agent 的模型解析器(agentContext.resolveModels)。 */
   resolveModels: () => ModelsConfig;
+  /** 本轮内核 id(用于分模型开关 gate + cache-warm 默认);缺省按 forgeax-core。 */
+  kernelId?: string;
   signal?: AbortSignal;
 }
 
-/** host 在 `hook:turnEnd` 调用:节流 + 互斥地后台抽取并按层落盘(fire-and-forget)。 */
-export async function runAutoExtract(input: AutoExtractInput): Promise<void> {
+export interface AutoExtractOpts {
+  /** cache-warm 优先路径(soul fork-extract 驱动):返回 true = 已由内核 fork 处理 → 跳过冷链路;
+   *  false/缺省 → 走下方冷链路兜底(§9)。 */
+  tryFork?: () => Promise<boolean>;
+}
+
+/** host 在 `hook:turnEnd` 调用:节流 + 互斥地后台抽取并按层落盘(fire-and-forget)。
+ *  优先 cache-warm fork(opts.tryFork,内核支持时),否则冷链路兜底。 */
+export async function runAutoExtract(input: AutoExtractInput, opts?: AutoExtractOpts): Promise<void> {
+  // 开关 SSOT(持久化 memory-settings + 内核能力位):master 关→全关;分模型关→该内核不抽;
+  //   cache-incapable 默认关(避免悄悄烧 token)。Studio 设置页写之。FORGEAX_AUTO_EXTRACT=0 = 硬急停。
   if (process.env.FORGEAX_AUTO_EXTRACT === '0') return;
+  if (!autoExtractEnabledFor(input.kernelId ?? 'forgeax-core')) return;
 
   const key = `${input.sid}::${input.agentPath}`;
   const st = _state.get(key) ?? { turnsSince: 0, extracting: false };
@@ -113,6 +126,18 @@ export async function runAutoExtract(input: AutoExtractInput): Promise<void> {
   // 没有真实用户消息 → 多半是 agent 内部回合,不抽。
   if (!recent.some((m) => m.role === 'user')) return;
 
+  // ★ cache-warm 优先:内核支持 forkExtract → 复用上一轮缓存前缀后台抽取;成功则跳冷链路。
+  //   失败/不支持 → 落下方冷链路(§9 graceful degradation)。互斥下 mutex 同护两路。
+  if (opts?.tryFork) {
+    st.extracting = true;
+    try {
+      const handled = await opts.tryFork().catch(() => false);
+      if (handled) return; // 内核 fork 已处理本轮
+    } finally {
+      st.extracting = false;
+    }
+  }
+
   // 模型(沿用该 agent 的路由 / agent.json / session 默认)。
   let modelsConfig: ModelsConfig;
   let model: string;
@@ -128,6 +153,17 @@ export async function runAutoExtract(input: AutoExtractInput): Promise<void> {
   st.extracting = true;
   try {
     const convo = recent.map((m) => `[${m.role}] ${m.text}`).join('\n');
+    // 去重感知:把该 soul 的已有分层索引(MEMORY.md)喂给抽取,模型据此「更新而非重复」。
+    let memManifest = '';
+    try {
+      const soulIdForIdx = input.agentPath.split('/').pop() || input.agentPath;
+      memManifest = readMemoryIndex(soulMemoryRoot(defaultProjectRoot(), soulIdForIdx));
+    } catch {
+      /* 无索引 → 不带 */
+    }
+    const userContent = memManifest.trim()
+      ? `Existing memories (update an existing entry, don't duplicate):\n${memManifest}\n\nConversation:\n${convo}`
+      : `Conversation:\n${convo}`;
     const provider = createProvider({
       ...modelsConfig,
       model,
@@ -137,7 +173,7 @@ export async function runAutoExtract(input: AutoExtractInput): Promise<void> {
     });
     const stream = provider.chatStream(
       [{ name: 'memory-extractor', text: EXTRACT_SYS, cacheHint: 'stable', priority: 0 }],
-      [{ role: 'user', content: normalizeContent(`Conversation:\n${convo}`) }],
+      [{ role: 'user', content: normalizeContent(userContent) }],
       [],
       input.signal ?? AbortSignal.timeout(60_000),
     );

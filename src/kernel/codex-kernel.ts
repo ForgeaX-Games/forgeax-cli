@@ -56,6 +56,7 @@ export class CodexKernel implements AgentKernel {
     thinking: true,
     toolCalls: true,
     midTurnInject: false,
+    forkExtract: false,
   };
 
   private binaryPromise?: Promise<string>;

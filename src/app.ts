@@ -17,6 +17,7 @@ import { createProjectsRouter } from '@forgeax/platform-io';
 import { createFsBrowserRouter } from '@forgeax/platform-io';
 import { createWorkspacesRouter } from './api/workspaces';
 import { createSettingsRouter } from './api/settings';
+import { createMemorySettingsRouter } from './api/memory-settings';
 import { createBootSplashRouter } from '@forgeax/platform-io';
 import { createVersionRouter } from '@forgeax/platform-io';
 import { createChangelogRouter } from '@forgeax/platform-io';
@@ -165,6 +166,7 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
     sessionLayoutFactory: ctx.sessionLayoutFactory,
   }));
   app.route('/api/settings', createSettingsRouter());
+  app.route('/api/memory-settings', createMemorySettingsRouter());
   app.route('/api/boot-splash', createBootSplashRouter());
   app.route('/api/version', createVersionRouter());
   app.route('/api/changelog', createChangelogRouter());

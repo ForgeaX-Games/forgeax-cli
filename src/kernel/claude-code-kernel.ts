@@ -56,6 +56,8 @@ export class ClaudeCodeKernel implements AgentKernel {
     thinking: true,
     toolCalls: true,
     midTurnInject: false,
+    // cc 自带 extractMemories fork,但无法用分层 policy 驱动它 → 对编排层不可驱动,标 false(走冷兜底)。
+    forkExtract: false,
   };
 
   private binaryPromise?: Promise<string>;

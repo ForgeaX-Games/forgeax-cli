@@ -62,10 +62,10 @@ describe('w20 — server assets manifest endpoint', () => {
     const res = await app.request('/api/games/test-game/assets-scripts');
     expect(res.status).toBe(200);
 
-    const body = await res.json();
+    const body = (await res.json()) as { scripts: Array<{ relPath: string; absPath: string }> };
     expect(body).toHaveProperty('scripts');
 
-    const scripts = body.scripts as Array<{ relPath: string; absPath: string }>;
+    const scripts = body.scripts;
     expect(Array.isArray(scripts)).toBe(true);
     expect(scripts.length).toBe(3);
 
@@ -88,7 +88,7 @@ describe('w20 — server assets manifest endpoint', () => {
     const res = await app.request('/api/games/nonexistent/assets-scripts');
     expect(res.status).toBe(200);
 
-    const body = await res.json();
+    const body = (await res.json()) as { scripts: unknown[] };
     expect(body.scripts).toEqual([]);
   });
 

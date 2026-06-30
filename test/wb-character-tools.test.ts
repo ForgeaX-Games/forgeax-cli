@@ -1,9 +1,9 @@
 /**
  * Phase D3 — wb-character ToolRegistry contract.
  *
- * Verifies the real marketplace plugin manifest at L1 default location:
- *   1. all 11 declared AI-exposed tools land in the snapshot
- *   2. backendPath resolves to ./server/tool-handlers.ts (the new D3 file)
+ * Verifies the real (pinned) marketplace plugin manifest at L1 default location:
+ *   1. every declared character: tool lands in the snapshot
+ *   2. backendPath resolves to ./server/tool-handlers.ts (the D3 file)
  *   3. callTool dispatches to the actual tool-handlers module
  *   4. unimplemented pipelines surface a structured `not_implemented` error
  *   5. listTools reports `hasHandler: true` for every entry
@@ -12,10 +12,13 @@
  * to keep the snapshot deterministic and avoid pulling in scene-kit etc.,
  * but the manifest body is exactly the same JSON.
  *
- * 解耦后(2026-06):character 业务 SSOT 内聚在本插件 server/character-forge/,
- * tool-handlers 本地 import,manifest 声明全部 16 个 character: 工具(含此前漂移
- * 缺失的 generate-sprite-sheet/pixel/monster/vehicle + save-scene-defaults,以及
- * iframe 客户端管线登记用的 upsert-manifest)。图像生成由宿主经 ctx.imageGen 注入。
+ * SSOT = the pinned wb-character submodule's forgeax-plugin.json. It currently
+ * declares 10 character: tools — 5 AI-facing (portrait/turnaround/list/get/
+ * rename) and 5 internal P4-funnel stubs (exposedToAI:false). The earlier
+ * 16-tool consolidation (generate-sprite-sheet/pixel/monster/vehicle +
+ * save-scene-defaults + upsert-manifest) never landed in the pinned manifest;
+ * this test mirrors what the plugin actually provides, not the aspiration.
+ * Image generation is injected by the host via ctx.imageGen.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
@@ -32,31 +35,26 @@ const TMP = `/tmp/forgeax-wbc-tools-${process.pid}`;
 const PLUGIN_DIR = join(TMP, 'L1', 'wb-character');
 
 const TOOL_IDS = [
+  // AI-facing pipelines (exposedToAI:true).
   'character:generate-portrait',
-  'character:generate-sprite-sheet',
-  'character:generate-pixel',
-  'character:generate-monster',
   'character:generate-turnaround',
-  'character:generate-vehicle',
   'character:list',
   'character:get',
   'character:rename',
   // Doc 01 §P4 funnel tools — internal-only stubs (exposedToAI:false) used
   // when wb-character runs embedded as an iframe.
-  'character:save-scene-defaults',
   'character:save-render-config',
   'character:save-spine-session',
   'character:publish-character',
   'character:publish-to-workspace-game',
   'character:merge-skills-to-workspace-game',
-  // 客户端管线登记入口(内部,exposedToAI:false);iframe 经 /upsert-manifest 路由代理。
-  'character:upsert-manifest',
 ];
 
-// generate-spine / generate-vfx / generate-video were migrated to wb-skill /
-// wb-anim in M1-M2 and removed from the wb-character manifest (M3). The 9
-// remaining AI-facing tools are indices 0-8.
-const AI_EXPOSED_TOOL_IDS = TOOL_IDS.slice(0, 9);
+// portrait/turnaround/list/get/rename are the AI-facing tools (indices 0-4);
+// the 5 P4-funnel stubs are exposedToAI:false. generate-pixel/spine/vfx/
+// monster/video/vehicle exist as handler stubs but are NOT in the pinned
+// manifest, so they never surface in the ToolRegistry snapshot.
+const AI_EXPOSED_TOOL_IDS = TOOL_IDS.slice(0, 5);
 
 function mirrorPluginToTmp() {
   mkdirSync(join(PLUGIN_DIR, 'server'), { recursive: true });
@@ -164,8 +162,11 @@ describe('wb-character ToolRegistry wiring', () => {
 
   it('unimplemented pipelines surface invoke_error with not_implemented in the message', async () => {
     await reload();
+    // save-render-config is a manifest tool backed by a notImplemented() stub;
+    // a non-ai caller bypasses the exposedToAI gate so we reach the handler,
+    // which throws → ToolRegistry maps it to invoke_error.
     const r = await callTool({
-      toolId: 'character:generate-pixel',
+      toolId: 'character:save-render-config',
       args: { slug: 'irrelevant' },
       caller: { kind: 'user' },
     });

@@ -200,6 +200,9 @@ export async function composeTurnRequest(input: ComposeInput): Promise<TurnReque
     ...(record.toolPolicy ? { toolPolicy: record.toolPolicy } : {}),
     // pack 经 manifest.json 可声明预算硬闸(maxTurns/maxBudgetUsd → --max-turns/--max-budget-usd)。
     budget: record.budget ?? {},
+    // 编排层(数字生命引擎)拥有记忆成长 → 内核**不得自主**跑 auto-memory(防双写/双成本/两套SSOT)。
+    // 内核的 fork-extract 机制仍可被编排层驱动;forgeax-core 本无自主记忆=no-op,rented(cc)据此关闭其自带提取。
+    memoryAutonomy: false,
     trustTier: record.trustTier,
     ...(input.sessionId ? { hostSessionId: input.sessionId } : {}),
     ...(input.traceparent ? { traceparent: input.traceparent } : {}),

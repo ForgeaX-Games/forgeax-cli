@@ -52,6 +52,7 @@ export class CbcKernel implements AgentKernel {
     thinking: true,
     toolCalls: true,
     midTurnInject: false,
+    forkExtract: false,
   };
 
   private binaryPromise?: Promise<string>;

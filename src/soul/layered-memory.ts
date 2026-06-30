@@ -88,7 +88,11 @@ export function composeStableMemory(ref: LayeredMemoryRef): string {
   const blocks: string[] = [];
   if (index) blocks.push(`## Memory Index (MEMORY.md)\n\n${index}`);
   for (const m of [...identity, ...traits]) blocks.push(`## ${m.file}\n\n${m.body}`);
-  return blocks.length ? `# Long-term Memory (identity + traits)\n\n${blocks.join('\n\n')}` : '';
+  // drift caveat(对齐 cc MEMORY_DRIFT_CAVEAT):记忆是 point-in-time,用前先核实当前状态。
+  const caveat =
+    '> These memories are point-in-time observations, not live state. Before asserting a remembered fact ' +
+    '(a file/function/flag, or repo state), verify it against the current code; trust what you observe now over a stale memory.';
+  return blocks.length ? `# Long-term Memory (identity + traits)\n\n${caveat}\n\n${blocks.join('\n\n')}` : '';
 }
 
 /** 当轮 episodic 段:当前 game 的 episodes(进 dynamicSuffix,不进 stable 前缀)。 */

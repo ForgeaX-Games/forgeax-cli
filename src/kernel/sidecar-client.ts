@@ -8,6 +8,7 @@
  * newline-JSON-RPC 线协议 + 控制面方法形状。
  */
 import { connect as netConnect, type Socket } from 'node:net';
+import { existsSync } from 'node:fs';
 import { tt } from '../lib/turn-trace';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -68,6 +69,12 @@ export class SidecarClient {
   /** 连到 sidecar;socket 不存在 → reject(调用方决定是否 spawn sidecar 后重试)。 */
   static connect(sockPath = defaultSockPath(), timeoutMs = 2000): Promise<SidecarClient> {
     return new Promise((resolve, reject) => {
+      // Pre-check existence so we never trigger a native ENOENT connect error
+      // during the host-startup race (the socket file appears atomically only
+      // once agent-host calls listen()). Attempting netConnect on a missing
+      // path surfaces an unhandled native error under bun:test even with an
+      // 'error' listener attached; the caller retries on this clean reject.
+      if (!existsSync(sockPath)) { reject(new Error(`sidecar socket not found: ${sockPath}`)); return; }
       let sock: Socket;
       try { sock = netConnect(sockPath); } catch (e) { reject(e as Error); return; }
       const timer = setTimeout(() => { sock.destroy(); reject(new Error('sidecar connect timeout')); }, timeoutMs);
