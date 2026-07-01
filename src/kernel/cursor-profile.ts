@@ -34,11 +34,22 @@ export {
 } from './cursor-mapper';
 
 /**
- * 从中立 TurnRequest 拼 `cursor-agent -p ...` argv。
+ * 从中立 TurnRequest 拼 `cursor-agent -p ...` 的调用面。
  * `cursorChatId` 非空 → resume(由脊梁从上一轮 `system.init` 回填);为空 = 首轮,
  * 把 systemPrompt(charter/persona)前置进消息。
+ *
+ * **prompt 走 stdin,不进 argv**:首轮把整段 charter+persona+task 拼进 `message`,
+ * 体量动辄上万字符。Windows 上 `cursor-agent` 经 `cursor-agent.cmd` 批处理转发,
+ * `cmd.exe` 命令行硬上限 ~8191 字符 —— 把 prompt 当 argv 位置参数会撑爆它,得到
+ * GBK 报错「命令行太长。」+ exit 1(被 UTF-8 误解码成乱码)。故本函数只返回**短**
+ * 的 flag/resume argv,把 `message` 交给脊梁经 `spawnJsonl({ stdin })` 喂入(cursor
+ * `-p` 无位置参数时从 stdin 读 prompt)。stdin 是管道、不受命令行长度限制,全平台
+ * 一致(POSIX argv 本就够大,改 stdin 同样安全且更干净)。
  */
-export function buildCursorArgs(req: TurnRequest, cursorChatId: string | undefined): string[] {
+export function buildCursorArgs(
+  req: TurnRequest,
+  cursorChatId: string | undefined,
+): { args: string[]; message: string } {
   const isFirstTurn = !cursorChatId;
 
   // dynamicSuffix(当轮记忆/感知)以 user 后缀拼在任务后。
@@ -62,7 +73,8 @@ export function buildCursorArgs(req: TurnRequest, cursorChatId: string | undefin
   // 模型:忽略 req.model(Claude 形目录 cursor 不认),仅认显式 CURSOR_MODEL env。
   const selectedModel = process.env.CURSOR_MODEL?.trim() || '';
 
-  return [
+  // prompt 不进 argv:经 stdin 喂入(见函数注释)。argv 只剩短小的 flag/resume。
+  const args = [
     '-p',
     '--output-format', 'stream-json',
     '--stream-partial-output',
@@ -73,6 +85,6 @@ export function buildCursorArgs(req: TurnRequest, cursorChatId: string | undefin
     '--approve-mcps',
     ...(selectedModel ? ['--model', selectedModel] : []),
     ...(cursorChatId ? ['--resume', cursorChatId] : []),
-    message,
   ];
+  return { args, message };
 }

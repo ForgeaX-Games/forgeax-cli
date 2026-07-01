@@ -111,13 +111,17 @@ export class CursorKernel implements AgentKernel {
       // 不再额外 spawn `create-chat` 预铸 id —— turn 自带的 system.init 已携带同一 id。
       const cursorChatId = tid ? this.threadToCursor.get(tid) : undefined;
 
-      const args = buildCursorArgs(req, cursorChatId);
+      // prompt 走 stdin(不进 argv):cursor `-p` 无位置参数时从 stdin 读 prompt。
+      // 这样首轮的超长 charter+persona+task 不再撑爆 Windows cmd.exe 的 ~8191 命令
+      // 行上限(否则 GBK「命令行太长。」+ exit 1)。stdin 是管道、不受长度限制,全平台一致。
+      const { args, message } = buildCursorArgs(req, cursorChatId);
       const { lines, exit } = spawnJsonl<CursorRawEvent>({
         cmd: binary,
         args,
         env,
         cwd: projectRoot,
         signal: ac.signal,
+        stdin: message,
         ...(envOverride ? { envOverride } : {}),
       });
 
