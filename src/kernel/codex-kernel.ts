@@ -25,6 +25,7 @@ import type {
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
+import { runCapture } from '../lib/node-spawn';
 import { spawnJsonl, scrubbedSecretEnv } from '../cli-providers/shared/subprocess-jsonl';
 import { issueToken, revokeToken } from './cred-proxy';
 import { sidecarSpawnJsonl, materializeEnv, stripModelKeys } from './sidecar-spawn';
@@ -341,9 +342,8 @@ export class CodexKernel implements AgentKernel {
   async probe(): Promise<KernelHealth> {
     try {
       const binary = await this.binary();
-      const proc = Bun.spawn({ cmd: [binary, '--version'], stdout: 'pipe', stderr: 'ignore' });
-      const out = (await new Response(proc.stdout).text()).trim().split('\n')[0] ?? '';
-      const code = await proc.exited;
+      const { stdout, code } = await runCapture(binary, ['--version']);
+      const out = stdout.trim().split('\n')[0] ?? '';
       const hasAuth =
         Boolean(process.env.OPENAI_API_KEY) ||
         existsSync(resolvePath(process.env.CODEX_HOME || resolvePath(homedir(), '.codex'), 'auth.json'));

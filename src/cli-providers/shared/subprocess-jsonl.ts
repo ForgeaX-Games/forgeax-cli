@@ -6,6 +6,7 @@
 // and converts each parsed JSON line into a ChatEvent.
 
 // friendlyPath 已搬到 api/lib/ (commit 64078a4); cli-providers 复活时 reuse 那一份。
+import { spawn } from 'node:child_process';
 import { friendlyPath } from '@forgeax/platform-io';
 
 export interface SpawnJsonlOptions {
@@ -43,27 +44,6 @@ export interface SpawnJsonlResult<T> {
   exit: Promise<{ code: number; stderr: string }>;
 }
 
-/** Decode a CLI's stderr bytes to text. Prefers UTF-8; on Windows, if UTF-8
- *  yields replacement chars (U+FFFD), the CLI almost certainly wrote in the
- *  console codepage (GBK on zh-CN) — retry with GBK so the surfaced error is
- *  readable instead of mojibake. POSIX is UTF-8 only (unchanged behavior). */
-function decodeStderr(chunks: Uint8Array[]): string {
-  if (!chunks.length) return '';
-  const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
-  const utf8 = new TextDecoder('utf-8').decode(buf);
-  if (process.platform === 'win32' && utf8.includes('�')) {
-    try {
-      // Bun's TextDecoder supports 'gbk' at runtime; its TS label type omits it.
-      const GbkDecoder = TextDecoder as unknown as { new (label: string): TextDecoder };
-      const gbk = new GbkDecoder('gbk').decode(buf);
-      if (!gbk.includes('�')) return gbk;
-    } catch {
-      /* gbk unsupported → keep utf8 */
-    }
-  }
-  return utf8;
-}
-
 /** Spawn a CLI emitting ndjson on stdout. Each non-empty line is JSON.parse'd
  *  and yielded as T. Malformed lines are skipped silently except for a
  *  console.warn at server stderr (with friendlyPath-redacted cmd), so the
@@ -72,7 +52,7 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
   const { cmd, args, cwd, env, envOverride, stdin, signal, killGraceMs = 2000 } = opts;
 
   // 子进程 env:process.env ← env ← envOverride。envOverride 里值为 undefined
-  // 的 key 被删除(Bun.spawn 不传入 = 不继承),string 值覆盖。无 envOverride 时
+  // 的 key 被删除(spawn env 不含该 key = 不继承),string 值覆盖。无 envOverride 时
   // 行为与历史完全一致(全量继承 process.env)。
   const childEnv: Record<string, string | undefined> = { ...process.env, ...(env ?? {}) };
   if (envOverride) {
@@ -83,35 +63,32 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
   }
 
   const isWindows = process.platform === 'win32';
-  const proc = Bun.spawn({
-    cmd: [cmd, ...args],
+  const child = spawn(cmd, args, {
     cwd: cwd ?? process.cwd(),
     env: childEnv,
-    stdin: stdin !== undefined ? 'pipe' : 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdio: [stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     // ★ 关键(POSIX):detached → 子进程 setsid 成新 session/进程组、**脱离控制终端**。
     //   否则 CLI 内核(codebuddy / claude-code 等)作为 server 的后台进程组子进程,一旦碰
     //   控制终端(查终端尺寸/title 等),内核会发 SIGTTOU/SIGTTIN 给**整个进程组**,把 server
-    //   一起冻成 STAT T(stopped)—— 表现为「选 codebuddy 发送即整页卡死、刷新都无响应」。
-    //   对齐 agent-host/kernel-process.ts 的 detached 隔离(forgeax-core 正因走它而不中招)。
-    //   Windows:无 SIGTTOU/进程组语义,且 detached=DETACHED_PROCESS 会**每轮 spawn 新开一个
-    //   控制台窗口**(实测:选 codebuddy/cursor 发送即弹 PS 窗口);故仅 POSIX 用 detached,
-    //   Windows 改用 windowsHide 抑制控制台窗口(整组杀在 Windows 经 -pid 抛错回退单进程杀)。
+    //   一起冻成 STAT T(stopped)。对齐 agent-host/kernel-process.ts 的 detached 隔离。
+    //   Windows:仅 windowsHide 抑制控制台窗口(整组杀经 -pid 抛错回退单进程杀)。
     detached: !isWindows,
-    ...(isWindows ? { windowsHide: true } : {}),
+    windowsHide: isWindows,
   });
+  // stream 解码:setEncoding('utf8') 让异步迭代产出已正确跨块解码的字符串(免手搓 TextDecoder)。
+  child.stdout?.setEncoding('utf8');
+  child.stderr?.setEncoding('utf8');
 
   // Stdin payload + EOF
-  if (stdin !== undefined && proc.stdin) {
-    proc.stdin.write(stdin);
-    proc.stdin.end();
+  if (stdin !== undefined && child.stdin) {
+    child.stdin.write(stdin);
+    child.stdin.end();
   }
 
   // detached 后子进程是进程组 leader(pgid==pid):杀**整组**(-pid)一并收掉它 spawn 的孙子
   //   进程,不留孤儿;pid 非法或不允许时回退杀单进程。(-0 会误杀自身组,故严格 pid>0。)
   const killGroup = (sig: 'SIGTERM' | 'SIGKILL'): void => {
-    const pid = proc.pid;
+    const pid = child.pid;
     if (typeof pid === 'number' && pid > 0) {
       try {
         process.kill(-pid, sig);
@@ -121,7 +98,7 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
       }
     }
     try {
-      proc.kill(sig);
+      child.kill(sig);
     } catch {
       /* already dead */
     }
@@ -136,35 +113,23 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
   if (signal.aborted) onAbort();
   else signal.addEventListener('abort', onAbort, { once: true });
 
-  // Stderr drained in parallel — we keep the raw bytes for the exit summary so
-  // the caller can surface it in an error ChatEvent. We decode at the END (not
-  // streaming) so we can codepage-detect: Windows CLIs (e.g. codebuddy) emit
-  // localized error text in the OEM/ANSI codepage (GBK on zh-CN Windows), NOT
-  // UTF-8. Streaming a UTF-8 TextDecoder over GBK bytes yields mojibake
-  // ("请求太频繁" → "���̫��"). stdout stays UTF-8 (it's the JSON wire format);
-  // only stderr (human messages) gets the GBK fallback. See decodeStderr below.
-  const stderrChunks: Uint8Array[] = [];
+  // Stderr drained in parallel — we keep the text for the exit summary so
+  // the caller can surface it in an error ChatEvent.
+  let stderrBuf = '';
   const stderrDone = (async () => {
-    if (!proc.stderr) return;
-    const reader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) stderrChunks.push(value);
+    if (!child.stderr) return;
+    for await (const chunk of child.stderr) {
+      stderrBuf += chunk as string;
     }
   })();
 
   // Stdout line splitter.
   async function* iterate(): AsyncIterable<T> {
-    if (!proc.stdout) return;
-    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
-    const dec = new TextDecoder();
+    if (!child.stdout) return;
     let buf = '';
     try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
+      for await (const chunk of child.stdout) {
+        buf += chunk as string;
         let nl: number;
         while ((nl = buf.indexOf('\n')) !== -1) {
           const line = buf.slice(0, nl).trim();
@@ -191,16 +156,18 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
         }
       }
     } finally {
-      reader.releaseLock();
       signal.removeEventListener('abort', onAbort);
       if (killTimer) clearTimeout(killTimer);
     }
   }
 
   const exit = (async () => {
-    const code = await proc.exited;
+    const code = await new Promise<number>((res) => {
+      child.once('close', (c) => res(c ?? 0));
+      child.once('error', () => res(-1));
+    });
     await stderrDone;
-    return { code, stderr: decodeStderr(stderrChunks) };
+    return { code, stderr: stderrBuf };
   })();
 
   return { lines: iterate(), exit };

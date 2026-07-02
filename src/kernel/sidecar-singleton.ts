@@ -6,7 +6,8 @@
  */
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Subprocess } from 'bun';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { resolveRuntimeLaunch } from '../lib/node-spawn';
 import { SidecarClient, defaultSockPath } from './sidecar-client';
 
 /** sidecar(agent-host)serve 入口:经**包解析**定位(发布后跨包仍成立),
@@ -16,13 +17,13 @@ function resolveAgentHostMain(): string {
   try {
     return fileURLToPath(import.meta.resolve('@forgeax/agent-host/serve'));
   } catch {
-    return resolve(import.meta.dir, '../../../agent-host/src/main.ts');
+    return resolve(import.meta.dirname, '../../../agent-host/src/main.ts');
   }
 }
 const AGENT_HOST_MAIN = resolveAgentHostMain();
 
 let cached: SidecarClient | null = null;
-let proc: Subprocess | null = null;
+let proc: ChildProcess | null = null;
 
 async function tryConnect(): Promise<SidecarClient | null> {
   try {
@@ -44,13 +45,10 @@ export async function ensureSidecar(): Promise<SidecarClient> {
 
   // 2) 懒启 agent-host(共享 server 的 env,含 FORGEAX_AGENT_HOST_SOCK)。
   if (!proc || proc.killed) {
-    proc = Bun.spawn({
-      // 用运行本 server 的 bun **绝对路径**(process.execPath),而非裸名 'bun':
-      // Windows 上裸名经 Bun.spawn 不一定走 PATH/PATHEXT 解析 → `uv_spawn 'bun'` ENOENT。
-      cmd: [process.execPath || 'bun', AGENT_HOST_MAIN],
-      env: process.env as Record<string, string>,
-      stdout: 'ignore',
-      stderr: 'inherit',
+    const launch = resolveRuntimeLaunch(AGENT_HOST_MAIN);
+    proc = spawn(launch.cmd, launch.args, {
+      env: process.env,
+      stdio: ['ignore', 'ignore', 'inherit'],
     });
   }
 

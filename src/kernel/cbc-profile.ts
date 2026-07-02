@@ -214,7 +214,7 @@ export function buildCbcMcpArgs(req: TurnRequest, permSid: string): string[] {
   const mcpServers = {
     fxt: {
       command: process.execPath,
-      args: [resolvePath(import.meta.dir, 'mcp/forgeax-tools-server.mjs')],
+      args: [resolvePath(import.meta.dirname, 'mcp/forgeax-tools-server.mjs')],
       env,
     },
   };

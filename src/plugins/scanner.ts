@@ -74,7 +74,7 @@ export function defaultLayerRoots(opts?: { repoRoot?: string; projectRoot?: stri
  *  a directory with `packages/marketplace`. Allows the scanner to work
  *  when invoked from any CWD. */
 function findRepoRoot(): string | null {
-  let dir = resolve(import.meta.dir, '..', '..', '..', '..');
+  let dir = resolve(import.meta.dirname, '..', '..', '..', '..');
   for (let i = 0; i < 4; i += 1) {
     if (safeIsDir(join(dir, 'packages', 'marketplace'))) return dir;
     const up = resolve(dir, '..');

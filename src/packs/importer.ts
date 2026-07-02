@@ -20,6 +20,7 @@
  * UIs can stop gating here and gain proof-of-origin in a later patch.
  */
 import { mkdirSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
+import { runCapture } from '../lib/node-spawn';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -42,14 +43,9 @@ const NATIVE_BINARY_EXT = /\.(so|dll|dylib|node)$/i;
 
 async function runUnzip(zipPath: string, destDir: string): Promise<void> {
   // -q quiet, -o overwrite without prompt (we own the dest dir).
-  const proc = Bun.spawn(['unzip', '-q', '-o', zipPath, '-d', destDir], {
-    stderr: 'pipe',
-    stdout: 'pipe',
-  });
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    throw Object.assign(new Error(`unzip exited ${exitCode}: ${stderr}`), { code: 'unzip_error' });
+  const { code, stderr } = await runCapture('unzip', ['-q', '-o', zipPath, '-d', destDir], { captureStderr: true });
+  if (code !== 0) {
+    throw Object.assign(new Error(`unzip exited ${code}: ${stderr}`), { code: 'unzip_error' });
   }
 }
 

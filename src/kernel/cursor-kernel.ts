@@ -36,6 +36,7 @@ import type {
 } from '@forgeax/agent-runtime';
 import { spawnJsonl, scrubbedSecretEnv } from '../cli-providers/shared/subprocess-jsonl';
 import { resolveBinary } from '../cli-providers/shared/resolve-binary';
+import { runCapture } from '../lib/node-spawn';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import {
   buildCursorArgs,
@@ -188,9 +189,8 @@ export class CursorKernel implements AgentKernel {
   async probe(): Promise<KernelHealth> {
     try {
       const binary = await this.binary();
-      const proc = Bun.spawn({ cmd: [binary, '--version'], stdout: 'pipe', stderr: 'ignore' });
-      const out = (await new Response(proc.stdout).text()).trim().split('\n')[0] ?? '';
-      const code = await proc.exited;
+      const { stdout, code } = await runCapture(binary, ['--version']);
+      const out = stdout.trim().split('\n')[0] ?? '';
       // cursor 支持 `cursor-agent login`(无需 API key)→ 缺 CURSOR_API_KEY 非致命,
       // 只要 binary 在即 ok(与 codex login 流程一致)。
       return code === 0

@@ -15,7 +15,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PathManagerAPI } from "../fs/types";
 
-/** 当前文件所在目录。Bun + Node 双兼容（Bun 有 import.meta.dir，Node 有 import.meta.url）。 */
+/** 当前文件所在目录。Bun + Node 双兼容（Bun 有 import.meta.dirname，Node 有 import.meta.url）。 */
 function defaultsDir(): string {
   const dir = (import.meta as unknown as { dir?: string }).dir;
   if (typeof dir === "string") return dir;

@@ -34,6 +34,7 @@ import { deprecation } from "../lib/deprecation";
 import { getSessionManager } from "../../core/session-manager";
 import { getCheckpointManager } from "../../checkpoint/checkpoint-manager";
 import { getPathManager } from "../../fs/path-manager";
+import { readFile } from "node:fs/promises";
 import { CliEventBridge } from "../../observatory/cli-event-bridge";
 import { denyPermissionsForSession } from "../../core/permission-registry";
 // M1 内核路径(FORGEAX_KERNEL=kernel):chat → 内核契约 → wire,前端零改。
@@ -350,7 +351,7 @@ export function createCliRouter() {
         const candidates = Array.from(new Set([req.agentId, agentPath].filter(Boolean)));
         for (const cand of candidates) {
           try {
-            const cfg = JSON.parse(await Bun.file(pm.session(req.sessionId).agent(cand).agentJson()).text()) as {
+            const cfg = JSON.parse(await readFile(pm.session(req.sessionId).agent(cand).agentJson(), "utf8")) as {
               models?: { model?: string | string[] | null };
             };
             const raw = cfg.models?.model;

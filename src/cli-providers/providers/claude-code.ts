@@ -27,6 +27,7 @@ import { spawnJsonl } from '../shared/subprocess-jsonl';
 // 直接 reuse 那一份，不再维护 cli-providers/shared/friendly-path.ts。
 import { friendlyPath } from '@forgeax/platform-io';
 import { resolveBinary } from '../shared/resolve-binary';
+import { runCapture } from '../../lib/node-spawn';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getPathManager } from '../../fs/path-manager';
 import { getSessionManager } from '../../core/session-manager';
@@ -165,15 +166,8 @@ export class ClaudeCodeProvider implements CliProvider {
     let binaryDetail: string | null = null;
     let binaryOk = false;
     try {
-      const proc = Bun.spawn({
-        cmd: [this.binary, '--version'],
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      const t = setTimeout(() => { try { proc.kill(); } catch { /* ignore */ } }, timeoutMs);
-      const out = (await new Response(proc.stdout).text()).trim();
-      const code = await proc.exited;
-      clearTimeout(t);
+      const { stdout, code } = await runCapture(this.binary, ['--version'], { timeoutMs, captureStderr: true });
+      const out = stdout.trim();
       // Take first line only — a future `claude --version` that prints a
       // banner + version line would otherwise inject a newline into the
       // health detail string and break the cli-selector / Settings layout.
@@ -275,7 +269,7 @@ export class ClaudeCodeProvider implements CliProvider {
     if (permSid) {
       try {
         const serverPort = process.env.FORGEAX_SERVER_PORT ?? '18900';
-        const mcpServerPath = resolvePath(import.meta.dir, '../mcp/permission-server.mjs');
+        const mcpServerPath = resolvePath(import.meta.dirname, '../mcp/permission-server.mjs');
         const mcpConfig = {
           mcpServers: {
             forgeax: {

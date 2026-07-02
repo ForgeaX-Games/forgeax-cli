@@ -14,6 +14,7 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { existsSync, readdirSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getSessionManager } from '../core/session-manager';
 import { getPathManager } from '../fs/path-manager';
@@ -141,7 +142,7 @@ export function createObservatoryRouter() {
     let agentId = node.display;
     if (existsSync(agentJsonPath)) {
       try {
-        const cfg = JSON.parse(await Bun.file(agentJsonPath).text()) as { id?: string };
+        const cfg = JSON.parse(await readFile(agentJsonPath, 'utf8')) as { id?: string };
         if (typeof cfg.id === 'string' && cfg.id) agentId = cfg.id;
       } catch { /* fall through with display name */ }
     }

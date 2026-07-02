@@ -11,6 +11,7 @@
  */
 import type { TurnRequest, TurnMessage } from '@forgeax/agent-runtime';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { resolve as resolvePath } from 'node:path';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getSessionManager } from '../core/session-registry';
@@ -265,7 +266,7 @@ async function resolveAgentModels(
   try {
     const pm = getPathManager();
     const path = pm.session(sessionId).agent(agentId).agentJson();
-    const cfg = JSON.parse(await Bun.file(path).text()) as { models?: { model?: string | string[] | null } };
+    const cfg = JSON.parse(await readFile(path, 'utf8')) as { models?: { model?: string | string[] | null } };
     const raw = cfg.models?.model;
     if (Array.isArray(raw)) {
       const clean = raw.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim());

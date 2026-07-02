@@ -11,7 +11,7 @@ import { existsSync, lstatSync, mkdirSync, symlinkSync, unlinkSync } from 'node:
 
 function monorepoRoot(): string {
   // src/api/lib → climb 4 to monorepo root
-  return resolve(import.meta.dir, '..', '..', '..', '..', '..');
+  return resolve(import.meta.dirname, '..', '..', '..', '..', '..');
 }
 
 const ROOT = monorepoRoot();

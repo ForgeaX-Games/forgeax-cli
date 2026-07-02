@@ -17,6 +17,7 @@
  * everywhere CI runs (verified in /usr/bin/zip on the dev box).
  */
 import { mkdirSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
+import { runCapture } from '../lib/node-spawn';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ManifestSchema, type PluginManifest } from '@forgeax/types';
@@ -330,15 +331,9 @@ export function closureFrom(rootId: string): ClosureResult {
 
 async function runZip(stagingDir: string, outPath: string): Promise<void> {
   // -r recursive, -X strip extra attrs (deterministic), - q quiet.
-  const proc = Bun.spawn(['zip', '-r', '-X', '-q', outPath, '.'], {
-    cwd: stagingDir,
-    stderr: 'pipe',
-    stdout: 'pipe',
-  });
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    throw Object.assign(new Error(`zip exited ${exitCode}: ${stderr}`), { code: 'zip_error' });
+  const { code, stderr } = await runCapture('zip', ['-r', '-X', '-q', outPath, '.'], { cwd: stagingDir, captureStderr: true });
+  if (code !== 0) {
+    throw Object.assign(new Error(`zip exited ${code}: ${stderr}`), { code: 'zip_error' });
   }
 }
 

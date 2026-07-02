@@ -28,6 +28,7 @@ import type {
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
+import { runCapture } from '../lib/node-spawn';
 import { spawnJsonl, scrubbedSecretEnv } from '../cli-providers/shared/subprocess-jsonl';
 import { resolveBinary } from '../cli-providers/shared/resolve-binary';
 import {
@@ -157,9 +158,8 @@ export class CbcKernel implements AgentKernel {
   async probe(): Promise<KernelHealth> {
     try {
       const binary = await this.binary();
-      const proc = Bun.spawn({ cmd: [binary, '--version'], stdout: 'pipe', stderr: 'ignore' });
-      const out = (await new Response(proc.stdout).text()).trim().split('\n')[0] ?? '';
-      const code = await proc.exited;
+      const { stdout, code } = await runCapture(binary, ['--version']);
+      const out = stdout.trim().split('\n')[0] ?? '';
       // cbc 自管登录:凭据落 ~/.codebuddy(.credentials.json / ~/.codebuddy.json)。
       const loggedIn =
         existsSync(resolvePath(homedir(), '.codebuddy', '.credentials.json')) ||

@@ -283,7 +283,7 @@ export function buildMcpArgs(req: TurnRequest, permSid: string): string[] {
     const realSid = req.hostSessionId?.trim() || permSid;
     mcpServers.forgeax = {
       command: process.execPath,
-      args: [resolvePath(import.meta.dir, '../cli-providers/mcp/permission-server.mjs')],
+      args: [resolvePath(import.meta.dirname, '../cli-providers/mcp/permission-server.mjs')],
       env: {
         FORGEAX_SERVER_URL: `http://127.0.0.1:${SERVER_PORT}`,
         FORGEAX_SID: realSid,
@@ -323,7 +323,7 @@ export function buildMcpArgs(req: TurnRequest, permSid: string): string[] {
 
     mcpServers.fxt = {
       command: process.execPath,
-      args: [resolvePath(import.meta.dir, 'mcp/forgeax-tools-server.mjs')],
+      args: [resolvePath(import.meta.dirname, 'mcp/forgeax-tools-server.mjs')],
       env,
     };
     // 编排层显式放行声明的工具 → headless 不卡审批(= 权限归编排层)。
