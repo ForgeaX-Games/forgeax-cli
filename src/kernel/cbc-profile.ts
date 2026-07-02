@@ -98,17 +98,33 @@ export function buildCbcSessionArgs(
  *   - replace → `--system-prompt-file <path>`(完全替换内核默认 prompt)
  *   - append/缺省 → cbc 无 `--append-system-prompt-file`,故走 inline `--append-system-prompt <text>`
  * replace 走 file 是因 charter 可能很长(argv 长度上限);写文件失败 → 降级 inline。
- */
+ *
+ * **Windows 例外(append 模式)**:cbc 在 Windows 经 `codebuddy.cmd` 启动 → 走 cmd.exe,
+ * 命令行硬上限 ~8191 字符。forgeax 的 charter(+persona)通常 ~20KB+,inline
+ * `--append-system-prompt <text>` 必然溢出 → cbc 退出码 1、stderr「命令行太长」。
+ * cbc 又**没有** `--append-system-prompt-file`(只有 `--system-prompt-file`,见 `--help`),
+ * 故 Windows 上 append 只能改走 `--system-prompt-file`(=replace 语义):用 charter 作为
+ * 完整 system prompt、不再追加在 cbc 内置之后。tool 定义仍由 API 注入,charter 本身是
+ * 完整操作手册,可独立成 prompt。POSIX(含 macOS)的 ARG_MAX ~256KB–2MB,inline 不溢出,
+ * **保持原 append 行为不变**。 */
 function buildCbcSystemPromptArgs(text: string, mode: 'append' | 'replace', key: string): string[] {
-  if (mode === 'replace') {
+  const writeToFile = (): string[] | null => {
     try {
       const path = resolvePath(tmpdir(), `forgeax-cbc-sysprompt-${key}.txt`);
       writeFileSync(path, text);
       return ['--system-prompt-file', path];
     } catch {
-      // replace 写盘失败 → cbc 无其它替换通道,退回 inline append(诚实降级,不静默丢身份)。
-      return ['--append-system-prompt', text];
+      return null;
     }
+  };
+  if (mode === 'replace') {
+    // replace 写盘失败 → cbc 无其它替换通道,退回 inline append(诚实降级,不静默丢身份)。
+    return writeToFile() ?? ['--append-system-prompt', text];
+  }
+  // append on Windows → cmd.exe 命令行上限,大 charter inline 会溢出 → 改走 file(replace 语义)。
+  if (process.platform === 'win32') {
+    const fileArgs = writeToFile();
+    if (fileArgs) return fileArgs;
   }
   return ['--append-system-prompt', text];
 }

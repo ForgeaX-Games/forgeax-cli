@@ -256,7 +256,12 @@ export function buildCcArgs(
 /** 是否已有该 thread 的 on-disk session 文件(决定 resume vs 新建,重启安全)。 */
 export function ccSessionExists(cwd: string, tid: string): boolean {
   try {
-    const encoded = cwd.replace(/[/.]/g, '-');
+    // CC encodes the project cwd into its on-disk dir name by replacing path
+    // punctuation with '-'. Must cover Windows separators/drive too (`\` and
+    // `:`), else e.g. `C:\Users\me\proj` → wrong dir, the probe misses an
+    // existing session, and the next turn re-issues `--session-id` → CC errors
+    // "Session ID … is already in use". Matches CC: `C:\Users\…` → `C--Users-…`.
+    const encoded = cwd.replace(/[/\\.:]/g, '-');
     return existsSync(resolvePath(homedir(), '.claude', 'projects', encoded, `${tid}.jsonl`));
   } catch {
     return false;

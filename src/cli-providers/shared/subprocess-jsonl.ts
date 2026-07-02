@@ -43,6 +43,27 @@ export interface SpawnJsonlResult<T> {
   exit: Promise<{ code: number; stderr: string }>;
 }
 
+/** Decode a CLI's stderr bytes to text. Prefers UTF-8; on Windows, if UTF-8
+ *  yields replacement chars (U+FFFD), the CLI almost certainly wrote in the
+ *  console codepage (GBK on zh-CN) — retry with GBK so the surfaced error is
+ *  readable instead of mojibake. POSIX is UTF-8 only (unchanged behavior). */
+function decodeStderr(chunks: Uint8Array[]): string {
+  if (!chunks.length) return '';
+  const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
+  const utf8 = new TextDecoder('utf-8').decode(buf);
+  if (process.platform === 'win32' && utf8.includes('�')) {
+    try {
+      // Bun's TextDecoder supports 'gbk' at runtime; its TS label type omits it.
+      const GbkDecoder = TextDecoder as unknown as { new (label: string): TextDecoder };
+      const gbk = new GbkDecoder('gbk').decode(buf);
+      if (!gbk.includes('�')) return gbk;
+    } catch {
+      /* gbk unsupported → keep utf8 */
+    }
+  }
+  return utf8;
+}
+
 /** Spawn a CLI emitting ndjson on stdout. Each non-empty line is JSON.parse'd
  *  and yielded as T. Malformed lines are skipped silently except for a
  *  console.warn at server stderr (with friendlyPath-redacted cmd), so the
@@ -115,17 +136,21 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
   if (signal.aborted) onAbort();
   else signal.addEventListener('abort', onAbort, { once: true });
 
-  // Stderr drained in parallel — we keep the text for the exit summary so
-  // the caller can surface it in an error ChatEvent.
-  let stderrBuf = '';
+  // Stderr drained in parallel — we keep the raw bytes for the exit summary so
+  // the caller can surface it in an error ChatEvent. We decode at the END (not
+  // streaming) so we can codepage-detect: Windows CLIs (e.g. codebuddy) emit
+  // localized error text in the OEM/ANSI codepage (GBK on zh-CN Windows), NOT
+  // UTF-8. Streaming a UTF-8 TextDecoder over GBK bytes yields mojibake
+  // ("请求太频繁" → "���̫��"). stdout stays UTF-8 (it's the JSON wire format);
+  // only stderr (human messages) gets the GBK fallback. See decodeStderr below.
+  const stderrChunks: Uint8Array[] = [];
   const stderrDone = (async () => {
     if (!proc.stderr) return;
     const reader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
-    const dec = new TextDecoder();
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      stderrBuf += dec.decode(value, { stream: true });
+      if (value) stderrChunks.push(value);
     }
   })();
 
@@ -175,7 +200,7 @@ export function spawnJsonl<T = unknown>(opts: SpawnJsonlOptions): SpawnJsonlResu
   const exit = (async () => {
     const code = await proc.exited;
     await stderrDone;
-    return { code, stderr: stderrBuf };
+    return { code, stderr: decodeStderr(stderrChunks) };
   })();
 
   return { lines: iterate(), exit };

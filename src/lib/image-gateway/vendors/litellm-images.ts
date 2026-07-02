@@ -43,7 +43,11 @@ export function createLitellmImagesVendor(opts: LitellmImagesOpts = {}): ImageVe
       return !!(baseUrl && apiKey && defaultModel);
     },
     async generate(req) {
-      const model = req.modelOverride ?? defaultModel;
+      // Always use defaultModel (LITELLM_PROXY_IMAGE_MODEL) — modelOverride
+      // carries a semantic gateway id like 'litellm-image', not a real proxy
+      // model id, so forwarding it makes the proxy 404. The proxy adapts to
+      // upstream (Seedream/Imagen/DALL-E) using its configured model.
+      const model = defaultModel;
       if (!model) throw new Error('litellm-images: no model configured (set LITELLM_PROXY_IMAGE_MODEL)');
       if (!baseUrl) throw new Error('litellm-images: LITELLM_PROXY_BASE_URL not set');
       if (!apiKey) throw new Error('litellm-images: LITELLM_PROXY_KEY not set');

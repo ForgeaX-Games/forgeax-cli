@@ -45,7 +45,9 @@ export async function ensureSidecar(): Promise<SidecarClient> {
   // 2) 懒启 agent-host(共享 server 的 env,含 FORGEAX_AGENT_HOST_SOCK)。
   if (!proc || proc.killed) {
     proc = Bun.spawn({
-      cmd: ['bun', AGENT_HOST_MAIN],
+      // 用运行本 server 的 bun **绝对路径**(process.execPath),而非裸名 'bun':
+      // Windows 上裸名经 Bun.spawn 不一定走 PATH/PATHEXT 解析 → `uv_spawn 'bun'` ENOENT。
+      cmd: [process.execPath || 'bun', AGENT_HOST_MAIN],
       env: process.env as Record<string, string>,
       stdout: 'ignore',
       stderr: 'inherit',

@@ -74,7 +74,13 @@ export class SidecarClient {
       // once agent-host calls listen()). Attempting netConnect on a missing
       // path surfaces an unhandled native error under bun:test even with an
       // 'error' listener attached; the caller retries on this clean reject.
-      if (!existsSync(sockPath)) { reject(new Error(`sidecar socket not found: ${sockPath}`)); return; }
+      //
+      // Windows-only carve-out: Bun maps `listen(path)` to a **named pipe**,
+      // which has NO filesystem presence → existsSync is always false even when
+      // the host is listening and directly connectable. Skip the pre-check there
+      // and rely on the connect 'error' handler (mirrors main.ts reclaimSocket,
+      // which already guards existsSync with `platform !== 'win32'`).
+      if (process.platform !== 'win32' && !existsSync(sockPath)) { reject(new Error(`sidecar socket not found: ${sockPath}`)); return; }
       let sock: Socket;
       try { sock = netConnect(sockPath); } catch (e) { reject(e as Error); return; }
       const timer = setTimeout(() => { sock.destroy(); reject(new Error('sidecar connect timeout')); }, timeoutMs);

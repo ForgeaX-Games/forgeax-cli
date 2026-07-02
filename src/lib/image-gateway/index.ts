@@ -35,6 +35,7 @@ const MODEL_VENDOR_OWNER: Record<string, string> = {
   'gemini-3.1-flash-image-preview': 'nano-banana',
   'doubao-seedream-5-0-260128': 'seedream',
   'doubao-seedream-4-0-250828': 'seedream',
+  'litellm-image': 'litellm-images',
 };
 
 /** Public so the shim can map iframe `body.model` → preferred vendor. */

@@ -438,7 +438,7 @@ export abstract class BaseKitLoader<TFactory, TInstance> {
  *  avoid plumbing it through every kit. `<userRoot>/sessions/<sid>/...` ->
  *  splits on `/sessions/` and takes the next segment. */
 function sessionIdFromCtx(ctx: AgentContext): string {
-  const m = ctx.agentDir.match(/\/sessions\/([^/]+)\//);
+  const m = ctx.agentDir.match(/[\\/]sessions[\\/]([^\\/]+)[\\/]/);
   if (!m) throw new Error(`[BaseKitLoader] cannot extract sid from agentDir '${ctx.agentDir}'`);
   return m[1];
 }
