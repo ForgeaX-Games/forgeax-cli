@@ -29,6 +29,8 @@ import { getEventBus } from '../events/bus';
 import { isPaused } from '../runtime/pause';
 import { createImageGen } from '../lib/image-gateway/create-image-gen';
 import { defaultProjectRoot } from '@forgeax/platform-io';
+import { getSessionManager } from '../core/session-manager';
+import { getPathManager } from '../fs/path-manager';
 
 export type ToolHandler = (
   args: unknown,
@@ -207,6 +209,40 @@ export function _resetConfirmsForTests(): void {
   pendingConfirms.clear();
 }
 
+/**
+ * Auto-inject the active game slug into `gen3d:*` / `aiasset:*` tool args when
+ * the caller omitted it. Without a slug these handlers throw `missing_game` and
+ * produce no asset — the single most common agent-CLI failure (see the
+ * agent-gen3d persona: "漏了 slug 会直接报 missing_game、什么模型都不会生成").
+ * Resolution mirrors compose-turn-request / host-tool-bridge: the session-bound
+ * slug wins; the workspace active game is the fallback. Only fills when args is
+ * a plain object whose `slug` is absent/empty, so an explicit caller slug wins.
+ */
+function injectScopeSlugIfMissing(req: ToolCall): void {
+  if (typeof req.args !== 'object' || !req.args || Array.isArray(req.args)) return;
+  if (!/^(gen3d|aiasset):/.test(req.toolId)) return;
+  const args = req.args as Record<string, unknown>;
+  if (args.slug !== undefined && args.slug !== '') return;
+  let slug: string | undefined;
+  const sid = req.caller.sessionId ?? req.caller.threadId;
+  if (sid) {
+    try {
+      const s = getSessionManager().peek(sid)?.config.defaultDir;
+      slug = s && s !== 'default' ? s : undefined;
+    } catch {
+      /* SessionManager not initialised (e.g. standalone /api/tools/call smoke) */
+    }
+  }
+  if (!slug) {
+    try {
+      slug = getPathManager().resolveScope();
+    } catch {
+      /* noop */
+    }
+  }
+  if (slug) args.slug = slug;
+}
+
 export async function callTool(req: ToolCall): Promise<ToolResult> {
   const bus = getEventBus();
   const threadId = req.caller.threadId;
@@ -275,6 +311,7 @@ export async function callTool(req: ToolCall): Promise<ToolResult> {
     bus.emit('tool.failed', { toolId: req.toolId, error: r.error, caller: req.caller }, { threadId });
     return r;
   }
+  injectScopeSlugIfMissing(req);
   try {
     const filteredEnv: Record<string, string | undefined> = {};
     for (const k of entry.requestedEnv) filteredEnv[k] = process.env[k];
@@ -295,7 +332,17 @@ export async function callTool(req: ToolCall): Promise<ToolResult> {
   } catch (e) {
     const err = (e as Error).message ?? String(e);
     bus.emit('tool.failed', { toolId: req.toolId, error: err, caller: req.caller }, { threadId });
-    return { ok: false, error: err, code: 'invoke_error' };
+    // Preserve the handler's own `.code` (e.g. missing_game, provider_timeout,
+    // cos_not_configured, not_implemented) so the AI caller / UI can branch on
+    // the specific business failure instead of only seeing the generic
+    // dispatch-layer 'invoke_error'. Falls back to 'invoke_error' when the
+    // handler threw without a coded error.
+    const handlerCode = (e as { code?: unknown }).code;
+    return {
+      ok: false,
+      error: err,
+      code: typeof handlerCode === 'string' && handlerCode ? handlerCode : 'invoke_error',
+    };
   }
 }
 

@@ -160,11 +160,11 @@ describe('wb-character ToolRegistry wiring', () => {
     if (!r.ok) expect(r.code).not.toBe('forbidden');
   });
 
-  it('unimplemented pipelines surface invoke_error with not_implemented in the message', async () => {
+  it('unimplemented pipelines surface the not_implemented code from the stub', async () => {
     await reload();
     // save-render-config is a manifest tool backed by a notImplemented() stub;
     // a non-ai caller bypasses the exposedToAI gate so we reach the handler,
-    // which throws → ToolRegistry maps it to invoke_error.
+    // which throws with code:'not_implemented' → ToolRegistry now preserves it.
     const r = await callTool({
       toolId: 'character:save-render-config',
       args: { slug: 'irrelevant' },
@@ -172,7 +172,7 @@ describe('wb-character ToolRegistry wiring', () => {
     });
     expect(r.ok).toBe(false);
     if (!r.ok) {
-      expect(r.code).toBe('invoke_error');
+      expect(r.code).toBe('not_implemented');
       expect(r.error).toContain('not implemented');
     }
   });

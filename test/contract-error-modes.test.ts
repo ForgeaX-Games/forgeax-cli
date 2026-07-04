@@ -247,7 +247,7 @@ describe('tool registry error contract', () => {
     if (!r.ok) expect(r.code).toBe('forbidden');
   });
 
-  it('handler that throws surfaces invoke_error AND preserves thrown code', async () => {
+  it('handler that throws surfaces the thrown code instead of generic invoke_error', async () => {
     const dir = writePluginAt('L1', 'b', {
       id: '@x/boom',
       kind: 'tool',
@@ -264,7 +264,10 @@ describe('tool registry error contract', () => {
     const r = await callTool({ toolId: 'boom.x', args: {}, caller: { kind: 'user' } });
     expect(r.ok).toBe(false);
     if (!r.ok) {
-      expect(r.code).toBe('invoke_error');
+      // registry now preserves the handler's own `.code` (custom_code) instead
+      // of wrapping every handler throw into the generic 'invoke_error', so AI
+      // callers / UI can branch on the specific business failure.
+      expect(r.code).toBe('custom_code');
       expect(r.error).toContain('whoops');
     }
   });
