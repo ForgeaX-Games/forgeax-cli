@@ -8,7 +8,9 @@
 //   + `source: 'live'`. Disk wins when an id appears in both.
 // - Intersect when live is authoritative: a disk-only id the proxy doesn't serve
 //   is stale (retired upstream) and dropped — clicking it would 404.
-// - Order: surviving disk first (preserves user's curated picker order), then live-only.
+// - Order: strongest-first (claude family → version descending → tier). File
+//   order is no longer the SSOT for display order; live-only models slot in by
+//   rank rather than piling up at the end.
 // - The response gains a sibling `live: { source, error?, ids }` for UI
 //   diagnostics; existing `{ models }` consumers stay green.
 // - Live fetch never throws: on HTTP/network failure, models still come back
@@ -80,7 +82,7 @@ afterEach(async () => {
 });
 
 interface ListModelsResp {
-  models: Array<{ id: string; source?: string; contextWindow?: number; reasoning?: boolean; input?: string[] }>;
+  models: Array<{ id: string; source?: string; live?: boolean; contextWindow?: number; reasoning?: boolean; input?: string[] }>;
   live: { source: string; error?: string; ids: number };
 }
 
@@ -144,6 +146,47 @@ describe("list_models — disk + LiteLLM merge", () => {
     // Surviving disk entries come first (user-curated picker order), then live-only.
     const ids = resp.models.map((m) => m.id);
     expect(ids.indexOf("claude-opus-4-7")).toBeLessThan(ids.indexOf("gpt-5.5"));
+
+    // `live` is uniform when authoritative — every surviving row is proxy-served,
+    // regardless of whether its metadata came from disk or defaults. This is what
+    // lets the UI badge the whole list instead of only the metadata-less rows.
+    expect(resp.models.every((m) => m.live === true)).toBe(true);
+  });
+
+  test("order: strongest-first — claude family, version desc, fable(v5) > opus(4.8)", async () => {
+    // Disk annotates a spread of tiers/versions; live is the authoritative set
+    // and adds a live-only claude (fable-5) + a non-claude. Expect a single
+    // strength-sorted list, NOT disk-first-then-live.
+    writeDiskCatalog({
+      "claude-haiku-4-5": { contextWindow: 200000 },
+      "claude-opus-4-6": { contextWindow: 1000000 },
+      "claude-sonnet-4-6": { contextWindow: 1000000 },
+      "claude-opus-4-8": { contextWindow: 1000000 },
+      "gemini-2.5-pro": { contextWindow: 1000000 },
+    });
+    mockFetch(() => ({
+      status: 200,
+      body: {
+        data: [
+          { id: "claude-haiku-4-5" },
+          { id: "claude-opus-4-6" },
+          { id: "claude-sonnet-4-6" },
+          { id: "claude-opus-4-8" },
+          { id: "gemini-2.5-pro" },
+          { id: "claude-fable-5" }, // live-only, newest flagship
+        ],
+      },
+    }));
+
+    const ids = (await callListModels()).models.map((m) => m.id);
+    expect(ids).toEqual([
+      "claude-fable-5",    // v5 → top of claude even though live-only
+      "claude-opus-4-8",   // 4.8
+      "claude-opus-4-6",   // 4.6 opus (tier breaks tie vs sonnet)
+      "claude-sonnet-4-6", // 4.6 sonnet
+      "claude-haiku-4-5",  // 4.5 haiku
+      "gemini-2.5-pro",    // non-claude family last
+    ]);
   });
 
   test("LiteLLM fetch error → disk-only catalog with live.source='error'", async () => {
@@ -178,6 +221,8 @@ describe("list_models — disk + LiteLLM merge", () => {
     expect(resp.live.source).toBe("disabled");
     expect(resp.live.ids).toBe(0);
     expect(resp.models.length).toBe(1);
+    // Offline → nothing is proxy-served → no row is live (all-or-nothing).
+    expect(resp.models.every((m) => m.live === false)).toBe(true);
   });
 
   test("disk missing → only live entries (still returns live ids)", async () => {

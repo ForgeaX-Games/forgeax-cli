@@ -147,6 +147,51 @@ function loadDiskCatalog(ctx: { paths: { user(): { modelsFile(): string } } }):
   }
 }
 
+/** Strength ordering for the picker — strongest model first.
+ *  Strength is NOT losslessly derivable from an id (a "5" isn't always stronger
+ *  than a "4.8" across tiers), so family + tier priority are **authored** here —
+ *  edit these arrays to re-rank. Within a family: version descending, then tier
+ *  (opus > sonnet > haiku), then a base id before its dated / vendor / size
+ *  variants. claude-fable-5 (v5) therefore lands above claude-opus-4-8 (v4.8),
+ *  and the whole claude family sits above gemini / gpt / deepseek / rest. */
+const FAMILY_RANK: Array<[RegExp, number]> = [
+  [/^claude/, 0],
+  [/^gemini/, 1],
+  [/^(gpt|codex)/, 2],
+  [/^deepseek/, 3],
+];
+const TIER_RANK: Array<[string, number]> = [
+  ["fable", 0], ["opus", 1], ["sonnet", 2], ["haiku", 3],
+];
+/** dated (-20260320) / vendor (-bedrock,-openai) / thinking / size (-mini,-lite)
+ *  / channel (-preview,-fast,-image) suffixes mark a variant of a base model —
+ *  the plain base id sorts first. */
+const VARIANT_RE = /-\d{6,}|-bedrock|-openai|-thinking|-mini|-lite|-preview|-fast|-image/;
+
+/** Comparator key: [familyRank, -major, -minor, tierRank, isVariant, id]. */
+function strengthKey(id: string): [number, number, number, number, number, string] {
+  const s = id.toLowerCase();
+  let family = 50; // unknown families after the known ones
+  for (const [re, r] of FAMILY_RANK) if (re.test(s)) { family = r; break; }
+  const m = s.match(/(\d+)(?:[.-](\d+))?/); // first "4-8" | "4.8" | "3.1" | "v4" | "5"
+  const major = m ? Number(m[1]) : 0;
+  const minor = m && m[2] != null ? Number(m[2]) : 0;
+  let tier = 9;
+  for (const [k, r] of TIER_RANK) if (s.includes(k)) { tier = r; break; }
+  const variant = VARIANT_RE.test(s) ? 1 : 0;
+  return [family, -major, -minor, tier, variant, s];
+}
+
+function byStrength(a: { id: string }, b: { id: string }): number {
+  const ka = strengthKey(a.id);
+  const kb = strengthKey(b.id);
+  for (let i = 0; i < 5; i++) {
+    const d = (ka[i] as number) - (kb[i] as number);
+    if (d) return d;
+  }
+  return (ka[5] as string).localeCompare(kb[5] as string);
+}
+
 /** Merge disk catalog with LiteLLM proxy live `/v1/models`. Live is SSOT for
  *  "which ids actually route" — disk just annotates metadata (contextWindow /
  *  reasoning / input modalities). When live succeeds we **intersect** disk with
@@ -174,19 +219,31 @@ async function loadModelsCatalog(
   const seen = new Set<string>();
   const out: Array<{ id: string; hidden: boolean } & Record<string, unknown>> = [];
 
-  // Disk entries first — keeps user's manually-tuned models at the top of UI lists.
-  // When live is authoritative, drop disk ids the proxy doesn't serve.
+  // `live` = "this id is served by the proxy right now", kept ORTHOGONAL to
+  // `source` (= where the metadata came from). When live is authoritative every
+  // surviving row is proxy-served, so `live` is uniformly true — the UI badge
+  // then marks the whole list, instead of only the metadata-less rows (which
+  // made the enriched rows look like they weren't live). Offline → all false.
+  //
+  // Collect the union: when live is authoritative the shown set IS the live set
+  // (disk-only ids the proxy retired are dropped — clicking them would 404, and
+  // per the "live wins" contract disk is now just a silent metadata annotation).
+  // Live-only ids get sane defaults so the picker can still render them.
   for (const [id, spec] of Object.entries(disk)) {
     if (liveAuthoritative && !liveSet.has(id)) continue;
-    out.push({ id, source: "disk", ...spec, hidden: hidden.has(id) });
+    out.push({ id, source: "disk", ...spec, hidden: hidden.has(id), live: liveAuthoritative });
     seen.add(id);
   }
-  // Live-only entries get sane defaults so picker can render them.
   for (const id of live.ids) {
     if (seen.has(id)) continue;
-    out.push({ id, ...LIVE_DEFAULT_SPEC, hidden: hidden.has(id) });
+    out.push({ id, ...LIVE_DEFAULT_SPEC, hidden: hidden.has(id), live: liveAuthoritative });
     seen.add(id);
   }
+
+  // Strongest-first ordering (see byStrength) — file order is no longer the SSOT
+  // for display order; the strength rule is, so live-only models slot in by rank
+  // instead of piling up at the end.
+  out.sort(byStrength);
 
   return {
     models: out,
