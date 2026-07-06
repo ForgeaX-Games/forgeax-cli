@@ -17,8 +17,8 @@
  *    per-tool 审批闸只有 Hooks 一个注入点(见 server 旧实现的 forgeax-cursor-hooks),
  *    本 kernel 首版按 `--force` 基线跑,审批卡 hook 作为后续单独接入(见 task 2e)。
  *  - MCP:cursor 无 --mcp-config,读 `<cwd>/.cursor/mcp.json` → `--approve-mcps` headless 信任。
- *  - 模型:Studio ModelPicker 在 cursor-agent 下读取 driver-scoped catalog
- *    (`cursor-agent --list-models`),选中值经中立 `TurnRequest.model` 传到 `--model`。
+ *  - 模型:cursor 的模型目录非 Claude 形(opus-4-x),Studio ModelPicker 会被 cursor 拒;
+ *    故与 codex 一样**忽略 req.model**,仅认显式 `CURSOR_MODEL` env。
  *  - 用量:result.usage 只有 token,无 $ cost → turn.usage.costUsd 留空。
  *  - 无 per-tool 权限回调(走 --force / hooks)→ requestPermission 不接。
  */
@@ -70,8 +70,8 @@ export function buildCursorArgs(
     }
   }
 
-  // 模型:ADR-0020 要求退役 CURSOR_MODEL env 特例,统一走 TurnRequest.model。
-  const selectedModel = req.model?.trim() || '';
+  // 模型:忽略 req.model(Claude 形目录 cursor 不认),仅认显式 CURSOR_MODEL env。
+  const selectedModel = process.env.CURSOR_MODEL?.trim() || '';
 
   // prompt 不进 argv:经 stdin 喂入(见函数注释)。argv 只剩短小的 flag/resume。
   const args = [

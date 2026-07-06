@@ -403,9 +403,10 @@ class ForgeaxCoreServeKernel implements AgentKernel {
     // 一次性反向 host-tool:p.sid 优先,缺省用当前轮兜底 hostSessionId。
     conn.setRequestHandler(async (method, params) => {
       if (method === 'hostTool') {
-        const p = (params ?? {}) as { name: string; args: unknown; sid?: string; agentId?: string };
+        const p = (params ?? {}) as { name: string; args: unknown; sid?: string; agentId?: string; callId?: string };
         // p.agentId = facade 透来的本轮真实 agent(委派轮 = mochi 等);桥按它求 trustTier / 弹卡 / 选 context。
-        return this.hostBridge(p.name, p.args, p.sid ?? s.hostSessionId, p.agentId);
+        // p.callId = 本轮工具调用 id;透传给宿主桥,供 studio 对齐前端 HITL 卡片的 pending key。
+        return this.hostBridge(p.name, p.args, p.sid ?? s.hostSessionId, p.agentId, p.callId);
       }
       throw Object.assign(new Error(`unknown method: ${method}`), { code: -32601 });
     });
@@ -513,9 +514,10 @@ class ForgeaxCoreServeKernel implements AgentKernel {
     const offData = this.attachServeLogRouting(sidecar, sessionId, req.hostSessionId, req.session.agentId || 'forge');
     conn.setRequestHandler(async (method, params) => {
       if (method === 'hostTool') {
-        const p = (params ?? {}) as { name: string; args: unknown; sid?: string; agentId?: string };
+        const p = (params ?? {}) as { name: string; args: unknown; sid?: string; agentId?: string; callId?: string };
         // p.agentId 优先(facade 透来的本轮真实 agent);缺省回落本轮 req 的 session.agentId。
-        return this.hostBridge(p.name, p.args, p.sid ?? req.hostSessionId, p.agentId ?? req.session?.agentId);
+        // p.callId = 本轮工具调用 id;透传给宿主桥,供 studio 对齐前端 HITL 卡片的 pending key。
+        return this.hostBridge(p.name, p.args, p.sid ?? req.hostSessionId, p.agentId ?? req.session?.agentId, p.callId);
       }
       throw Object.assign(new Error(`unknown method: ${method}`), { code: -32601 });
     });

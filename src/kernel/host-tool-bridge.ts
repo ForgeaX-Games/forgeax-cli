@@ -24,8 +24,10 @@ import { tt } from '../lib/turn-trace';
 import { appendToolAudit } from './tool-audit';
 
 /** 与原生内核约定的 host 工具执行签名(结构化,不 import 内核包的类型)。
- *  `agentId` = 本轮真实发起工具的 agent(委派轮里即被委派方,如 mochi);缺省回落 defaultAgentPath。 */
-export type HostExecuteToolFn = (name: string, args: unknown, sid?: string, agentId?: string) => Promise<unknown>;
+ *  `agentId` = 本轮真实发起工具的 agent(委派轮里即被委派方,如 mochi);缺省回落 defaultAgentPath。
+ *  `callId` = 本轮工具调用 id(= tool.call/tool.result 的 callId);外部宿主(studio)据它把
+ *  前端 HITL 卡片的 pending 表 key 钉在同一 id 上,使前端回填对得上。cli 内建桥不用它。 */
+export type HostExecuteToolFn = (name: string, args: unknown, sid?: string, agentId?: string, callId?: string) => Promise<unknown>;
 
 /** 桥的可注入协作方(显式声明的输入,Pipeline Isolation)。生产路径全部省略 → 用真实 cli
  *  内部实现;单测可注入桩驱动各决策出口,免起活 session、零全局 mock。`appendToolAudit`

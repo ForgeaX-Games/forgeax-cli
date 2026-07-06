@@ -174,13 +174,13 @@ export class CodexKernel implements AgentKernel {
       let codexThreadId = tid ? this.appThreadIdMap.get(tid) : undefined;
       const startFresh = async (): Promise<string | undefined> => {
         // systemPrompt(charter+persona)由编排层 composeTurnRequest 提供;app-server
-        // 经 thread 的 developerInstructions 注入(不碰仓内 AGENTS.md)。模型同 exec:
-        // 经中立 TurnRequest.model 透传,不再走 CODEX_MODEL env 特例。
+        // 经 thread 的 developerInstructions 注入(不碰仓内 AGENTS.md)。model 同 exec:
+        // 忽略 req.model(Claude 形目录 codex 不认),仅认 CODEX_MODEL env。
         const sp = req.systemPrompt;
         const developerInstructions = sp.persona?.trim()
           ? `${sp.charter}\n\n---\n\n## Persona\n\n${sp.persona.trim()}`
           : sp.charter;
-        const model = req.model?.trim() || undefined;
+        const model = process.env.CODEX_MODEL?.trim() || undefined;
         const res = await client.request('thread/start', {
           cwd: projectRoot,
           sandbox: 'workspace-write',
