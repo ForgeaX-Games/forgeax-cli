@@ -29,11 +29,22 @@ export interface AgentNamingInput {
   fallback: string;
 }
 
-export function computeAgentNaming(input: AgentNamingInput): AgentNaming {
+export function computeAgentNaming(
+  input: AgentNamingInput,
+  lang: 'zh' | 'en' = 'zh',
+): AgentNaming {
   const cn = input.cnTitle?.trim() || undefined;
   const pn = input.personName?.trim() || undefined;
+  const en = (input.enTitle ?? '').trim();
+
+  if (lang === 'en') {
+    const title = pn ?? en ?? input.fallback;
+    const sub = pn && en ? en : (cn && title !== cn ? cn : '');
+    return { title, sub };
+  }
+
   const title = cn && pn ? `${cn}·${pn}` : (cn ?? pn ?? input.fallback);
-  return { title, sub: (input.enTitle ?? '').trim() };
+  return { title, sub: en };
 }
 
 /** 从 i18n 名字结构里取英文名（优先 en，回退 zh）。 */
