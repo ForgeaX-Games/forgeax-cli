@@ -30,15 +30,36 @@ import {
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 
-/** 不进快照的目录/文件名(任意层级命中即剪枝)。 */
+/** 不进快照的目录/文件名(任意层级命中即剪枝)。
+ *
+ *  除构建产物 / VCS 元数据外,还必须剪掉几类「本就不属于被拍目录、且体量巨大」
+ *  的目录 —— 否则当 targetDir = 仓库根(顶层 cli 会话的 workDir)时,快照会把它们
+ *  逐字节吞进 CAS,单会话可膨胀到 GB 级(实测顶层 store 曾达 2.2G):
+ *    - `.forgeax`        —— 用户数据根,**内含 CAS store 自身**;不剪会递归自吞。
+ *    - `.forgeax-harness`—— 闭环状态浮动 clone(自带 .git、自有 remote)。
+ *    - `.worktrees`      —— git worktree,各自是独立 checkout。
+ *    - `target`          —— Rust(src-tauri)构建产物,等价 dist/build。
+ *    - `.claude`/`.cursor`/… —— agent 工具目录,非被拍工程的一部分。
+ *  basename 匹配:只在遍历到「名为这些的条目」时剪枝,targetDir 本身不受影响
+ *  (game 会话的 targetDir = 游戏目录,其内并无这些名字,故不误伤)。 */
 const IGNORED_NAMES = new Set([
   "node_modules",
   ".git",
   "dist",
   "build",
+  "target",
   ".cache",
   ".DS_Store",
   ".forgeax-checkpoint-tmp",
+  ".forgeax",
+  ".forgeax-harness",
+  ".worktrees",
+  ".claude",
+  ".claude-internal",
+  ".cursor",
+  ".codebuddy",
+  ".workbuddy",
+  ".agents",
 ]);
 
 /** 行级 diff 的安全闸:超限只报「变更」不报行数。 */
