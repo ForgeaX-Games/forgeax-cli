@@ -1,6 +1,6 @@
 /** 信任闸单测(T-D 三档 allow/ask/deny)。
  *  own:读/写/编辑/委派直放;危险 {exec,network,credential,delete} → ask。
- *  imported:读/委派直放;credential 硬 deny;exec/network → ask;write/delete 游戏内 ask、外 deny。 */
+ *  imported:读/委派直放;credential 硬 deny;exec/network → ask;write/delete 路径能解析(内/外)→ ask、解析不出 → deny。 */
 import { describe, expect, test } from 'bun:test';
 import { checkKernelTool, classifyTool } from '../src/kernel/trust-gate';
 
@@ -121,7 +121,7 @@ describe('own 不回归(other 仍直放,读写执行不被收窄)', () => {
   });
 });
 
-describe('R2-08 imported write/delete-scope(目录内 ask / 目录外 deny)', () => {
+describe('R2-08 imported write/delete-scope(路径能解析→ask 目录内/外 / 解析不出→deny)', () => {
   const projectRoot = '/tmp/forgeax-ws';
   const activeGame = 'snake';
 
@@ -143,31 +143,37 @@ describe('R2-08 imported write/delete-scope(目录内 ask / 目录外 deny)', ()
     expect(d.outcome).toBe('ask');
   });
 
-  test('写到 games/** 之外 → deny', () => {
+  // 037-A:目录外从 deny 改 ask —— 路径能解析出具体落点就弹卡交人兜(不再无回退死路 deny)。
+  test('写到 games/** 之外 → ask(弹卡显目标路径,人来兜)', () => {
     const d = checkKernelTool('imported', 'write_file', {
       args: { path: 'src/secret.ts' },
       projectRoot,
       activeGame,
     });
-    expect(d.outcome).toBe('deny');
+    expect(d.outcome).toBe('ask');
+    expect(d.allow).toBe(false); // ask 仍 fail-closed,不自动放行
+    expect(d.reason).toContain('OUTSIDE'); // 卡片摘要标明越界
   });
 
-  test('写到另一个(非激活)游戏目录 → deny', () => {
+  test('写到另一个(非激活)游戏目录 → ask(越界,弹卡)', () => {
     const d = checkKernelTool('imported', 'write_file', {
       args: { path: '.forgeax/games/other/src/main.ts' },
       projectRoot,
       activeGame,
     });
-    expect(d.outcome).toBe('deny');
+    expect(d.outcome).toBe('ask');
+    expect(d.reason).toContain('OUTSIDE');
   });
 
-  test('路径穿越越界(games-evil)→ deny', () => {
+  test('路径穿越越界(snake-evil)→ ask(解析后落点暴露在卡片,人来判)', () => {
     const d = checkKernelTool('imported', 'write_file', {
       args: { path: '.forgeax/games/snake/../snake-evil/x.ts' },
       projectRoot,
       activeGame,
     });
-    expect(d.outcome).toBe('deny');
+    expect(d.outcome).toBe('ask');
+    // 卡片如实显示解析后的绝对落点(snake-evil),不被 `..` 蒙混。
+    expect(d.reason).toContain('snake-evil');
   });
 
   test('无 activeGame → 限定到 games 根下任一游戏(ask)', () => {
@@ -178,7 +184,7 @@ describe('R2-08 imported write/delete-scope(目录内 ask / 目录外 deny)', ()
     expect(d.outcome).toBe('ask');
   });
 
-  test('缺 projectRoot 或缺路径 → fail-closed(deny)', () => {
+  test('缺 projectRoot 或缺路径 → fail-closed(deny,无法证明目标)', () => {
     expect(checkKernelTool('imported', 'write_file', { args: { path: '.forgeax/games/snake/x.ts' } }).outcome).toBe('deny');
     expect(checkKernelTool('imported', 'write_file', { projectRoot, activeGame }).outcome).toBe('deny');
   });

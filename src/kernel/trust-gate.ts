@@ -14,11 +14,12 @@
  *     (读密钥/token/env、显式删除工具需确认)。破坏性操作另由 charter prompt 约束。
  *   - `imported`(marketplace/用户导入):**只**读/委派 **直放**;`credential` **硬 deny**(绝不给不可信
  *     pack 真凭据);`{exec, network}` → `ask`;`{write, delete}` 走 R2-08 游戏目录作用域:
- *     **目录内 → `ask`、目录外 → `deny`**;**其余一切(含未命名分类 `other`)→ fail-closed `deny`**
- *     —— 不可信 pack 上叫不出名字的工具没资格静默放行(R2-09)。
+ *     **目录内 → `ask`、目录外(能解析出具体路径)→ `ask`**(弹卡显目标路径交人兜,§8/§9);
+ *     **路径/projectRoot 解析不出 → fail-closed `deny`**(无法证明目标,不能交人盲批);
+ *     其余(含未命名分类 `other`)→ `ask` 交人判断(R2-09:叫不出名字的工具不静默放行,也不死路 deny)。
  *
- * R2-08 写/删作用域:目标路径解析进当前激活游戏目录 `.forgeax/games/<slug>/` 之内才在沙箱内;
- * 拿不到路径/projectRoot ⇒ fail-closed(deny)。
+ * R2-08 写/删作用域:目标路径能解析得出 ⇒ 目录内/外都弹卡确认(卡上显示解析后的目标路径,037-A);
+ * 拿不到路径/projectRoot ⇒ fail-closed(deny,无法证明目标)。
  *
  * 权威 = agent 的 trustTier(由 R6 `loadAgentRecord` 按**加载路径**定,非 pack 自报);
  * endpoint 自行求 trustTier,**不信子进程上报**。fail-closed:未知/不确定 → 更严(deny/imported)。
@@ -92,7 +93,8 @@ const TIER_ALLOW: Record<TrustTier, ReadonlySet<Capability> | null> = {
   imported: new Set<Capability>(['read', 'delegate']),
 };
 
-/** 走 R2-08 游戏目录作用域判定的能力(imported 专属:目录内→ask,目录外→deny)。 */
+/** 走 R2-08 游戏目录作用域判定的能力(imported 专属:路径能解析→ask(卡上标目录内/外),
+ *  路径/projectRoot 解析不出→deny fail-closed)。 */
 const SCOPED_CAPS: ReadonlySet<Capability> = new Set<Capability>(['write', 'delete']);
 
 /** 委派/编排原语:始终放行(即便 imported)——它们是编排面,本身不触达危险能力,
@@ -125,7 +127,7 @@ export interface TrustContext {
   activeGame?: string;
 }
 
-/** 闸口判定(三档):allowlist > 硬 deny > imported write/delete 作用域(内 ask / 外 deny)
+/** 闸口判定(三档):allowlist > 硬 deny > imported write/delete 作用域(路径能解析→ask、解析不出→deny)
  *  > tier ask 集 > per-tier 直放集(own 通配 / imported 仅 {read,delegate});其余(imported 未知能力)
  *  → ask 交人判断(不静默放行、也不静默拒,§8/§9)。 */
 export function checkKernelTool(
@@ -143,11 +145,14 @@ export function checkKernelTool(
     return decide('deny', cap, `tool "${toolName}" denied for ${tier} pack (capability "${cap}")`);
   }
 
-  // 2) imported 的 write/delete:R2-08 游戏目录作用域 —— 目录内 → ask(确认),目录外 → deny。
+  // 2) imported 的 write/delete:R2-08 游戏目录作用域 —— 路径能解析(不论目录内/外)→ ask
+  //    (弹卡显解析后的目标路径交人兜,§8/§9;037-A:目录外从 deny 改 ask,deny 无回退路径);
+  //    路径/projectRoot 解析不出 → fail-closed deny(无法证明目标,不能交人盲批)。
   if (tier === 'imported' && SCOPED_CAPS.has(cap)) {
-    const scoped = writeAllowedInGameScope(ctx);
-    if (scoped.allow) return decide('ask', cap, `confirm ${cap} in active game dir: ${toolName}`);
-    return decide('deny', cap, scoped.reason ?? `tool "${toolName}" denied for ${tier} pack (${cap} outside games/**)`);
+    const scope = classifyWriteScope(ctx);
+    if (scope.kind === 'unresolvable') return decide('deny', cap, scope.reason);
+    const where = scope.kind === 'in-scope' ? 'in active game dir' : `OUTSIDE active game dir → "${scope.target}"`;
+    return decide('ask', cap, `confirm ${cap} ${where}: ${toolName}`);
   }
 
   // 3) 弹卡确认集(own 危险 {exec,network,credential,delete};imported {exec,network})。
@@ -179,21 +184,29 @@ function extractPath(args: unknown): string | undefined {
   return undefined;
 }
 
-/** R2-08 写/删作用域:仅当目标路径解析进 `<projectRoot>/.forgeax/games/<slug>/` 内才算"在沙箱内"。
- *  缺 projectRoot 或拿不到路径 ⇒ fail-closed(无法证明在沙箱内)。返回内部 in-scope 判定,
- *  由 `checkKernelTool` 翻成 ask(内)/ deny(外)。 */
-function writeAllowedInGameScope(ctx: TrustContext): { allow: boolean; reason?: string } {
+/** R2-08 写/删作用域三分类:
+ *  - `unresolvable`:缺 projectRoot 或拿不到目标路径 ⇒ fail-closed(无法证明目标 → caller 翻 deny)。
+ *  - `in-scope`:目标解析进 `<projectRoot>/.forgeax/games/<slug>/` 内。
+ *  - `out-of-scope`:解析得出具体路径但落在作用域外(037-A:交人弹卡确认,非硬 deny;`target` 为
+ *    解析后的绝对路径,供卡片如实显示——路径穿越也会暴露真实落点)。
+ *  in/out 均由 `checkKernelTool` 翻成 ask;仅 unresolvable → deny。 */
+type WriteScope =
+  | { kind: 'in-scope' }
+  | { kind: 'out-of-scope'; target: string }
+  | { kind: 'unresolvable'; reason: string };
+
+function classifyWriteScope(ctx: TrustContext): WriteScope {
   const { projectRoot, activeGame } = ctx;
-  if (!projectRoot) return { allow: false, reason: 'write denied: no project root to scope against (fail-closed)' };
+  if (!projectRoot) return { kind: 'unresolvable', reason: 'write denied: no project root to scope against (fail-closed)' };
   const target = extractPath(ctx.args);
-  if (!target) return { allow: false, reason: 'write denied: no target path in args to scope (fail-closed)' };
+  if (!target) return { kind: 'unresolvable', reason: 'write denied: no target path in args to scope (fail-closed)' };
 
   const abs = resolve(projectRoot, target);
   const gamesRoot = resolve(projectRoot, '.forgeax', 'games');
   // 限定到具体激活游戏(若已知),否则限定到 games 根下任一游戏。
   const scopeDir = activeGame ? resolve(gamesRoot, activeGame) : gamesRoot;
-  if (isInside(abs, scopeDir)) return { allow: true };
-  return { allow: false, reason: `write denied: path "${target}" is outside the active game dir` };
+  if (isInside(abs, scopeDir)) return { kind: 'in-scope' };
+  return { kind: 'out-of-scope', target: abs };
 }
 
 /** `child` 是否在 `parent` 目录内(含相等);用规范化路径 + 分隔符前缀防 `games-evil` 穿越。 */

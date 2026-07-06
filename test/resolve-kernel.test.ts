@@ -7,6 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { resolveKernel } from '../src/kernel/resolve-kernel';
+import { KernelUnavailableError } from '../src/kernel/kernel-unavailable';
 
 describe('resolveKernel — providerOverride 优先于全局 env', () => {
   let prev: string | undefined;
@@ -47,8 +48,19 @@ describe('resolveKernel — providerOverride 优先于全局 env', () => {
     expect(resolveKernel('forge').id).toBe('claude-code');
   });
 
-  test('显式但未注册的内核 → loud 抛错(不静默降级到 env,那正是错配根因)', () => {
+  test('显式但未注册的内核 → loud 抛结构化 KernelUnavailableError(reason=unknown-id)', () => {
     process.env.FORGEAX_KERNEL_IMPL = 'claude-code';
-    expect(() => resolveKernel('forge', 'totally-unknown-kernel')).toThrow(/kernel_unavailable/);
+    expect(() => resolveKernel('forge', 'totally-unknown-kernel')).toThrow(KernelUnavailableError);
+    try {
+      resolveKernel('forge', 'totally-unknown-kernel');
+    } catch (e) {
+      const err = e as KernelUnavailableError;
+      expect(err).toBeInstanceOf(KernelUnavailableError);
+      expect(err.kernelId).toBe('totally-unknown-kernel');
+      expect(err.reason).toBe('unknown-id');
+      // 友好文案带内核 id + 引导改选,不再是裸 `kernel_unavailable: <id>`。
+      expect(err.message).toContain('totally-unknown-kernel');
+      expect(err.message).toContain('可用');
+    }
   });
 });

@@ -40,7 +40,9 @@ import { denyPermissionsForSession } from "../../core/permission-registry";
 // M1 内核路径(FORGEAX_KERNEL=kernel):chat → 内核契约 → wire,前端零改。
 import { composeTurnRequest } from "../../kernel/compose-turn-request";
 import { resolveKernel, listAvailableKernels } from "../../kernel/resolve-kernel";
+import { toKernelErrorPayload } from "../../kernel/kernel-unavailable";
 import { toWireEvents, newWireFoldState } from "../../kernel/to-wire-events";
+import type { AgentKernel } from "@forgeax/agent-runtime";
 import { kernelEnabled } from "../../kernel/kernel-mode";
 import { transcribeKernelTurn } from "../../kernel/transcribe-turn";
 import { tt, ttEnabled } from "../../lib/turn-trace";
@@ -211,14 +213,25 @@ export function createCliRouter() {
         // 内核 id 即 wire/账本的 providerId(claude-code / codex / forgeax-core)。
         // 在 try 外声明,让 finally 的账本转录也能拿到(刷新后据此还原来源 badge)。
         let providerId = "claude-code";
+        // 在 try 外声明,让 catch 能拿到内核去 probe(区分「内核不可用」与「运行时报错」)。
+        // resolveKernel 抛错(unknown-id / not-registered)时它保持 null,由 err 自身分类。
+        let kernel: AgentKernel | null = null;
         try {
           // ★ honor UI 的 providerOverride(the reference agent CLI / Codex 选择),否则会被全局
           //   FORGEAX_KERNEL_IMPL(默认 forgeax-core)顶掉 → claude-code 消息被当成 forgeax。
-          const kernel = resolveKernel(turnReq.session.agentId, body.providerOverride);
+          kernel = resolveKernel(turnReq.session.agentId, body.providerOverride);
           providerId = kernel.id;
           for await (const kev of kernel.runTurn(turnReq, ac.signal)) {
             for (const wire of toWireEvents(kev, fold)) {
               const out: ChatEvent = { ...wire, providerId };
+              // 内核 yield 出的终态 error(如第三方 CLI 未装 → spawn ENOENT 被 kernel 包成
+              // code:'protocol' 的裸串)在这里统一翻成友好文案:probe 内核确认是否真不可用,
+              // 是 → kernel_unavailable + 成因指引;否 → 保留原 code(真·运行时报错)。
+              if (out.type === "error") {
+                const payload = await toKernelErrorPayload(kernel, { message: out.message }, out.code);
+                await sse.writeSSE({ event: "error", data: JSON.stringify({ ...payload, providerId }) });
+                return;
+              }
               await sse.writeSSE({ event: out.type, data: JSON.stringify(out) });
               switch (out.type) {
                 case "token": asstText += out.text ?? ""; break;
@@ -253,14 +266,15 @@ export function createCliRouter() {
                 }
                 default: break;
               }
-              if (out.type === "done" || out.type === "error") return;
+              if (out.type === "done") return;
             }
           }
         } catch (err: any) {
-          await sse.writeSSE({
-            event: "error",
-            data: JSON.stringify({ type: "error", message: err?.message ?? String(err), code: "kernel_unavailable" }),
-          });
+          // 单一翻译点:内核不可用(resolveKernel 抛 KernelUnavailableError,或 probe 判定
+          // 内核 down)→ 友好 kernel_unavailable + 成因;真·运行时报错(网络/LLM/工具)→
+          // 保留原样并标 turn_failed,不再被 catch-all 一律误标成 kernel_unavailable。
+          const payload = await toKernelErrorPayload(kernel, err);
+          await sse.writeSSE({ event: "error", data: JSON.stringify({ ...payload, providerId }) });
         } finally {
           c.req.raw.signal.removeEventListener("abort", onAbort);
           // Transcribe the kernel turn into the host-owned ledger (kernel-agnostic,

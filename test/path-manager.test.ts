@@ -118,3 +118,50 @@ describe("AC-01 contract: create path === path-manager resolution", () => {
     expect(viaPM).toBe(viaManual);
   });
 });
+
+// ── stateRoot — movable runtime state (cache / checkpoints / SM debug.log) ──
+// The product shell injects stateRoot = <project>/.forgeax/state so this
+// closed set follows the project, while keys / kits / sessionsDir stay on
+// the user root. Default (no stateRoot) must be byte-identical to userRoot
+// so standalone CLI and userRoot-sandboxed tests keep full isolation.
+
+describe("UserLayer stateRoot routing", () => {
+  test("without stateRoot, cache/checkpoints/debug.log resolve under userRoot", () => {
+    const userRoot = mkdtempSync(resolve(tmpdir(), "forgeax-ur-"));
+    try {
+      resetPathManager();
+      const pm = initPathManager({ projectRoot, userRoot });
+      expect(pm.user().cacheDir()).toBe(resolve(userRoot, "cache"));
+      expect(pm.user().checkpointsDir("snake")).toBe(resolve(userRoot, "checkpoints", "snake"));
+      expect(pm.user().debugLogFile()).toBe(resolve(userRoot, "debug.log"));
+    } finally {
+      rmSync(userRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("with stateRoot, ONLY the movable set follows it — keys/kits/sessions stay on userRoot", () => {
+    const userRoot = mkdtempSync(resolve(tmpdir(), "forgeax-ur-"));
+    const stateRoot = resolve(projectRoot, ".forgeax", "state");
+    try {
+      resetPathManager();
+      const pm = initPathManager({ projectRoot, userRoot, stateRoot });
+      // movable set → stateRoot
+      expect(pm.user().cacheDir()).toBe(resolve(stateRoot, "cache"));
+      expect(pm.user().checkpointsDir("snake")).toBe(resolve(stateRoot, "checkpoints", "snake"));
+      expect(pm.user().debugLogFile()).toBe(resolve(stateRoot, "debug.log"));
+      // everything else → userRoot, untouched
+      expect(pm.user().keyDir()).toBe(resolve(userRoot, "key"));
+      expect(pm.user().modelsFile()).toBe(resolve(userRoot, "key", "models.json"));
+      expect(pm.user().resourceDir("kits")).toBe(resolve(userRoot, "kits"));
+      expect(pm.user().sessionsDir()).toBe(resolve(userRoot, "sessions"));
+      expect(pm.user().root()).toBe(resolve(userRoot));
+    } finally {
+      rmSync(userRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("checkpointsDir guards unsafe slugs like gameDir does", () => {
+    const pm = getPathManager();
+    expect(() => pm.user().checkpointsDir("../escape")).toThrow("PathManager: unsafe path segment");
+  });
+});

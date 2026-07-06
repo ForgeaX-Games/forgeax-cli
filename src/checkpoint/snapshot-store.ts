@@ -4,7 +4,8 @@
  *  依赖(不用 git)。CAS 形态:写路径有 agent-fs / shell 池 / 插件三条,工具级
  *  拦截必漏,所以对整目录拍照;shadow 存放,不污染游戏目录。
  *
- *  物理布局(storeRoot = <userRoot>/checkpoints/<slug>):
+ *  物理布局(storeRoot = pm.user().checkpointsDir(slug),默认 <userRoot>/checkpoints/<slug>,
+ *  产品模式随注入的 stateRoot 落 <project>/.forgeax/state/checkpoints/<slug>):
  *    blobs/<hh>/<sha256>            内容块,文件级去重,全局只存一份
  *    manifests/<manifestId>.json    { id, ts, files: { relPath: {h,size,mode} } }
  *

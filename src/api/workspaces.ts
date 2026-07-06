@@ -90,6 +90,14 @@ export interface WorkspacesRouterDeps {
    *  sessions vanish from /api/sessions (→ UI sees empty list, mints new empty
    *  sessions, loses history on refresh). Omitted ⇒ generic flat layout. */
   sessionLayoutFactory?: (projectRoot: string) => SessionLayout;
+  /** Rebuild the movable runtime-state root for the switched-to root, so
+   *  lazily-resolved state (terminal cache, checkpoint stores) lands under the
+   *  new project. Injected by the product shell (studio = `<root>/.forgeax/state`).
+   *  Without it, re-initing the PathManager on a workspace switch drops state
+   *  back to the user root (`~/.forgeax`). Note: the SessionManager debug.log
+   *  stream binds its path at boot and only re-points on process restart.
+   *  Omitted ⇒ state stays under the user root. */
+  stateRootFactory?: (projectRoot: string) => string;
 }
 
 export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
@@ -142,7 +150,7 @@ export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
     process.env.FORGEAX_PROJECT_ROOT = abs;
     // Re-inject the layout for the new root — a bare initPathManager would drop the
     // studio GameSessionLayout back to the flat default, hiding game-nested sessions.
-    initPathManager({ projectRoot: abs, layout: deps.sessionLayoutFactory?.(abs) });
+    initPathManager({ projectRoot: abs, stateRoot: deps.stateRootFactory?.(abs), layout: deps.sessionLayoutFactory?.(abs) });
 
     // 3. Repoint engine .forgeax symlink. Engine vite uses polling so the
     //    next watcher tick picks up new files; the explicit child restart
@@ -152,7 +160,7 @@ export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
     } catch (e) {
       // Roll back env so the rest of the server still points at the old root.
       process.env.FORGEAX_PROJECT_ROOT = oldRoot;
-      initPathManager({ projectRoot: oldRoot, layout: deps.sessionLayoutFactory?.(oldRoot) });
+      initPathManager({ projectRoot: oldRoot, stateRoot: deps.stateRootFactory?.(oldRoot), layout: deps.sessionLayoutFactory?.(oldRoot) });
       return c.json({ error: `symlink swap failed: ${(e as Error).message}` }, 500);
     }
 

@@ -12,6 +12,7 @@
  * 后续:按 agent 偏好(agent.json / soul-pack)选,而非全局 env。
  */
 import { type AgentKernel, type KernelId, getKernel, registerKernel, listKernels } from '@forgeax/agent-runtime';
+import { KernelUnavailableError } from './kernel-unavailable';
 import { ClaudeCodeKernel } from './claude-code-kernel';
 import { CodexKernel } from './codex-kernel';
 import { CursorKernel } from './cursor-kernel';
@@ -49,12 +50,18 @@ export function resolveKernel(_agentId: string, explicitImpl?: string | null): A
     const rk = getKernel(requested as KernelId);
     if (rk) return rk;
     // 显式请求了但未注册 → 不静默降级 env(那正是错配根因),loud 抛错。
-    throw new Error(`kernel_unavailable: ${requested}`);
+    // 结构化 unknown-id + 可用内核清单,让 chat 出口能翻成友好文案 + 引导改选。
+    throw new KernelUnavailableError(
+      requested,
+      'unknown-id',
+      listKernels().map((k) => k.id).join(', '),
+    );
   }
   // 默认内核 = forgeax-core(自研内核,产品壳 boot 时经 forgeax-core-adapter 注册)。
   //   未注册(纯 cli / 无 server)→ 下行 fallback 回落 claude-code,行为安全不失能。
   const impl = (process.env.FORGEAX_KERNEL_IMPL?.trim() || 'forgeax-core') as KernelId;
   const k = getKernel(impl) ?? getKernel('claude-code');
-  if (!k) throw new Error(`kernel_unavailable: ${impl}`);
+  // 默认内核 + claude-code fallback 都没注册(纯 cli / 产品壳未 boot)→ 结构化 not-registered。
+  if (!k) throw new KernelUnavailableError(impl, 'not-registered');
   return k;
 }

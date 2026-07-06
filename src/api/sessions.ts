@@ -350,6 +350,20 @@ export function createSessionsRouter() {
       }
     }
 
+    // ── root 兜底必须显式写进 `to` ──
+    // EventBus.emit 只路由带 `to` 的事件(event-bus.ts route);不带 to 的事件只过
+    // observers(headless log 记一笔),不进任何 agent 队列 → turn 永不启动、消息
+    // 静默丢失。上面的 attach+start 只保证兜底 agent 的队列存在,不改变路由——
+    // 所以「无 to → root 兜底」这个语义必须在这里落成 event.to,不能指望总线
+    // (它保持 dumb,不做 type-based 路由)。树上一个 agent 都没有 → 409 fail-fast。
+    target ??= ensurePath;
+    if (!target) {
+      return c.json(
+        { error: 'session has no agents — message would be silently dropped', code: 'no_agent' },
+        409,
+      );
+    }
+
     // ── checkpoint 回退点 ──
     // 仅 user_input:① 有挂起的软回退 → 先定格(此后 cancel 失效,UI 移除置灰段);
     // ② emit 前打消息锚点快照(失败不阻塞聊天)。msgId 是回退体系的稳定外键。
@@ -365,21 +379,14 @@ export function createSessionsRouter() {
       }
     }
 
-    const event: Event = target
-      ? {
-          source: 'user',
-          type: body.type ?? 'user_input',
-          payload: { content, ...(msgId ? { msgId } : {}), ...(body.payload ?? {}) },
-          to: target,
-          handoff: body.handoff ?? 'turn',
-          ts: Date.now(),
-        }
-      : {
-          source: 'user',
-          type: body.type ?? 'user_input',
-          payload: { content, ...(msgId ? { msgId } : {}), ...(body.payload ?? {}) },
-          ts: Date.now(),
-        };
+    const event: Event = {
+      source: 'user',
+      type: body.type ?? 'user_input',
+      payload: { content, ...(msgId ? { msgId } : {}), ...(body.payload ?? {}) },
+      to: target,
+      handoff: body.handoff ?? 'turn',
+      ts: Date.now(),
+    };
     session.eventBus.emit(event);
     return c.json({ ok: true, to: target, msgId });
   });

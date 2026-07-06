@@ -45,12 +45,16 @@ export interface UserLayerAPI {
   gamesDir(): string;
   gameDir(slug: string): string;
 
-  // Cross-session artifacts.
-  globalEventsLog(): string;
-  cacheDir(): string;
+  // Movable runtime state — resolves from the injected stateRoot (product =
+  // <project>/.forgeax/state; default = userRoot, so a standalone CLI keeps
+  // writing ~/.forgeax). Closed set: cache, checkpoints, SM debug.log —
+  // keys / kits / sessionsDir above never follow the state root.
+  cacheDir(): string;            // <stateRoot>/cache/
+  /** Per-game snapshot store root (SnapshotStore storeRoot). */
+  checkpointsDir(slug: string): string;  // <stateRoot>/checkpoints/<slug>/
 
   // SessionManager-singleton logger 落点。Append-only，size-rotate。
-  debugLogFile(): string;        // ~/.forgeax/debug.log
+  debugLogFile(): string;        // <stateRoot>/debug.log
 }
 
 /** Session layer — one per `<sid>`. */

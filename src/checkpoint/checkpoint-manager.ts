@@ -112,10 +112,14 @@ export class CheckpointManager {
           const dir = pm.user().gameDir(slug);
           if (existsSync(dir)) {
             gameDir = dir;
-            store = this.stores.get(slug) ?? null;
+            // 键用解析后的 storeRoot 而非 slug:storeRoot 派生自可注入的 stateRoot,
+            // workspace 切根后同 slug 解析到新根 —— slug 键会让单例继续持有(并写进)
+            // 旧项目的快照库。
+            const storeRoot = pm.user().checkpointsDir(slug);
+            store = this.stores.get(storeRoot) ?? null;
             if (!store) {
-              store = new SnapshotStore(`${pm.user().root()}/checkpoints/${slug}`);
-              this.stores.set(slug, store);
+              store = new SnapshotStore(storeRoot);
+              this.stores.set(storeRoot, store);
             }
           }
         } catch {

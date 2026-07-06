@@ -84,6 +84,15 @@ export interface ProductContext {
    *  generic flat layout (`<userRoot>/sessions/<sid>`), i.e. forgeax-cli runs
    *  game-agnostic as a standalone CLI. */
   sessionLayoutFactory?: (projectRoot: string) => SessionLayout;
+  /** Movable runtime-state root (cache / checkpoints / SM debug.log), as a
+   *  **factory** keyed by project root — same shape and reason as
+   *  `sessionLayoutFactory`: a workspace/project-root switch must rebuild it
+   *  for the new root; a boot-time string would stay pinned to the old
+   *  project. (The SessionManager debug.log stream still binds its path at
+   *  boot — it re-points on process restart, not on switch.) Omitted ⇒ state
+   *  stays under the user root (`~/.forgeax`), i.e. standalone-CLI behavior.
+   *  Keys / kits / settings never follow this root. */
+  stateRootFactory?: (projectRoot: string) => string;
   /** Business routers injected by the shell, mounted after the static cli routers
    *  (order/path unchanged for the static set). Replaces the per-feature static
    *  mounts as business migrates out of cli (Stage A §3). Each entry mounts at
@@ -126,7 +135,11 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
     /* non-fatal at boot; settings UI can fix brand */
   }
 
-  const pm = initPathManager({ projectRoot, layout: ctx.sessionLayoutFactory?.(projectRoot) });
+  const pm = initPathManager({
+    projectRoot,
+    stateRoot: ctx.stateRootFactory?.(projectRoot),
+    layout: ctx.sessionLayoutFactory?.(projectRoot),
+  });
   // Install shell-injected orchestration seams once at boot (same idiom as the
   // path/session managers above). Read-only on the hot path thereafter.
   initOrchestrationSeams({
@@ -164,6 +177,10 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
     // enumerating game-nested sessions after a workspace change (else it drops to
     // the flat default layout and the UI sees an empty list → loses history).
     sessionLayoutFactory: ctx.sessionLayoutFactory,
+    // Same factory the boot init used — a workspace switch must re-derive the
+    // movable state root for the new root (terminal cache & checkpoint stores
+    // resolve lazily via getPathManager()).
+    stateRootFactory: ctx.stateRootFactory,
   }));
   app.route('/api/settings', createSettingsRouter());
   app.route('/api/memory-settings', createMemorySettingsRouter());

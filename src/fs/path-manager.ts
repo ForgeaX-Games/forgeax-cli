@@ -60,7 +60,15 @@ class BuiltinLayer implements BuiltinLayerAPI {
 
 class UserLayer implements UserLayerAPI {
   private readonly _gameRoot: string;
-  constructor(private readonly r: string, projectRoot: string) {
+  /** `_state` — movable runtime-state root (cache / checkpoints / SM debug.log).
+   *  Defaults to the user root; the product shell injects a project-local dir
+   *  (`<project>/.forgeax/state`) so this closed set follows the project while
+   *  keys / kits / sessionsDir stay on the user root. */
+  constructor(
+    private readonly r: string,
+    projectRoot: string,
+    private readonly _state: string,
+  ) {
     this._gameRoot = resolve(projectRoot, ".forgeax", "games");
   }
   root() { return this.r; }
@@ -76,9 +84,9 @@ class UserLayer implements UserLayerAPI {
   gamesDir() { return this._gameRoot; }
   /** Games live instance-local since bug-20260522; rest of UserLayer remains ~/.forgeax. */
   gameDir(slug: string) { return join(this._gameRoot, safeSegment(slug)); }
-  globalEventsLog() { return join(this.r, "global-events.jsonl"); }
-  cacheDir() { return join(this.r, "cache"); }
-  debugLogFile() { return join(this.r, "debug.log"); }
+  cacheDir() { return join(this._state, "cache"); }
+  checkpointsDir(slug: string) { return join(this._state, "checkpoints", safeSegment(slug)); }
+  debugLogFile() { return join(this._state, "debug.log"); }
 }
 
 class SessionLayer implements SessionLayerAPI {
@@ -140,10 +148,11 @@ class PathManager implements PathManagerAPI {
    *  exactly as before the seam existed. */
   private readonly _layout: SessionLayout;
 
-  constructor(opts: { builtinRoot?: string; userRoot?: string; projectRoot?: string; layout?: SessionLayout } = {}) {
+  constructor(opts: { builtinRoot?: string; userRoot?: string; stateRoot?: string; projectRoot?: string; layout?: SessionLayout } = {}) {
     const projectRoot = resolve(opts.projectRoot ?? defaultProjectRoot());
+    const userRoot = resolve(opts.userRoot ?? resolveUserDir());
     this._builtin = new BuiltinLayer(resolve(opts.builtinRoot ?? defaultBuiltinRoot()));
-    this._user = new UserLayer(resolve(opts.userRoot ?? resolveUserDir()), projectRoot);
+    this._user = new UserLayer(userRoot, projectRoot, opts.stateRoot ? resolve(opts.stateRoot) : userRoot);
     // generic default: sessions flat under <userRoot>/sessions, agent cwd = projectRoot.
     this._layout = opts.layout ?? new FlatSessionLayout(this._user.sessionsDir(), projectRoot);
   }
@@ -182,7 +191,7 @@ class PathManager implements PathManagerAPI {
 
 let _instance: PathManager | null = null;
 
-export function initPathManager(opts?: { builtinRoot?: string; userRoot?: string; projectRoot?: string; layout?: SessionLayout }): PathManager {
+export function initPathManager(opts?: { builtinRoot?: string; userRoot?: string; stateRoot?: string; projectRoot?: string; layout?: SessionLayout }): PathManager {
   _instance = new PathManager(opts);
   return _instance;
 }
