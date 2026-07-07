@@ -56,6 +56,8 @@ export interface KernelTurnOpts {
   /** 全链路 trace:浏览器 ui.request 的 W3C traceparent(经 /:sid/messages event payload 传到这);
    *  透传进 composeTurnRequest → TurnRequest.traceparent → 内核把 kernel.turn 挂成其 child。 */
   traceparent?: string;
+  /** 本轮回复语言(UI 结算),透传进 composeTurnRequest → dynamicSuffix 指令。 */
+  replyLanguage?: 'en' | 'zh';
 }
 
 /** 跑一轮内核 turn,把流式/工具/终态映射成 bus 事件。返回 {aborted,error}。 */
@@ -82,6 +84,7 @@ export async function runKernelTurn(opts: KernelTurnOpts): Promise<{ aborted: bo
       ...(opts.tools ? { extraTools: opts.tools } : {}),
       ...(opts.attachments && opts.attachments.length ? { attachments: opts.attachments } : {}),
       ...(opts.traceparent ? { traceparent: opts.traceparent } : {}),
+      ...(opts.replyLanguage ? { replyLanguage: opts.replyLanguage } : {}),
     });
     const kernel = resolveKernel(agentId);
 

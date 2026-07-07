@@ -62,6 +62,8 @@ interface ChatBody {
   /** 多模态附件(图片)。每项 `{ kind:'image', mediaType, data?(base64) | path?(host 文件) }`。
    *  透传进 composeTurnRequest → TurnRequest.input.attachments → 原生内核 facade 组 image block。 */
   attachments?: Array<Record<string, unknown>>;
+  /** 本轮期望回复语言(UI 结算)。透传进 composeTurnRequest → dynamicSuffix 指令。 */
+  replyLanguage?: "en" | "zh";
 }
 
 interface CancelBody {
@@ -162,6 +164,7 @@ export function createCliRouter() {
         sessionId: body.sessionId,
         callId,
         ...(Array.isArray(body.attachments) && body.attachments.length ? { attachments: body.attachments } : {}),
+        ...(body.replyLanguage === "en" || body.replyLanguage === "zh" ? { replyLanguage: body.replyLanguage } : {}),
       });
 
       // 历史持久化(host-owned,核心目标):内核每轮的 KernelEvent 流由编排层**转录**进

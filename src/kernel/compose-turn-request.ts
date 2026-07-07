@@ -81,6 +81,16 @@ export interface ComposeInput {
   /** 全链路 trace:上游(浏览器 ui.request)的 W3C traceparent;透传进 TurnRequest,
    *  内核 facade 把 kernel.turn 挂成它的 child。缺省 ⇒ kernel.turn 自建 root。 */
   traceparent?: string;
+  /** 本轮期望的回复语言(UI 结算:跟随输入 / 快捷开关)。注入进 `dynamicSuffix`
+   *  (轮间 user 后缀,不进 persona/charter,不 bust 缓存前缀),让 agent 用该语言
+   *  回复。缺省 ⇒ 不注入(agent 自行判断)。 */
+  replyLanguage?: 'en' | 'zh';
+}
+
+/** 一行回复语言指令(英文中立,注入 dynamicSuffix)。 */
+function replyLanguageDirective(lang: 'en' | 'zh'): string {
+  const name = lang === 'zh' ? 'Simplified Chinese' : 'English';
+  return `# Reply language\nWrite your reply to the user in ${name}. Keep code, identifiers, file paths and technical terms unchanged.`;
 }
 
 export async function composeTurnRequest(input: ComposeInput): Promise<TurnRequest> {
@@ -123,7 +133,8 @@ export async function composeTurnRequest(input: ComposeInput): Promise<TurnReque
         .map((n) => `- [${n.level}] ${n.text}`)
         .join('\n')}\n\nIf these indicate a problem with code you wrote, fix it; otherwise acknowledge and continue.`
     : '';
-  const dynamicSuffix = [rebirth, episodic, runtimeFeedback].filter((s) => s && s.trim()).join('\n\n---\n\n');
+  const replyLang = input.replyLanguage ? replyLanguageDirective(input.replyLanguage) : '';
+  const dynamicSuffix = [rebirth, episodic, runtimeFeedback, replyLang].filter((s) => s && s.trim()).join('\n\n---\n\n');
 
   // 模型 + 级联回退:UI 覆盖(input.model)只给主模型无回退;否则从 agent.json::models.model
   // 解析——数组形态 = [主模型, ...fallback](--fallback-model 链),单串 = 无回退。

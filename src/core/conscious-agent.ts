@@ -554,6 +554,12 @@ export class ConsciousAgent extends BaseAgent {
         const traceparent = events
           .map((e) => ((e.payload as { traceparent?: unknown })?.traceparent))
           .find((tp): tp is string => typeof tp === 'string' && tp.length > 0);
+        // Reply language (UI-resolved: follow-input / quick switch). Last one wins
+        // when a turn merges several queued messages.
+        const replyLanguage = events
+          .map((e) => ((e.payload as { replyLanguage?: unknown })?.replyLanguage))
+          .filter((v): v is 'en' | 'zh' => v === 'en' || v === 'zh')
+          .pop();
         const mc = this.modelRoutingHints.order(
           resolveModelsConfig(this.agentJson, this.sessionDefaultModels),
         );
@@ -573,6 +579,7 @@ export class ConsciousAgent extends BaseAgent {
           tools: hostTools,
           ...(attachments.length ? { attachments } : {}),
           ...(traceparent ? { traceparent } : {}),
+          ...(replyLanguage ? { replyLanguage } : {}),
           ...(model ? { model } : {}),
         });
         tt("kernel.returned", { agent: this.agentPath, turn: this.currentTurn, aborted: signal.aborted, error });
