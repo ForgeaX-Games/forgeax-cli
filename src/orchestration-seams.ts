@@ -41,6 +41,19 @@ export interface SystemPromptComposer {
   environment(opts: { cwd: string; projectRoot?: string; slug?: string | null }): string;
 }
 
+/** 宿主侧工具执行上下文(seam run 的显式输入,Pipeline Isolation)。`perception` 是
+ *  编排层通用感知往返(EventBus→WS→UI→回灌)的绑定句柄——机制业务无关,shell 注入的
+ *  工具(query_world/capture_frame)用它向浏览器里的真值源取数;UI 未连时 fail-soft
+ *  返回 `{ unavailable }`。 */
+export interface HostToolRunCtx {
+  sid?: string;
+  agentId: string;
+  projectRoot: string;
+  /** 会话绑定的业务作用域 slug(studio 语境 = game)。 */
+  game?: string;
+  perception?: (kind: 'world' | 'frame', query?: unknown) => Promise<unknown>;
+}
+
 /** A host-only tool spec the shell exposes to agents (list_games / query_world /
  *  capture_frame …). Structurally a neutral ToolSpec — the orchestration layer
  *  broadcasts it into the prompt/allowedTools and the host-tool bridge gates the
@@ -50,6 +63,19 @@ export interface HostToolSpec {
   name: string;
   description: string;
   inputSchema: unknown;
+  /** 宿主侧执行体(forgeax-core 原生路径:两个 host 工具执行口在信任闸放行后调用)。
+   *  缺省 = 仅声明,执行回落 agent kit 注册表(历史行为)。注意:spec 出墙给内核时
+   *  只序列化 name/description/inputSchema,`run` 永不过 wire。 */
+  run?: (args: Record<string, unknown>, ctx: HostToolRunCtx) => Promise<unknown> | unknown;
+}
+
+/** UI 语义操作层的 headless 等价 handler(方案 §5 surface:'both'|'server'):UI 不在线
+ *  时 `ui_invoke` 回落到这里。返回值应为 ActionResult 形({status, reason?, stateDigest?})。
+ *  硬约束:handler 必须调与 UI run() 相同的内部实现/HTTP API(server 是行为 SSOT),
+ *  不许长出第二份业务逻辑。 */
+export interface HostUiActionHandler {
+  actionId: string;
+  run: (args: Record<string, unknown>, ctx: HostToolRunCtx) => Promise<unknown> | unknown;
 }
 
 /** Asset path policy — replaces the `.forgeax/games` whitelist baked into
@@ -85,6 +111,7 @@ export interface UiAssetCleanup {
 interface OrchestrationSeams {
   systemPromptComposer?: SystemPromptComposer;
   hostTools?: HostToolSpec[];
+  hostUiActions?: HostUiActionHandler[];
   assetPathPolicy?: AssetPathPolicy;
 }
 
@@ -104,6 +131,16 @@ export function getSystemPromptComposer(): SystemPromptComposer | undefined {
 /** Host-only tool specs the shell injected (empty array when none). */
 export function getHostTools(): HostToolSpec[] {
   return _seams.hostTools ?? [];
+}
+
+/** 按名取 shell 注入的 host 工具(执行口用;undefined = 非 seam 工具)。 */
+export function getHostTool(name: string): HostToolSpec | undefined {
+  return _seams.hostTools?.find((t) => t.name === name);
+}
+
+/** 按 actionId 取 shell 注入的 headless UI action handler(ui_invoke 回落用)。 */
+export function getHostUiAction(actionId: string): HostUiActionHandler | undefined {
+  return _seams.hostUiActions?.find((h) => h.actionId === actionId);
 }
 
 /** The injected asset path policy, or undefined when none was injected. */

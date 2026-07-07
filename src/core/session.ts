@@ -34,6 +34,7 @@ import type { PathManagerAPI, SessionLayerAPI } from "../fs/types";
 import { createOrGetFSWatcher } from "../fs/watcher";
 import { AgentKitReloadCoordinator } from "../kits/reload-coordinator";
 import { clearRememberedForSession } from "../kernel/tool-approval";
+import { clearUiStateForSession } from "../api/lib/ui-manifest-registry";
 import { runAutoExtract } from "../soul/auto-extract";
 import { tryKernelForkExtract } from "../soul/fork-extract";
 import { resolveKernel } from "../kernel/resolve-kernel";
@@ -454,6 +455,7 @@ export class Session {
     this.fileActivity.dispose();
     this.fileLocks.clear();
     clearRememberedForSession(this.sid); // 清本会话的工具审批 remember(不跨会话残留)
+    clearUiStateForSession(this.sid); // 清本会话的 UI 语义操作层 lease + manifest 缓存
     await this.logger.close();
   }
 }

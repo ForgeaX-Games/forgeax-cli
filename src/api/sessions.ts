@@ -13,48 +13,29 @@
  *  Session 不持 abortController，cancel 一律走 scheduler 派给 per-agent。 */
 
 import { Hono } from 'hono';
-import { readFileSync } from 'node:fs';
 import { getSessionManager } from '../core/session-manager';
 import type { Session } from '../core/session';
-import type { AgentJson, Event } from '../core/types';
+import type { Event } from '../core/types';
 import { ensureAgentScaffold, isValidAgentName } from '../core/agent-scaffold';
 import { resolvePersonaForAgent } from '../agents/loader';
-import { findMarketplaceManifest } from './lib/marketplace-manifest';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getPathManager } from '../fs/path-manager';
 import { resolveAsk } from '../core/ask-user-registry';
 import { randomUUID } from 'node:crypto';
 import { registerPermission, resolvePermission } from '../core/permission-registry';
 import { registerPerception, resolvePerception, pushPerceptionNote } from './lib/perception-registry';
+import { acquireUiLease, setUiManifest, uiInvokeTimeoutMs, resolveFirstClassUiTool } from './lib/ui-manifest-registry';
+import { createSessionWithBootstrap } from './lib/session-create';
+import { getHostTool } from '../orchestration-seams';
+import type { PerceptionKind } from '../kernel/forgeax-builtin-tools';
 import { executeTool } from '../kits/tool/tool-executor';
-import { isForgeaxBuiltinTool, runForgeaxBuiltinTool } from '../kernel/forgeax-builtin-tools';
+import { isForgeaxBuiltinTool, runForgeaxBuiltinTool, hostToolRunCtx } from '../kernel/forgeax-builtin-tools';
 import { checkKernelTool } from '../kernel/trust-gate';
 import { requestToolApproval, applyRememberOnReply } from '../kernel/tool-approval';
 import { getCheckpointManager, type RewindMode } from '../checkpoint/checkpoint-manager';
 import { loadAgentRecord } from '../soul';
 import { appendToolAudit } from '../kernel/tool-audit';
 import { consultTurnGate } from '../kernel/cc-profile';
-
-/** 终极 fallback —— marketplace manifest 缺 / 解析失败时回到泛用 'root' path。
- *  e2e 测试（`makeSidWithRootAgent`）也走这条 path，保持兼容。 */
-const FALLBACK_BOOTSTRAP_AGENT = 'root';
-
-/** 真正的「默认入口 agent」—— marketplace manifest 里 `default: true` 的那个
- *  agent id（当前是 forge）。读盘成本可忽略，每次 POST /sessions 才命中一次。
- *  失败回 root —— 跟 ref agenteam `cmdChat` 拿不到 agent context 时的兜底
- *  policy 同款（不阻塞 session 创建，让用户后续手动 pin）。 */
-function resolveManifestMainAgent(): string {
-  try {
-    const found = findMarketplaceManifest(defaultProjectRoot());
-    if (!found.path) return FALLBACK_BOOTSTRAP_AGENT;
-    const raw = readFileSync(found.path, 'utf-8');
-    const parsed = JSON.parse(raw) as { agents?: Array<{ id?: string; default?: boolean }> };
-    const main = (parsed.agents ?? []).find((a) => a?.default && typeof a.id === 'string' && a.id.length > 0);
-    return main?.id ?? FALLBACK_BOOTSTRAP_AGENT;
-  } catch {
-    return FALLBACK_BOOTSTRAP_AGENT;
-  }
-}
 
 function resolveAgentPath(session: Session, to: string): string {
   if (to.includes('#')) {
@@ -87,82 +68,10 @@ export function createSessionsRouter() {
 
   r.post('/', async (c) => {
     const body = await c.req.json().catch(() => ({}));
-    const sm = getSessionManager();
-    // Permanent binding (plan B PR2): the new session is bound to the current
-    // active game by the injected SessionLayout (paths.allocate) — its home
-    // becomes <games>/<activeSlug>/sessions/<sid>/. No defaultDir is passed/stored.
-    const session = await sm.create({
-      displayName: body.displayName,
-      defaultModels: body.defaultModels,
-      timezone: body.timezone,
-      autoStart: body.autoStart,
-    });
-    // **先** scheduler.start() 让它先订阅 tree.onChange，**再** scaffold root
-    // —— scaffold 写盘后 FSWatcher 派发 rename → tree.onChange("added") →
-    // scheduler.attachAndStart。如果倒过来，写盘那一刻 scheduler 还没订阅，
-    // 派发会落空（虽然 start 内同步扫盘 tree.list() 也会 attach root，但保
-    // 持事件链单一更易排错）。
-    session.scheduler.start();
-
-    // Bootstrap default agent —— interface 创建 session 时必须先有一个入口
-    // agent，否则 AgentSwitcher 看到空列表就显示 "agent: 未指定"。
-    //
-    // body.bootstrapAgent:
-    //   - undefined / 不传  → 解析 marketplace manifest 找 default=true 的 agent
-    //                         （当前为 forge），fallback 到 'root'。「主 agent」
-    //                         概念跟「新 session 入口 agent」是同一个，不再分两套。
-    //   - "<name>"         → 用该名（必须符合 isValidAgentName / Path）
-    //   - false / "" / null → 显式不 bootstrap（保留给"想要纯空 session"的 API 调用方）
-    //
-    // 用户指定 simple-name (mochi/iori/...) 时同样跑 persona 解析（跟 POST
-    // /messages 自动 scaffold 路径一致），让选择 mochi 当默认的用户开新 session
-    // 立刻看到 mochi persona、不会落到「root agent 但没人格」。
-    let bootstrappedAgent: string | null = null;
-    if (body.bootstrapAgent !== false && body.bootstrapAgent !== null && body.bootstrapAgent !== '') {
-      const agentPath = typeof body.bootstrapAgent === 'string'
-        ? body.bootstrapAgent
-        : resolveManifestMainAgent();
-      try {
-        let personaFile: string | undefined;
-        let memoryDir: string | undefined;
-        let hostTools: string[] | undefined;
-        const isSimpleName =
-          !agentPath.includes('/') && !agentPath.includes('#') && isValidAgentName(agentPath);
-        if (isSimpleName && agentPath !== FALLBACK_BOOTSTRAP_AGENT) {
-          // 走和 messages 端一样的 marketplace 解析。解析失败不阻塞 bootstrap ——
-          // 落到 root-style 空 persona 兜底，比拒绝建 session 更顺手。
-          try {
-            const persona = await resolvePersonaForAgent(agentPath);
-            if (persona) {
-              personaFile = persona.personaPath;
-              memoryDir = persona.memoryDir;
-              hostTools = persona.tools;
-            }
-          } catch (e: any) {
-            process.stderr.write(
-              `[sessions] bootstrap persona resolve for '${agentPath}' failed: ${e?.message ?? e}\n`,
-            );
-          }
-        }
-        const overrides: Partial<AgentJson> = {};
-        if (personaFile) overrides.personaFile = personaFile;
-        if (memoryDir) overrides.memoryDir = memoryDir;
-        if (hostTools && hostTools.length > 0) {
-          overrides.kits = { config: { 'host-tools': { allow: hostTools } } };
-        }
-        await ensureAgentScaffold(session.sid, agentPath, {
-          agentType: 'conscious',
-          ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
-        });
-        bootstrappedAgent = agentPath;
-      } catch (err: any) {
-        process.stderr.write(
-          `[sessions] bootstrap agent '${agentPath}' for ${session.sid} failed: ${err?.message ?? err}\n`,
-        );
-      }
-    }
-
-    return c.json({ sid: session.sid, bootstrappedAgent });
+    // 「建 session + bootstrap 入口 agent」的实现抽在 lib/session-create.ts(SSOT):
+    // headless 的 `session.create` UI action(ui-headless-actions)与本路由共用同一份。
+    const out = await createSessionWithBootstrap(body);
+    return c.json(out);
   });
 
   r.post('/:sid/open', async (c) => {
@@ -495,9 +404,16 @@ export function createSessionsRouter() {
     const start = Date.now();
     const body = await c.req.json().catch(() => ({}));
     const agentPath = typeof body.agentPath === 'string' && body.agentPath ? body.agentPath : 'forge';
-    const toolName = typeof body.toolName === 'string' ? body.toolName : '';
-    const args = body.args && typeof body.args === 'object' ? (body.args as Record<string, unknown>) : {};
+    let toolName = typeof body.toolName === 'string' ? body.toolName : '';
+    let args = body.args && typeof body.args === 'object' ? (body.args as Record<string, unknown>) : {};
     if (!toolName) return c.json({ ok: false, error: 'toolName required' }, 400);
+    // P1-9 一等工具化:ui_act_* 在信任闸**之前**反解回 ui_invoke(actionId),使权限
+    // (per-action 闸)/审计/执行全程只认识 ui_invoke 一条路(与 host-tool-bridge 同口径)。
+    const fcTool = resolveFirstClassUiTool(sid, toolName);
+    if (fcTool) {
+      args = { actionId: fcTool.actionId, args };
+      toolName = 'ui_invoke';
+    }
 
     const session = getSessionManager().peek(sid) ?? (await getSessionManager().open(sid));
     const agent = session.scheduler.getAgent(agentPath);
@@ -519,7 +435,8 @@ export function createSessionsRouter() {
     // 否则绑 A、active 切 B 时会误判 A 自己的写。session 未绑则回落 active game。
     const projectRoot = defaultProjectRoot();
     const scopeGame = session.config?.defaultDir ?? getPathManager().resolveScope();
-    const decision = checkKernelTool(trustTier, toolName, { args, projectRoot, activeGame: scopeGame });
+    // sid 供 ui_invoke 的 per-action capability 查表(manifest 缓存按 sid 存,见 trust-gate)。
+    const decision = checkKernelTool(trustTier, toolName, { args, projectRoot, activeGame: scopeGame, sid });
     if (decision.outcome === 'deny') {
       // 信任闸硬拒 —— 审计记录 allow=false
       appendToolAudit({ sid, agent: agentPath, tool: toolName, trustTier, allow: false, error: decision.reason ?? 'denied by trust tier', durationMs: Date.now() - start, ts: start });
@@ -543,18 +460,26 @@ export function createSessionsRouter() {
     }
 
     try {
-      // 内置 forgeax 工具走宿主侧实现(remember/memory_search/list_games/query_world/
-      //   capture_frame/echo);其余查 agent kit 注册表。与 host-tool-bridge 同口径(对称的两个
-      //   host 工具执行口)。cc/cbc/codex 内核在 .mjs 本地跑这批工具、从不桥到这里 → 此支只服务
-      //   将来可能经 HTTP 回打的内置工具,行为不变。
+      // 执行解析顺序(与 host-tool-bridge 同口径,对称的两个 host 工具执行口):
+      //   ①内置 forgeax 工具走宿主侧实现;②产品壳 seam 注入且带 run 的 host 工具
+      //   (list_games/query_world/capture_frame,P1-7)走 `HostToolSpec.run`;
+      //   ③其余查 agent kit 注册表。租用内核(外部 CLI 内核)的内置批在 .mjs 本地跑,
+      //   但 ui_snapshot/ui_invoke 例外 —— 它们经 .mjs → 此路由,以复用这里的 per-action
+      //   信任闸(ui_invoke 可触达 delete 级 action,必须过闸)。seam 工具无 .mjs 本地
+      //   实现 → 经 BRIDGED specs 桥到本路由执行。
+      const seamTool = getHostTool(toolName);
+      const builtinCtx = {
+        projectRoot,
+        agentId: agentPath,
+        ...(scopeGame ? { game: scopeGame } : {}),
+        eventBus: session.eventBus,
+        sid,
+      };
       const out = isForgeaxBuiltinTool(toolName)
-        ? await runForgeaxBuiltinTool(toolName, args, {
-            projectRoot,
-            agentId: agentPath,
-            ...(scopeGame ? { game: scopeGame } : {}),
-            eventBus: session.eventBus,
-          })
-        : await executeTool(toolName, args, agent.agentContext.tools.list(), agent.agentContext);
+        ? await runForgeaxBuiltinTool(toolName, args, builtinCtx)
+        : seamTool?.run
+          ? await seamTool.run(args, hostToolRunCtx(builtinCtx))
+          : await executeTool(toolName, args, agent.agentContext.tools.list(), agent.agentContext);
       if (out && typeof out === 'object' && !Array.isArray(out) && 'error' in out) {
         const errMsg = String((out as { error: unknown }).error);
         // 工具执行返回 error 字段 —— ok=false
@@ -670,10 +595,14 @@ export function createSessionsRouter() {
   // → 拿到后 POST /perception-reply 解开本 hold 住的响应。镜像 permission 往返,但
   // 回的是 snapshot;超时 fail-soft(取数失败不挂死 turn,只是少一份证据)。
   const PERCEPTION_TIMEOUT_MS = 8_000;
+  /** ui_invoke 通道默认超时(略宽:要等 action 执行/受理);manifest 声明 timeoutMs 可放宽。 */
+  const UI_INVOKE_TIMEOUT_MS = 10_000;
+  const PERCEPTION_KINDS: ReadonlySet<string> = new Set(['world', 'frame', 'ui_snapshot', 'ui_invoke']);
   r.post('/:sid/perception-query', async (c) => {
     const sid = c.req.param('sid');
     const body = await c.req.json().catch(() => ({}));
-    const kind = body.kind === 'frame' ? 'frame' : 'world';
+    const kind = (PERCEPTION_KINDS.has(body.kind) ? body.kind : 'world') as PerceptionKind;
+    const isUiKind = kind === 'ui_snapshot' || kind === 'ui_invoke';
     const agent = typeof body.agent === 'string' && body.agent ? body.agent : 'forge';
     const reqId = typeof body.reqId === 'string' && body.reqId ? body.reqId : randomUUID();
     const session = getSessionManager().peek(sid);
@@ -690,7 +619,12 @@ export function createSessionsRouter() {
       agent,
     );
 
-    const handle = registerPerception(reqId, PERCEPTION_TIMEOUT_MS);
+    // ui_invoke:超时按 manifest 声明放宽;ui_* 回灌须持有效 lease(声明与执行方同源)。
+    const timeoutMs =
+      kind === 'ui_invoke'
+        ? uiInvokeTimeoutMs(sid, (body.query as { actionId?: unknown } | null)?.actionId, UI_INVOKE_TIMEOUT_MS)
+        : PERCEPTION_TIMEOUT_MS;
+    const handle = registerPerception(reqId, timeoutMs, isUiKind ? { requireLease: { sid } } : {});
     let snapshot: unknown;
     try {
       snapshot = await handle.promise;
@@ -700,13 +634,65 @@ export function createSessionsRouter() {
     return c.json({ ok: true, reqId, snapshot });
   });
 
-  // 前端把 preview iframe 回的 VAG_WORLD_STATE/VAG_FRAME 经此回灌,解开 /perception-query。
+  // 前端把 preview iframe 回的 VAG_WORLD_STATE/VAG_FRAME(或 ActionRegistry 的 ui_* 应答)
+  // 经此回灌,解开 /perception-query。ui_* 类 pending 要求 body.leaseId 有效(lease 校验
+  // 不通过时不消费 pending,真正持有者仍可回灌)。
   r.post('/:sid/perception-reply', async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const reqId = typeof body.reqId === 'string' ? body.reqId : '';
     if (!reqId) return c.json({ error: 'reqId (string) required' }, 400);
-    const ok = resolvePerception(reqId, body.snapshot ?? null);
-    return c.json({ ok, ...(ok ? {} : { reason: 'no-pending' }) });
+    const ok = resolvePerception(reqId, body.snapshot ?? null, body.leaseId);
+    return c.json({ ok, ...(ok ? {} : { reason: 'no-pending-or-bad-lease' }) });
+  });
+
+  // ── UI 语义操作层(产品 AI 化 P0)—————————————————————————————————————
+  // lease:多标签同 sid 时「最后获焦 tab」持有;manifest 权威来源与 ui_* 应答方都
+  // 绑定到持有者(displace 语义,心跳续期)。会话鉴权与 perception-reply 同级
+  // (session 绑定);manifest 是 trust-gate 的权限输入,故写入必须持有效 lease,
+  // 且这两个端点**不进** MCP 桥出面(.mjs 不暴露)。
+  //
+  // Origin 收口(架构师嘱咐,B6):这两个写端点是权限闸的信任锚——浏览器跨站发起
+  // 的写一律拒(防「恶意页面骗本机 server 改写权限声明」)。规则:无 Origin 头
+  // (curl / 同进程 / 非浏览器)放行;有 Origin 时 hostname 须为 loopback、与本次
+  // 请求 Host 同名,或落在 FORGEAX_UI_BRIDGE_ORIGINS(逗号分隔,给桌面 tauri://
+  // 等形态)白名单内。fail-closed 403。
+  const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+  const EXTRA_UI_ORIGINS = new Set(
+    (process.env.FORGEAX_UI_BRIDGE_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+  );
+  const uiWriteOriginAllowed = (c: { req: { header: (n: string) => string | undefined } }): boolean => {
+    const origin = c.req.header('origin');
+    if (!origin) return true; // 非浏览器调用(无 Origin)——与 perception-reply 同级信任面
+    if (EXTRA_UI_ORIGINS.has(origin)) return true;
+    try {
+      const o = new URL(origin);
+      if (LOOPBACK_HOSTS.has(o.hostname)) return true;
+      const host = c.req.header('host') ?? '';
+      const hostName = host.includes(':') && !host.startsWith('[') ? host.slice(0, host.indexOf(':')) : host;
+      return !!hostName && o.hostname === hostName;
+    } catch {
+      return false; // Origin 不可解析 → fail-closed
+    }
+  };
+
+  r.post('/:sid/ui-lease', async (c) => {
+    const sid = c.req.param('sid');
+    if (!uiWriteOriginAllowed(c)) return c.json({ ok: false, reason: 'origin-not-allowed' }, 403);
+    const body = await c.req.json().catch(() => ({}));
+    const clientId = typeof body.clientId === 'string' && body.clientId ? body.clientId : '';
+    if (!clientId) return c.json({ ok: false, reason: 'clientId (string) required' }, 400);
+    if (!getSessionManager().peek(sid)) return c.json({ ok: false, reason: 'no-session' }, 200);
+    const lease = acquireUiLease(sid, clientId);
+    return c.json({ ok: true, ...lease });
+  });
+
+  r.post('/:sid/ui-manifest', async (c) => {
+    const sid = c.req.param('sid');
+    if (!uiWriteOriginAllowed(c)) return c.json({ ok: false, reason: 'origin-not-allowed' }, 403);
+    const body = await c.req.json().catch(() => ({}));
+    if (!getSessionManager().peek(sid)) return c.json({ ok: false, reason: 'no-session' }, 200);
+    const res = setUiManifest(sid, body.actions, body.leaseId);
+    return c.json(res, res.ok ? 200 : 403);
   });
 
   // L1 错误回灌:游戏运行期 console error / preview error → per-sid 环形缓冲,

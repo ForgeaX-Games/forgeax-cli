@@ -19,9 +19,14 @@
 
 // ─── 取数往返:挂起 Promise 表 ──────────────────────────────────────────────
 
+import { validateUiLease } from './ui-manifest-registry';
+
 interface PendingPerception {
   resolve: (snapshot: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** ui_* 类查询(UI 语义操作层):回灌方必须持有该 sid 的有效 lease(声明与执行方
+   *  同源约束,见 ui-manifest-registry 文件头)。world/frame 传统查询不设此要求。 */
+  requireLease?: { sid: string };
 }
 
 const pending = new Map<string, PendingPerception>();
@@ -36,8 +41,13 @@ export interface PerceptionHandle {
 }
 
 /** Register a pending perception query. Resolves when the UI replies via
- *  `resolvePerception(reqId, …)`, or to a `{ unavailable }` sentinel on timeout. */
-export function registerPerception(reqId: string, timeoutMs: number): PerceptionHandle {
+ *  `resolvePerception(reqId, …)`, or to a `{ unavailable }` sentinel on timeout.
+ *  `opts.requireLease` 使回灌被 lease 把关(ui_* 查询用;world/frame 不传,零回归)。 */
+export function registerPerception(
+  reqId: string,
+  timeoutMs: number,
+  opts: { requireLease?: { sid: string } } = {},
+): PerceptionHandle {
   const prev = pending.get(reqId);
   if (prev) {
     clearTimeout(prev.timer);
@@ -53,7 +63,7 @@ export function registerPerception(reqId: string, timeoutMs: number): Perception
     settle({ unavailable: true, reason: 'timeout' }); // fail-soft
   }, timeoutMs);
 
-  pending.set(reqId, { resolve: settle, timer });
+  pending.set(reqId, { resolve: settle, timer, ...(opts.requireLease ? { requireLease: opts.requireLease } : {}) });
 
   return {
     promise,
@@ -68,10 +78,13 @@ export function registerPerception(reqId: string, timeoutMs: number): Perception
 }
 
 /** Resolve a pending perception query with the snapshot the UI returned.
- *  Returns true when a matching entry was found, false otherwise. */
-export function resolvePerception(reqId: string, snapshot: unknown): boolean {
+ *  Returns true when a matching entry was found (and, for lease-gated entries,
+ *  the reply carried the current valid leaseId), false otherwise.
+ *  lease 校验不通过时**不消费** pending——真正的持有者仍可回灌。 */
+export function resolvePerception(reqId: string, snapshot: unknown, leaseId?: unknown): boolean {
   const entry = pending.get(reqId);
   if (!entry) return false;
+  if (entry.requireLease && !validateUiLease(entry.requireLease.sid, leaseId)) return false;
   clearTimeout(entry.timer);
   pending.delete(reqId);
   entry.resolve(snapshot);

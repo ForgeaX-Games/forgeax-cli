@@ -49,6 +49,7 @@ import {
   initOrchestrationSeams,
   type SystemPromptComposer,
   type HostToolSpec,
+  type HostUiActionHandler,
   type AssetPathPolicy,
 } from './orchestration-seams';
 import { ensureUserDirDefaults } from './defaults/scaffold';
@@ -106,6 +107,9 @@ export interface ProductContext {
   /** Host-only tool specs (list_games / query_world / capture_frame …) exposed
    *  to agents and gated by the host-tool bridge. (Stage A §3, §2.4) */
   hostTools?: HostToolSpec[];
+  /** UI 语义操作层的 headless 等价 handler(surface:'both'|'server' 的 action,UI
+   *  不在线时 ui_invoke 回落到这里执行;server 是行为 SSOT,方案 §5)。 */
+  hostUiActions?: HostUiActionHandler[];
   /** Asset path policy replacing the `.forgeax/games` whitelist. Default CLOSED;
    *  the shell opens roots explicitly. Conditionally required + fail-fast when
    *  asset routers are injected (§3.4). */
@@ -145,6 +149,7 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
   initOrchestrationSeams({
     systemPromptComposer: ctx.systemPromptComposer,
     hostTools: ctx.hostTools,
+    hostUiActions: ctx.hostUiActions,
     assetPathPolicy: ctx.assetPathPolicy,
   });
   await ensureUserDirDefaults(pm);

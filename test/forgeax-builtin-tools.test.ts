@@ -19,11 +19,12 @@ afterAll(() => {
 });
 
 describe('isForgeaxBuiltinTool', () => {
-  test('认得 5 个内置工具 + echo,不认 kit / 未知工具', () => {
-    for (const n of ['remember', 'memory_search', 'list_games', 'query_world', 'capture_frame', 'echo']) {
+  test('认得内置工具(memory/echo/ui_*),不认 kit / seam / 未知工具', () => {
+    for (const n of ['remember', 'memory_search', 'echo', 'ui_snapshot', 'ui_invoke']) {
       expect(isForgeaxBuiltinTool(n)).toBe(true);
     }
-    for (const n of ['read_file', 'bash', 'delegate_to_subagent', 'totally_unknown']) {
+    // 游戏语义工具已迁产品壳经 HostToolSpec seam 注入(P1-7),不再是编排层内置。
+    for (const n of ['list_games', 'query_world', 'capture_frame', 'read_file', 'bash', 'delegate_to_subagent', 'totally_unknown']) {
       expect(isForgeaxBuiltinTool(n)).toBe(false);
     }
   });
@@ -91,28 +92,17 @@ describe('memory_search', () => {
   });
 });
 
-describe('list_games', () => {
-  test('列出 .forgeax/games 下的游戏,过滤 _template / 隐藏', async () => {
-    const projectRoot = join(TMP, 'p-games');
-    mkdirSync(join(projectRoot, '.forgeax/games/spin-cube'), { recursive: true });
-    mkdirSync(join(projectRoot, '.forgeax/games/runner'), { recursive: true });
-    mkdirSync(join(projectRoot, '.forgeax/games/_template'), { recursive: true });
-    mkdirSync(join(projectRoot, '.forgeax/games/.hidden'), { recursive: true });
-    const out = (await runForgeaxBuiltinTool('list_games', {}, { projectRoot, agentId: 'forge' })) as {
-      count: number;
-      games: string[];
+describe('ui_* 优雅降级(UI 语义操作层)', () => {
+  test('无 eventBus / 无 sid → ui_snapshot/ui_invoke 返回 unavailable(不抛)', async () => {
+    const noBus = { projectRoot: join(TMP, 'p-perc'), agentId: 'forge' };
+    const snap = (await runForgeaxBuiltinTool('ui_snapshot', {}, noBus)) as { unavailable: boolean };
+    expect(snap.unavailable).toBe(true);
+    const noSid = { ...noBus, eventBus: { publish: () => {} } };
+    const invoke = (await runForgeaxBuiltinTool('ui_invoke', { actionId: 'x' }, noSid)) as {
+      unavailable: boolean;
+      reason?: string;
     };
-    expect(out.games.sort()).toEqual(['runner', 'spin-cube']);
-    expect(out.count).toBe(2);
-  });
-});
-
-describe('感知接地工具优雅降级', () => {
-  test('无 eventBus → query_world/capture_frame 返回 unavailable(不抛)', async () => {
-    const ctx = { projectRoot: join(TMP, 'p-perc'), agentId: 'forge' };
-    const world = (await runForgeaxBuiltinTool('query_world', { query: 'snapshot' }, ctx)) as { unavailable: boolean };
-    const frame = (await runForgeaxBuiltinTool('capture_frame', {}, ctx)) as { unavailable: boolean };
-    expect(world.unavailable).toBe(true);
-    expect(frame.unavailable).toBe(true);
+    expect(invoke.unavailable).toBe(true);
+    expect(String(invoke.reason)).toContain('session');
   });
 });

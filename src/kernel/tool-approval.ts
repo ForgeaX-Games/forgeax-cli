@@ -13,6 +13,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { registerPermission } from '../core/permission-registry';
+import { getUiAction } from '../api/lib/ui-manifest-registry';
 import type { EventBus } from '../core/event-bus';
 import type { Capability } from './trust-gate';
 
@@ -84,7 +85,7 @@ export async function requestToolApproval(req: ApprovalRequest): Promise<boolean
       payload: {
         reqId,
         toolName: req.toolName,
-        command: extractCommand(req.args),
+        command: extractCommand(req.toolName, req.args, req.sid),
         input: req.args ?? null,
         agent: req.agent,
         capability: cap,
@@ -111,8 +112,20 @@ export async function requestToolApproval(req: ApprovalRequest): Promise<boolean
   return allow;
 }
 
-/** 从工具入参里取一个适合卡片展示的 command 串(Bash 等)。拿不到 → 空串。 */
-function extractCommand(args: unknown): string {
+/** 从工具入参里取一个适合卡片展示的 command 串(Bash 等)。拿不到 → 空串。
+ *  ui_invoke 特判(评审 2.7 审批 UX):渲染 manifest 里的人读 title + args 摘要,
+ *  而不是裸 actionId/JSON——复用现有卡片的 command 展示位,前端零改动。 */
+function extractCommand(toolName: string, args: unknown, sid?: string): string {
+  if (toolName === 'ui_invoke' && args && typeof args === 'object') {
+    const o = args as { actionId?: unknown; args?: unknown };
+    const actionId = typeof o.actionId === 'string' ? o.actionId : '';
+    const decl = getUiAction(sid, actionId);
+    const title = decl?.title || actionId || '(unknown)';
+    const argStr = o.args && typeof o.args === 'object' && Object.keys(o.args as object).length > 0
+      ? ` ${JSON.stringify(o.args)}`.slice(0, 200)
+      : '';
+    return `执行 UI 功能:「${title}」(${actionId})${argStr}`;
+  }
   if (!args || typeof args !== 'object') return '';
   const o = args as Record<string, unknown>;
   for (const k of ['command', 'cmd', 'script']) {

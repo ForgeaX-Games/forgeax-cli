@@ -17,7 +17,9 @@ import { loadAgentRecord } from '../soul';
 import { checkKernelTool } from './trust-gate';
 import { requestToolApproval } from './tool-approval';
 import { executeTool } from '../kits/tool/tool-executor';
-import { isForgeaxBuiltinTool, runForgeaxBuiltinTool } from './forgeax-builtin-tools';
+import { isForgeaxBuiltinTool, runForgeaxBuiltinTool, hostToolRunCtx } from './forgeax-builtin-tools';
+import { resolveFirstClassUiTool } from '../api/lib/ui-manifest-registry';
+import { getHostTool } from '../orchestration-seams';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getPathManager } from '../fs/path-manager';
 import { tt } from '../lib/turn-trace';
@@ -52,6 +54,13 @@ export function makeInProcessExecuteTool(
   const _executeTool = deps.executeTool ?? executeTool;
   return async (name: string, args: unknown, sid?: string, agentId?: string): Promise<unknown> => {
     if (!sid) throw new Error('forgeax-core kernel: missing hostSessionId for host-tool bridge');
+    // P1-9 一等工具化:ui_act_* 在信任闸**之前**反解回 ui_invoke(actionId),使权限
+    // (per-action 闸)/审计/执行全程只认识 ui_invoke 一条路(闭合 union,不加新分支)。
+    const fc = resolveFirstClassUiTool(sid, name);
+    if (fc) {
+      args = { actionId: fc.actionId, args: (args ?? {}) as Record<string, unknown> };
+      name = 'ui_invoke';
+    }
     // 审计同 `POST /:sid/kernel-tool`:单 start 计 durationMs,每个决策出口恰追加一行(append-only)。
     const start = Date.now();
     // 用本轮真实 agent(委派轮 = mochi 等)而非写死 defaultAgentPath:trustTier 求值、
@@ -79,7 +88,8 @@ export function makeInProcessExecuteTool(
     // active 切 B 时不会误判 A 自己的写。session 未绑则回落 active game。
     const projectRoot = defaultProjectRoot();
     const scopeGame = session.config?.defaultDir ?? getPathManager().resolveScope();
-    const decision = _checkKernelTool(trustTier, name, { args, projectRoot, activeGame: scopeGame });
+    // sid 供 ui_invoke 的 per-action capability 查表(manifest 缓存按 sid 存,见 trust-gate)。
+    const decision = _checkKernelTool(trustTier, name, { args, projectRoot, activeGame: scopeGame, sid });
     tt('htb.decision', { name, agent: agentPath, sid, trustTier, outcome: decision.outcome, cap: decision.capability });
     if (decision.outcome === 'deny') {
       // 信任闸硬拒 —— 审计记录 allow=false。
@@ -108,22 +118,28 @@ export function makeInProcessExecuteTool(
 
     tt('htb.exec-start', { name, agent: agentPath });
     try {
-      // 内置 forgeax 工具(remember/memory_search/list_games/query_world/capture_frame/echo)
-      //   走宿主侧实现;其余查 agent 的 kit 注册表。两者 schema 都由 compose-turn-request 出墙,
-      //   但内置工具不在 kit 注册表里 → 不补这一支 executeTool 会返回 "Unknown tool"。
+      // 执行解析顺序:①内置 forgeax 工具(remember/memory_search/ui_*/echo)走宿主侧
+      //   实现;②产品壳 seam 注入且带 run 的 host 工具(list_games/query_world/
+      //   capture_frame,P1-7)走 `HostToolSpec.run`;③其余查 agent 的 kit 注册表。
+      //   schema 都由 compose-turn-request 出墙。
+      const seamTool = getHostTool(name);
+      const builtinCtx = {
+        projectRoot,
+        agentId: agentPath,
+        ...(scopeGame ? { game: scopeGame } : {}),
+        eventBus: session.eventBus,
+        sid,
+      };
       const out = isForgeaxBuiltinTool(name)
-        ? await runForgeaxBuiltinTool(name, (args ?? {}) as Record<string, unknown>, {
-            projectRoot,
-            agentId: agentPath,
-            ...(scopeGame ? { game: scopeGame } : {}),
-            eventBus: session.eventBus,
-          })
-        : await _executeTool(
-            name,
-            (args ?? {}) as Record<string, unknown>,
-            agent.agentContext.tools.list(),
-            agent.agentContext,
-          );
+        ? await runForgeaxBuiltinTool(name, (args ?? {}) as Record<string, unknown>, builtinCtx)
+        : seamTool?.run
+          ? await seamTool.run((args ?? {}) as Record<string, unknown>, hostToolRunCtx(builtinCtx))
+          : await _executeTool(
+              name,
+              (args ?? {}) as Record<string, unknown>,
+              agent.agentContext.tools.list(),
+              agent.agentContext,
+            );
       // 工具返回 `{error}` 形状 = 失败(与 `:sid/kernel-tool` 同口径:Unknown tool / 校验失败 /
       //   工具内 throw 都落此形状)。翻成 throw → 下方 catch 记**唯一**一行 ok:false 审计 +
       //   rethrow → RPC reject → 内核标 isError(而非 ok:true 夹 error,§5 fail-fast)。

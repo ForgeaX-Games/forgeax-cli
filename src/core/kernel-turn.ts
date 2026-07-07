@@ -163,8 +163,27 @@ export async function runKernelTurn(opts: KernelTurnOpts): Promise<{ aborted: bo
           reason = (ev as { reason?: string }).reason; // kernel.turn 结束原因(stop/max_turns/cancelled…)
           break;
         case 'stored-event':
-        // x.* 扩展事件:UI 路径不消费,忽略。
+          break;
         default:
+          // x.* 扩展事件(x.subagent.* / x.perception / x.ui.* …):publish 进 session
+          // EventBus → ws.ts 原样广播给前端(照 perception:query 的做法;不动 wire
+          // ChatEvent 类型,绕开稳定接口区)。UI 侧按需消费(轨迹图/ghost 高亮),
+          // 无人订阅时零成本。非 x.* 的未知 kind 维持忽略。
+          if (typeof (ev as { kind?: unknown }).kind === 'string' && (ev as { kind: string }).kind.startsWith('x.')) {
+            try {
+              eventBus.publish(
+                {
+                  type: (ev as { kind: string }).kind,
+                  ts: Date.now(),
+                  source: `agent:${agentId}`,
+                  payload: ev as unknown as Record<string, unknown>,
+                },
+                agentId,
+              );
+            } catch {
+              /* 观测通道绝不影响主流程 */
+            }
+          }
           break;
       }
     }

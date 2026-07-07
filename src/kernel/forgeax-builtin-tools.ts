@@ -19,33 +19,38 @@
  * 故本模块只对 forgeax-core 路径生效,不改其它内核行为。改检索/写盘口径时,
  * `layered-memory.ts`(TS SSOT,本模块用)与 `forgeax-tools-server.mjs`(.mjs 镜像)两处需同步。
  */
-import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Event } from '../core/types';
 import type { LayeredMemoryRef } from '../soul/types';
 import { soulMemoryRoot, searchMemory, classifyAndWrite } from '../soul';
 import { registerPerception } from '../api/lib/perception-registry';
+import { uiInvokeTimeoutMs, getUiAction } from '../api/lib/ui-manifest-registry';
+import { getHostUiAction, type HostToolRunCtx } from '../orchestration-seams';
+import { getBuiltinHeadlessUiAction } from './ui-headless-actions';
 
 /** 仅需 publish 的最小事件发布口(`EventBus` 类 / 绑定 bus / 测试桩皆满足)。 */
 export interface EventPublisher {
   publish(event: Event, emitterId?: string): void;
 }
 
-/** 内置 forgeax 工具名集合(与 compose-turn-request 的 FORGEAX_TOOLS + .mjs TOOLS 对齐)。 */
+/** 内置 forgeax 工具名集合(与 compose-turn-request 的 FORGEAX_TOOLS + .mjs TOOLS 对齐)。
+ *  游戏语义工具(list_games/query_world/capture_frame)已迁产品壳经 HostToolSpec seam
+ *  注入(P1-7),不再是编排层内置——执行口对 seam 工具走 `HostToolSpec.run`。 */
 const BUILTIN_NAMES: ReadonlySet<string> = new Set([
   'echo',
-  'list_games',
   'memory_search',
   'remember',
-  'query_world',
-  'capture_frame',
+  'ui_snapshot',
+  'ui_invoke',
 ]);
 
 /** 该工具是否为内置 forgeax 工具(宿主侧有实现,不查 agent kit 注册表)。 */
 export function isForgeaxBuiltinTool(name: string): boolean {
   return BUILTIN_NAMES.has(name);
 }
+
+/** 感知/UI 往返的 query kind(闭合 union:server 端点与本模块共守)。 */
+export type PerceptionKind = 'world' | 'frame' | 'ui_snapshot' | 'ui_invoke';
 
 /** 内置工具执行上下文(显式声明的输入,Pipeline Isolation)。 */
 export interface BuiltinToolCtx {
@@ -56,31 +61,31 @@ export interface BuiltinToolCtx {
   /** 本会话绑定 / 当前激活的游戏 slug。`remember kind:'game'` 与 episodes 召回按此隔离;
    *  缺省 = 通用上下文(game-bound 记忆将拒写)。 */
   game?: string;
-  /** 感知接地工具(query_world/capture_frame)的会话总线;缺省则降级为 unavailable。 */
+  /** 感知接地工具(query_world/capture_frame/ui_*)的会话总线;缺省则降级为 unavailable。 */
   eventBus?: EventPublisher;
+  /** 会话 id —— ui_* 往返的 lease 把关与 manifest 超时查表键;缺省时 ui_* 降级 unavailable。 */
+  sid?: string;
 }
 
 const PERCEPTION_TIMEOUT_MS = 8_000;
+/** ui_invoke 通道默认超时(略宽于取数:invoke 要等 action 执行/受理)。 */
+const UI_INVOKE_TIMEOUT_MS = 10_000;
 
 function memoryRef(ctx: BuiltinToolCtx): LayeredMemoryRef {
   return { root: soulMemoryRoot(ctx.projectRoot, ctx.agentId), ...(ctx.game ? { game: ctx.game } : {}) };
 }
 
-/** 列出工作区里的游戏(`.forgeax/games/` + 兼容旧 `games/`),过滤 _template / 隐藏。 */
-function listGames(projectRoot: string): { count: number; games: string[] } {
-  const out: string[] = [];
-  for (const base of [join(projectRoot, '.forgeax/games'), join(projectRoot, 'games')]) {
-    if (!existsSync(base)) continue;
-    try {
-      for (const e of readdirSync(base, { withFileTypes: true })) {
-        if (e.isDirectory() && !e.name.startsWith('_') && !e.name.startsWith('.')) out.push(e.name);
-      }
-    } catch {
-      /* unreadable dir → skip */
-    }
-  }
-  const games = [...new Set(out)];
-  return { count: games.length, games };
+/** 把内置工具执行上下文适配成 seam 工具的 `HostToolRunCtx`(两个执行口对
+ *  `HostToolSpec.run` 调用时用)。`perception` 绑定本会话总线 —— shell 注入的感知类
+ *  工具(query_world/capture_frame)经它走编排层通用往返;UI 未连 fail-soft。 */
+export function hostToolRunCtx(ctx: BuiltinToolCtx): HostToolRunCtx {
+  return {
+    ...(ctx.sid ? { sid: ctx.sid } : {}),
+    agentId: ctx.agentId,
+    projectRoot: ctx.projectRoot,
+    ...(ctx.game ? { game: ctx.game } : {}),
+    perception: (kind, query) => perceptionQuery(ctx, kind, query),
+  };
 }
 
 /** 写一条记忆(模型驱动成长):general→traits(可移植);game→episodes/<当前game>;
@@ -98,10 +103,19 @@ function remember(ctx: BuiltinToolCtx, args: Record<string, unknown> | undefined
 }
 
 /** 感知接地取数往返:发 perception:query 给前端(经 EventBus)→ 注册阻塞 Promise →
- *  前端取 preview iframe 真值后 POST /perception-reply 解开;超时 fail-soft 返回 unavailable。
- *  镜像 `:sid/perception-query` 路由,在 forgeax-core in-process 路径里复用同一 registry。 */
-async function perceptionQuery(ctx: BuiltinToolCtx, kind: 'world' | 'frame', query?: unknown): Promise<unknown> {
+ *  前端取真值(game iframe 或 ActionRegistry)后 POST /perception-reply 解开;超时
+ *  fail-soft 返回 unavailable。镜像 `:sid/perception-query` 路由,在 forgeax-core
+ *  in-process 路径里复用同一 registry。ui_* 类查询的回灌被 lease 把关(声明与执行方
+ *  同源,见 ui-manifest-registry)。 */
+async function perceptionQuery(
+  ctx: BuiltinToolCtx,
+  kind: PerceptionKind,
+  query?: unknown,
+  timeoutMs: number = PERCEPTION_TIMEOUT_MS,
+): Promise<unknown> {
   if (!ctx.eventBus) return { unavailable: true, reason: 'no event bus' };
+  const isUiKind = kind === 'ui_snapshot' || kind === 'ui_invoke';
+  if (isUiKind && !ctx.sid) return { unavailable: true, reason: 'no session id for ui bridge' };
   const reqId = randomUUID();
   ctx.eventBus.publish(
     {
@@ -112,7 +126,7 @@ async function perceptionQuery(ctx: BuiltinToolCtx, kind: 'world' | 'frame', que
     },
     ctx.agentId,
   );
-  const handle = registerPerception(reqId, PERCEPTION_TIMEOUT_MS);
+  const handle = registerPerception(reqId, timeoutMs, isUiKind && ctx.sid ? { requireLease: { sid: ctx.sid } } : {});
   try {
     return await handle.promise;
   } finally {
@@ -130,25 +144,39 @@ export async function runForgeaxBuiltinTool(
   switch (name) {
     case 'echo':
       return { text: `[forgeax_echo] ${String(args?.text ?? '')}` };
-    case 'list_games':
-      return listGames(ctx.projectRoot);
     case 'memory_search':
       return searchMemory(memoryRef(ctx), String(args?.query ?? ''));
     case 'remember':
       return remember(ctx, args);
-    case 'query_world':
-      return perceptionQuery(ctx, 'world', args?.query);
-    case 'capture_frame': {
-      const snap = await perceptionQuery(ctx, 'frame');
-      const dataUrl =
-        snap && typeof snap === 'object' && typeof (snap as { dataUrl?: unknown }).dataUrl === 'string'
-          ? (snap as { dataUrl: string }).dataUrl
-          : '';
-      if (!dataUrl) {
-        const reason = snap && typeof snap === 'object' ? (snap as { reason?: unknown }).reason : undefined;
-        return { unavailable: true, reason: reason ?? 'no frame' };
+    // UI 语义操作层(产品 AI 化 P0):与 seam 感知工具同构的往返,应答方是 interface
+    // 的 ActionRegistry。契约(schema/description)SSOT = ui-bridge-contract.json。
+    case 'ui_snapshot':
+      return perceptionQuery(ctx, 'ui_snapshot', args ?? {});
+    case 'ui_invoke': {
+      // 超时按 manifest 里 action 声明的 timeoutMs 放宽(clamp [1s,30s]);慢 action 的
+      // 正道是 UI 侧快速回 accepted(受理即答),不是拉长超时硬等——见契约 description。
+      const actionId = typeof args?.actionId === 'string' ? args.actionId : '';
+      const timeout = uiInvokeTimeoutMs(ctx.sid, actionId, UI_INVOKE_TIMEOUT_MS);
+      const out = await perceptionQuery(ctx, 'ui_invoke', { actionId: actionId || null, args: args?.args ?? {} }, timeout);
+      // P1-8 headless 回落(方案 §5):UI 不在线(unavailable)且该 action 声明了
+      // surface 'server'|'both' → 走宿主侧等价 handler(seam 注入优先,cli 内置次之;
+      // handler 必须调与 UI run() 相同的内部实现,server 是行为 SSOT)。声明 'ui' 或
+      // 无 handler → 保持 unavailable 原样返回(模型据契约 description 自行跳过)。
+      if (out && typeof out === 'object' && (out as { unavailable?: unknown }).unavailable === true && actionId) {
+        const decl = getUiAction(ctx.sid, actionId);
+        if (decl && (decl.surface === 'server' || decl.surface === 'both')) {
+          const handler = getHostUiAction(actionId) ?? getBuiltinHeadlessUiAction(actionId);
+          if (handler) {
+            try {
+              const res = await handler.run((args?.args ?? {}) as Record<string, unknown>, hostToolRunCtx(ctx));
+              return res && typeof res === 'object' ? { ...res, executedVia: 'headless' } : res;
+            } catch (e) {
+              return { status: 'rejected', reason: `headless handler threw: ${(e as Error).message}` };
+            }
+          }
+        }
       }
-      return { bytes: dataUrl.length, dataUrl: `${dataUrl.slice(0, 64)}…` };
+      return out;
     }
     default:
       // 防御:isForgeaxBuiltinTool 已挡;落到这里说明集合与 switch 失同步。

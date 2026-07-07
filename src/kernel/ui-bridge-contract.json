@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "comment": "ui-bridge tool contract (SSOT). Consumed by compose-turn-request.ts (TS, native kernel path) AND kernel/mcp/forgeax-tools-server.mjs (rented kernel path) — keep this file the single source so every kernel sees byte-identical tool specs. Wording must stay product-neutral: these tools speak only of the abstract 'connected UI surface' and its 'action manifest', never of any concrete product domain.",
+  "tools": [
+    {
+      "name": "ui_snapshot",
+      "description": "Inspect the connected UI surface. Returns the surface's action manifest — the operations it currently exposes — plus a state summary derived from its registered state slices: { actions: [{ id, title, available, reason? }], state: { ... } }. Default detail is the lightweight listing; call again with detail:'schema' and ids:[...] to fetch the input schema and full description of specific actions before invoking them, or detail:'a11y' to additionally get an accessibility summary of interactive elements NOT covered by the action manifest (read-only orientation aid — those elements cannot be invoked via ui_invoke). Returns { unavailable, reason } when no UI surface is connected — treat that as 'cannot observe right now', not as an error to retry in a loop.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "enum": ["list", "schema", "a11y"],
+            "description": "'list' (default) returns ids/titles/availability + state summary; 'schema' additionally returns inputSchema and full description for the actions named in ids; 'a11y' additionally returns an accessibility summary of unregistered interactive elements"
+          },
+          "ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "action ids to expand when detail is 'schema'"
+          }
+        }
+      }
+    },
+    {
+      "name": "ui_invoke",
+      "description": "Invoke one action from the connected UI surface's action manifest. Discover actions and their schemas via ui_snapshot first. Arguments are validated by the surface against the action's declared schema. Returns { status, reason?, stateDigest? } where status is 'completed' (done — stateDigest carries the observable state change), 'accepted' (the surface started a longer-running operation: do NOT wait for it and do NOT retry this invoke; continue with other work and call ui_snapshot later if you need to confirm the outcome), or 'rejected' (not executed — read reason before deciding what to do). Returns { unavailable, reason } when no UI surface is connected.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "actionId": {
+            "type": "string",
+            "description": "action id from the manifest (see ui_snapshot)"
+          },
+          "args": {
+            "type": "object",
+            "description": "arguments matching the action's declared input schema (omit for actions that take none)"
+          }
+        },
+        "required": ["actionId"]
+      }
+    }
+  ]
+}

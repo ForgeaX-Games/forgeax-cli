@@ -18,7 +18,7 @@ import { getSessionManager } from '../core/session-registry';
 import { getPathManager } from '../fs/path-manager';
 import { ContextWindow } from '../context-window/context-window';
 import { llmMessagesToTurnHistory } from './llm-history';
-import { getSystemPromptComposer } from '../orchestration-seams';
+import { getSystemPromptComposer, getHostTools } from '../orchestration-seams';
 import {
   loadAgentRecord,
   composeStableMemory,
@@ -27,7 +27,9 @@ import {
   emitLifeEvent,
 } from '../soul';
 import { drainPerceptionNotes } from '../api/lib/perception-registry';
+import { firstClassUiToolSpecs } from '../api/lib/ui-manifest-registry';
 import type { SkillRefLite } from '../soul/types';
+import uiBridgeContract from './ui-bridge-contract.json';
 
 /** P3(B 路径):core 有 builtin 实现的「安全类」工具集。own trustTier 下这些标
  *  `delivery:'local'`(forgeax-core 内核本进程直跑)。name 与 core builtin 对齐,且
@@ -36,14 +38,10 @@ import type { SkillRefLite } from '../soul/types';
 const LOCAL_CAPABLE_TOOLS = new Set<string>(['read_file', 'write_file', 'edit_file', 'grep', 'glob']);
 
 /** 编排层声明的基础工具(中立 ToolSpec)。内核据此挂 MCP server + `--allowedTools` 放行。
- *  `list_games` = 真实只读 forgeax 能力;`memory_search` = 数字生命(R6)按需召回通道
- *  (含前世 episodes),真实后端 = soul 分层记忆库。后续从 agent 能力集动态填充。 */
+ *  `memory_search`/`remember` = 数字生命(R6)通道,真实后端 = soul 分层记忆库。
+ *  游戏语义工具(list_games/query_world/capture_frame)**不再硬编码于此**——由产品壳
+ *  经 HostToolSpec seam 注入(阶段A §3 设计意图,P1-7 落地),cli 层保持业务无关。 */
 const FORGEAX_TOOLS = [
-  {
-    name: 'list_games',
-    description: 'List the game projects in this forgeax workspace. Returns { count, games }.',
-    inputSchema: { type: 'object', properties: {} },
-  },
   {
     name: 'memory_search',
     description:
@@ -60,19 +58,10 @@ const FORGEAX_TOOLS = [
       required: ['text'],
     },
   },
-  {
-    // 感知接地(R5/M8):向运行中的游戏取真值。仅取数,裁判是你 + 结构/不变量,引擎不当裁判。
-    name: 'query_world',
-    description:
-      "Query the RUNNING game's live world for ground truth: a structural ECS snapshot { entityCount, archetypes:[{componentNames, entityCount}], activeComponents, systems, resourceKeys }. Use it to VERIFY what the game actually contains/does (after writing code) instead of guessing. Data only — you are the judge.",
-    inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
-  },
-  {
-    name: 'capture_frame',
-    description:
-      'Capture the running game preview\'s current rendered frame as a PNG data URL (best-effort; may be blank on some GPUs — judge by structure/invariants, not pixels). Returns { dataUrl, bytes }.',
-    inputSchema: { type: 'object', properties: {} },
-  },
+  // UI 语义操作层(产品 AI 化 P0):ui_snapshot / ui_invoke。契约 SSOT =
+  // ui-bridge-contract.json(与 .mjs MCP server 共读同一文件 → 各内核看到字节一致的
+  // 工具说明)。宿主侧实现在 forgeax-builtin-tools.ts,权限见 trust-gate 的 per-action 特判。
+  ...uiBridgeContract.tools,
 ];
 
 export interface ComposeInput {
@@ -143,8 +132,9 @@ export async function composeTurnRequest(input: ComposeInput): Promise<TurnReque
   const fallbackModels = resolvedModels.fallbackModels;
 
   // 合并工具(去重,名字冲突时先到先得)→ 经 MCP 桥下发内核。
-  // 优先级:FORGEAX_TOOLS(内置真值)> extraTools(agent host-tools/kits)
-  //   > record.tools(soul-pack tools/*.json)> skill-derived(soul-pack skills/)。
+  // 优先级:FORGEAX_TOOLS(内置真值)> seam hostTools(产品壳注入,如 list_games/
+  //   query_world/capture_frame)> first-class UI action(manifest 派生)> extraTools
+  //   (agent host-tools/kits)> record.tools(soul-pack tools/*.json)> skill-derived。
   //   内置/host 工具在冲突时获胜,soul-pack 不能覆盖宿主真值工具。
   const seen = new Set(FORGEAX_TOOLS.map((t) => t.name));
   const tools: TurnRequest['tools'] = [...FORGEAX_TOOLS];
@@ -157,6 +147,12 @@ export async function composeTurnRequest(input: ComposeInput): Promise<TurnReque
       }
     }
   };
+  // seam hostTools:只出墙可序列化三元组(run 是宿主侧执行体,永不过 wire)。
+  pushDeduped(getHostTools().map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
+  // P1-9 一等工具化:manifest 里标 firstClass 的 UI action 派生独立 ToolSpec
+  //   (ui_act_*)。模型原生看到 schema、免一次 snapshot 发现往返;执行/权限在两个
+  //   host 工具执行口被反解回 ui_invoke(actionId)走同一 per-action 闸与往返。
+  pushDeduped(firstClassUiToolSpecs(input.sessionId));
   pushDeduped(input.extraTools ?? []);
   // R2/C1:把 soul-pack「重生」时带来的 tools(已是 ToolSpec[])注入本轮。
   pushDeduped(record.tools ?? []);

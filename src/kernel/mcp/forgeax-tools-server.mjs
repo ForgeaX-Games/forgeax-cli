@@ -10,6 +10,21 @@
  *  server 执行,是下一步(M3b)。
  *
  *  Plain Node + JSON-RPC-over-stdio(无 SDK 依赖),与 permission-server.mjs 同构。
+ *
+ *  ── P2-14 对外驱动面(standalone / 任意 MCP client 驱动 Studio)──────────
+ *  本进程可脱离内核 profile 独立起,给任何 MCP client(IDE / 另一个 agent CLI)
+ *  当「驱动运行中 Studio」的标准入口:
+ *
+ *    FORGEAX_SERVER_URL=http://localhost:18900 FORGEAX_SID=<sid> \
+ *      node src/kernel/mcp/forgeax-tools-server.mjs
+ *
+ *  (mcp-config 形态即 command+env 同上;工具以 mcp__fxt__* 出现。)
+ *  收口环境变量:
+ *    FORGEAX_FXT_EXPOSE=ui_snapshot,ui_invoke   只暴露白名单内工具(外部驱动面
+ *      建议只开 ui_*;留空 = 全量,内核 profile 路径的历史行为)。
+ *    FORGEAX_DISABLE_PERCEPTION=1 / FORGEAX_DISABLE_UI_BRIDGE=1  整类摘除。
+ *  安全边界:本进程只有「查询/调用」两类工具;ui-lease / ui-manifest 写端点
+ *  (权限闸的信任锚)**刻意不在** MCP 面上,外部 client 无法改写权限声明。
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -263,6 +278,53 @@ const TOOLS = {
 if (process.env.FORGEAX_DISABLE_PERCEPTION === '1') {
   delete TOOLS.query_world;
   delete TOOLS.capture_frame;
+}
+
+// ── UI 语义操作层(产品 AI 化 P0):ui_snapshot / ui_invoke ────────────────
+// 契约 SSOT = ../ui-bridge-contract.json(与 compose-turn-request.ts 共读同一文件,
+// 各内核看到字节一致的工具说明)。
+// 执行**必须经 bridgeCall → 宿主 /:sid/kernel-tool**,而不是像 world/frame 那样
+// 直打 /:sid/perception-query:ui_invoke 能触达 delete 级 action(如删会话),必须过
+// 宿主的 per-action 信任闸(checkKernelTool + 审批卡)。kernel-tool 里
+// runForgeaxBuiltinTool(ui_*) 再做真正的 perception 往返 + headless 回落。这样
+// 租用内核路径与 forgeax-core 原生路径共用同一道闸(对称)。ui-lease / ui-manifest
+// 两个写端点仍刻意不进 MCP 面(信任锚不外放)。
+const UI_CONTRACT = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('../ui-bridge-contract.json', import.meta.url), 'utf-8'));
+  } catch (e) {
+    dbg(`ui-bridge contract load failed: ${e?.message ?? e}`);
+    return { tools: [] };
+  }
+})();
+for (const spec of UI_CONTRACT.tools ?? []) {
+  if (spec?.name === 'ui_snapshot') {
+    // ui_snapshot 只读,但仍走 kernel-tool 以复用同一执行口(read → 信任闸直放)。
+    TOOLS.ui_snapshot = { spec, run: async (args) => (await bridgeCall('ui_snapshot', args ?? {})).text };
+  } else if (spec?.name === 'ui_invoke') {
+    TOOLS.ui_invoke = {
+      spec,
+      run: async (args) =>
+        (await bridgeCall('ui_invoke', { actionId: args?.actionId ?? null, args: args?.args ?? {} })).text,
+    };
+  }
+}
+// FORGEAX_DISABLE_UI_BRIDGE=1 → 整体摘除 ui_* 工具(per-kernel profile 开关,同
+// FORGEAX_DISABLE_PERCEPTION 的先例:等 UI 往返的工具在重上下文内核上会反射式滥调)。
+if (process.env.FORGEAX_DISABLE_UI_BRIDGE === '1') {
+  delete TOOLS.ui_snapshot;
+  delete TOOLS.ui_invoke;
+}
+
+// P2-14 对外驱动面收口:FORGEAX_FXT_EXPOSE=名单(逗号分隔)→ 只保留白名单内工具。
+// 外部 MCP client 驱动 Studio 时建议只开 ui_*(见文件头);留空 = 全量(内核 profile
+// 路径零回归)。
+const EXPOSE = (process.env.FORGEAX_FXT_EXPOSE ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+if (EXPOSE.length > 0) {
+  const keep = new Set(EXPOSE);
+  for (const name of Object.keys(TOOLS)) {
+    if (!keep.has(name)) delete TOOLS[name];
+  }
 }
 
 let buf = '';

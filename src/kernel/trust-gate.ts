@@ -30,6 +30,7 @@
  */
 import { resolve, sep } from 'node:path';
 import type { TrustTier } from '@forgeax/agent-runtime';
+import { getUiAction } from '../api/lib/ui-manifest-registry';
 
 /** 工具能力分类。`delete` 从 `write` 拆出(own 写直放、但删文件要确认)。 */
 export type Capability = 'read' | 'write' | 'delete' | 'exec' | 'network' | 'credential' | 'delegate' | 'other';
@@ -125,6 +126,9 @@ export interface TrustContext {
   projectRoot?: string;
   /** 当前激活游戏 slug;省略 ⇒ 允许写入任意 `.forgeax/games/<slug>/`(任一游戏)。 */
   activeGame?: string;
+  /** 会话 id —— `ui_invoke` 的 per-action capability 查表键(manifest 缓存按 sid 存)。
+   *  缺省 ⇒ 查不到声明 ⇒ fail-closed ask。 */
+  sid?: string;
 }
 
 /** 闸口判定(三档):allowlist > 硬 deny > imported write/delete 作用域(路径能解析→ask、解析不出→deny)
@@ -138,6 +142,17 @@ export function checkKernelTool(
   if (ALWAYS_ALLOW.has(toolName)) return decide('allow');
   // 缺 trustTier → fail-closed 当 imported 处理(不信默认 own)。
   const tier: TrustTier = trustTier ?? 'imported';
+
+  // ui_invoke(UI 语义操作层):capability 不按工具名子串分类(会恒落 'other',own tier
+  // 通配直放 → 分级失效),而按 **manifest 里声明的** capability 查表(不信模型自报的
+  // args.capability,防谎报;manifest 写入被 lease + 会话鉴权把守)。查不到声明(UI 未
+  // 连 / 缓存重启丢失 / 假 actionId)→ fail-closed ask,交人判断。
+  if (toolName === 'ui_invoke') return checkUiInvoke(tier, ctx);
+  // ui_snapshot 是只读的 UI 感知取数(无副作用),归 read 直放。显式特判是为了绕开
+  // classifyTool 的子串误分类('snapshot' 含 'sh' → 命中 exec),否则 imported 内核
+  // 每次只读 snapshot 都会误弹 exec 确认卡。
+  if (toolName === 'ui_snapshot') return decide('allow', 'read');
+
   const cap = classifyTool(toolName);
 
   // 1) 硬拒(imported credential)——不可放行。
@@ -172,6 +187,34 @@ export function checkKernelTool(
 
 /** 工具入参里可能携带目标路径的字段(按惯例)。 */
 const PATH_ARG_KEYS = ['path', 'file', 'filePath', 'file_path', 'filename', 'target', 'dir', 'directory'];
+
+/** `ui_invoke` 的 per-action 三档判定。capability 真值 = manifest 声明(查表键 sid+actionId);
+ *  UI action 无路径可作 R2-08 作用域判定,故 imported tier 除显式信任的 read 外一律 ask
+ *  (不静默放行不可信 pack 对 UI 的驱动)。own tier 沿用 TIER_ASK/TIER_DENY 口径
+ *  (delete/credential 弹卡,其余直放)。 */
+function checkUiInvoke(tier: TrustTier, ctx: TrustContext): TrustDecision {
+  const actionId =
+    ctx.args && typeof ctx.args === 'object' && typeof (ctx.args as Record<string, unknown>).actionId === 'string'
+      ? ((ctx.args as Record<string, unknown>).actionId as string)
+      : '';
+  if (!actionId) return decide('ask', 'other', 'confirm ui_invoke without actionId (fail-closed)');
+  const decl = getUiAction(ctx.sid, actionId);
+  if (!decl) {
+    return decide('ask', 'other', `confirm unregistered ui action "${actionId}" (no manifest declaration, fail-closed)`);
+  }
+  const cap = decl.capability;
+  if (TIER_DENY[tier].has(cap)) {
+    return decide('deny', cap, `ui action "${decl.title}" (${actionId}) denied for ${tier} pack (capability "${cap}")`);
+  }
+  if (TIER_ASK[tier].has(cap)) {
+    return decide('ask', cap, `confirm ${cap} ui action: "${decl.title}" (${actionId})`);
+  }
+  if (tier === 'imported') {
+    if (cap === 'read') return decide('allow', cap);
+    return decide('ask', cap, `confirm untrusted ${cap} ui action: "${decl.title}" (${actionId})`);
+  }
+  return decide('allow', cap);
+}
 
 /** 从工具入参里提取目标路径(首个命中的字符串字段)。 */
 function extractPath(args: unknown): string | undefined {
