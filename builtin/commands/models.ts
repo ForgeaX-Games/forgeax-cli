@@ -27,6 +27,8 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { CommandModule } from "../../src/commands/types";
 import { isValidAgentPath } from "../../src/core/agent-scaffold";
 import { fetchLiveCatalog } from "../../src/lib/llm-gateway/live-catalog";
+import { runCapture } from "../../src/lib/node-spawn";
+import { resolveBinary } from "../../src/cli-providers/shared/resolve-binary";
 
 interface ReadModelArgs {
   sid: string;
@@ -86,6 +88,258 @@ const LIVE_DEFAULT_SPEC = {
   defaultTemperature: 0.7,
   source: "live" as const,
 };
+
+const CURSOR_DRIVER_LABEL = "cursor-agent · subscription runtime · no local cost";
+const CLAUDE_CODE_DRIVER_LABEL = "claude-code · subscription runtime · no local cost";
+const CODEX_DRIVER_LABEL = "codex · subscription runtime · no local cost";
+const CODEBUDDY_DRIVER_LABEL = "codebuddy · subscription runtime · no local cost";
+const CURSOR_FALLBACK_MODELS = [
+  "gpt-5.5-medium",
+  "gpt-5.1-codex-max-medium",
+  "claude-opus-4-8-thinking-high",
+  "claude-sonnet-4-6-thinking",
+];
+const CLAUDE_CODE_FALLBACK_MODELS = [
+  "opus",
+  "sonnet",
+  "claude-opus-4-8",
+  "claude-sonnet-5",
+  "claude-4.6-sonnet-medium",
+];
+const CODEX_FALLBACK_MODELS = [
+  "gpt-5.2",
+  "gpt-5.1-codex-max-medium",
+  "gpt-5.4-mini-medium",
+  "gpt-5-mini",
+];
+const CODEBUDDY_FALLBACK_MODELS = [
+  "default-model",
+  "gemini-3.1-pro",
+  "gemini-3.0-flash",
+  "gemini-3.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+  "gemini-3.1-flash-lite",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.3-codex",
+  "gpt-5.1-codex",
+  "gpt-5.1-codex-mini",
+  "deepseek-v3-2-volc",
+  "glm-5.0",
+  "kimi-k2.5",
+];
+const DRIVER_MODEL_CACHE_TTL_MS = Number(process.env.FORGEAX_DRIVER_MODEL_CACHE_TTL_MS ?? 60 * 60 * 1000);
+
+type DriverModelCatalog = {
+  models: Array<{ id: string; hidden: boolean } & Record<string, unknown>>;
+  driver: { id: string; source: string; error?: string; ids: number; cached?: boolean };
+};
+
+const driverModelCache = new Map<string, { expiresAt: number; value?: DriverModelCatalog; promise?: Promise<DriverModelCatalog> }>();
+
+function splitModelEnv(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseCursorModelList(stdout: string): string[] {
+  const seen = new Set<string>();
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine
+      .trim()
+      .replace(/^[*\-•]\s*/, "")
+      .replace(/^\d+[.)]\s*/, "");
+    if (!line) continue;
+    const match = line.match(/^([a-z0-9][a-z0-9._-]*)(?:\s+-\s+.*|\s+\((?:current|default)\)\s*)?$/i);
+    const id = match?.[1]?.trim();
+    if (!id) continue;
+    if (/^(available|models?|model|current|default|name)$/i.test(id)) continue;
+    seen.add(id);
+  }
+  return [...seen];
+}
+
+async function loadCursorDriverModels(): Promise<{
+  models: Array<{ id: string; hidden: boolean } & Record<string, unknown>>;
+  driver: { id: string; source: string; error?: string; ids: number };
+}> {
+  const envModels = splitModelEnv(process.env.FORGEAX_CURSOR_AGENT_MODELS ?? process.env.CURSOR_AGENT_MODELS);
+  let ids = envModels;
+  let source = envModels.length > 0 ? "env" : "cli";
+  let error: string | undefined;
+
+  if (ids.length === 0) {
+    try {
+      const binary = await resolveBinary({
+        envVarName: "CURSOR_CLI_PATH",
+        defaultBinary: "cursor-agent",
+      });
+      const out = await runCapture(binary, ["--list-models"], { timeoutMs: 5000, captureStderr: true });
+      if (out.code === 0) {
+        ids = parseCursorModelList(out.stdout);
+        if (ids.length === 0) {
+          error = "cursor-agent --list-models returned no parseable model ids";
+        }
+      } else {
+        const detail = (out.stderr || out.stdout).trim();
+        error = `cursor-agent --list-models exit ${out.code ?? "spawn-failed"}${detail ? `: ${detail}` : ""}`;
+      }
+    } catch (err) {
+      error = (err as Error).message;
+    }
+  }
+
+  if (ids.length === 0) {
+    ids = CURSOR_FALLBACK_MODELS;
+    source = "fallback";
+  }
+
+  return {
+    models: toDriverModelRows(ids, "cursor-agent", CURSOR_DRIVER_LABEL),
+    driver: { id: "cursor-agent", source, error, ids: ids.length },
+  };
+}
+
+function toDriverModelRows(
+  ids: string[],
+  driverId: string,
+  driverLabel: string,
+  hidden: Set<string> = new Set(),
+): Array<{ id: string; hidden: boolean } & Record<string, unknown>> {
+  return ids.map((id) => ({
+    id,
+    source: "driver",
+    driverId,
+    driverLabel,
+    costMetering: "none",
+    input: ["text", "image"],
+    reasoning: /thinking|reasoning|opus|sonnet|gpt-5|o\d/i.test(id),
+    hidden: hidden.has(id),
+  }));
+}
+
+function driverIdsFromDisk(
+  disk: Record<string, Record<string, unknown>>,
+  accept: (id: string) => boolean,
+): string[] {
+  return Object.keys(disk).filter(accept);
+}
+
+function isClaudeCodeModel(id: string): boolean {
+  return /^(claude[-_.]|opus$|sonnet$)/i.test(id);
+}
+
+function isCodexModel(id: string): boolean {
+  return /^(gpt[-_.]|o\d|codex[-_.])|codex/i.test(id);
+}
+
+function isa peer agent CLIModel(id: string): boolean {
+  return /^(default-model|gemini[-_.]|gpt[-_.]|deepseek[-_.]|glm[-_.]|kimi[-_.])/i.test(id);
+}
+
+function withHidden(
+  catalog: DriverModelCatalog,
+  hidden: Set<string>,
+  cached: boolean,
+): DriverModelCatalog {
+  return {
+    models: catalog.models.map((m) => ({ ...m, hidden: hidden.has(String(m.id)) })),
+    driver: cached ? { ...catalog.driver, cached: true } : catalog.driver,
+  };
+}
+
+function driverModelCacheKey(
+  providerId: string,
+  ctx: { paths: { user(): { modelsFile(): string } } },
+): string {
+  const env =
+    providerId === "cursor-agent"
+      ? process.env.FORGEAX_CURSOR_AGENT_MODELS ?? process.env.CURSOR_AGENT_MODELS ?? ""
+      : providerId === "claude-code"
+        ? process.env.FORGEAX_CLAUDE_CODE_MODELS ?? process.env.CLAUDE_CODE_MODELS ?? ""
+        : providerId === "codex"
+          ? process.env.FORGEAX_CODEX_MODELS ?? process.env.CODEX_MODELS ?? ""
+          : process.env.FORGEAX_CODEBUDDY_MODELS ?? process.env.CODEBUDDY_MODELS ?? "";
+  return `${providerId}\0${ctx.paths.user().modelsFile()}\0${env}`;
+}
+
+async function loadDriverModelsUncached(
+  providerId: string,
+  ctx: { paths: { user(): { modelsFile(): string; modelsHiddenFile(): string } } },
+): Promise<DriverModelCatalog> {
+  if (providerId === "cursor-agent") {
+    const res = await loadCursorDriverModels();
+    return {
+      models: res.models,
+      driver: res.driver,
+    };
+  }
+
+  const disk = loadDiskCatalog(ctx);
+  const env =
+    providerId === "claude-code"
+      ? splitModelEnv(process.env.FORGEAX_CLAUDE_CODE_MODELS ?? process.env.CLAUDE_CODE_MODELS)
+      : providerId === "codex"
+        ? splitModelEnv(process.env.FORGEAX_CODEX_MODELS ?? process.env.CODEX_MODELS)
+        : splitModelEnv(process.env.FORGEAX_CODEBUDDY_MODELS ?? process.env.CODEBUDDY_MODELS);
+  const fromDisk = providerId === "claude-code"
+    ? driverIdsFromDisk(disk, isClaudeCodeModel)
+    : providerId === "codex"
+      ? driverIdsFromDisk(disk, isCodexModel)
+      : driverIdsFromDisk(disk, isa peer agent CLIModel);
+  const fallback = providerId === "claude-code"
+    ? CLAUDE_CODE_FALLBACK_MODELS
+    : providerId === "codex"
+      ? CODEX_FALLBACK_MODELS
+      : CODEBUDDY_FALLBACK_MODELS;
+  const ids = env.length > 0 ? env : fromDisk.length > 0 ? fromDisk : fallback;
+  const source = env.length > 0 ? "env" : fromDisk.length > 0 ? "disk-filter" : "fallback";
+  const label = providerId === "claude-code"
+    ? CLAUDE_CODE_DRIVER_LABEL
+    : providerId === "codex"
+      ? CODEX_DRIVER_LABEL
+      : CODEBUDDY_DRIVER_LABEL;
+
+  return {
+    models: toDriverModelRows(ids, providerId, label),
+    driver: { id: providerId, source, ids: ids.length },
+  };
+}
+
+async function loadDriverModels(
+  providerId: string,
+  ctx: { paths: { user(): { modelsFile(): string; modelsHiddenFile(): string } } },
+): Promise<DriverModelCatalog> {
+  const hidden = loadHiddenSet(ctx);
+  const ttlMs = Number.isFinite(DRIVER_MODEL_CACHE_TTL_MS) ? DRIVER_MODEL_CACHE_TTL_MS : 60 * 60 * 1000;
+  if (ttlMs <= 0) {
+    return withHidden(await loadDriverModelsUncached(providerId, ctx), hidden, false);
+  }
+
+  const key = driverModelCacheKey(providerId, ctx);
+  const now = Date.now();
+  const hit = driverModelCache.get(key);
+  if (hit?.value && hit.expiresAt > now) {
+    return withHidden(hit.value, hidden, true);
+  }
+  if (hit?.promise) {
+    return withHidden(await hit.promise, hidden, true);
+  }
+
+  const promise = loadDriverModelsUncached(providerId, ctx);
+  driverModelCache.set(key, { expiresAt: now + ttlMs, promise });
+  try {
+    const value = await promise;
+    driverModelCache.set(key, { expiresAt: Date.now() + ttlMs, value });
+    return withHidden(value, hidden, false);
+  } catch (err) {
+    driverModelCache.delete(key);
+    throw err;
+  }
+}
 
 /** Read `~/.forgeax/key/models-hidden.json` —— { hidden: string[] } or [],
  *  treated as the set of ids the user has hidden from the picker dropdown.
@@ -203,12 +457,24 @@ function byStrength(a: { id: string }, b: { id: string }): number {
  *  HTTP) → emit full disk catalog so the picker isn't empty when offline. */
 async function loadModelsCatalog(
   ctx: { paths: { user(): { modelsFile(): string; modelsHiddenFile(): string } } },
+  providerId?: string,
 ): Promise<{
   models: Array<{ id: string; hidden: boolean } & Record<string, unknown>>;
   live: { source: string; error?: string; ids: number };
+  driver?: { id: string; source: string; error?: string; ids: number };
   hiddenCount: number;
 }>
 {
+  if (providerId === "cursor-agent" || providerId === "claude-code" || providerId === "codex" || providerId === "codebuddy") {
+    const driver = await loadDriverModels(providerId, ctx);
+    return {
+      models: driver.models,
+      live: { source: "skipped", ids: 0 },
+      driver: driver.driver,
+      hiddenCount: 0,
+    };
+  }
+
   const disk = loadDiskCatalog(ctx);
   const live = await fetchLiveCatalog();
   const hidden = loadHiddenSet(ctx);
@@ -284,7 +550,8 @@ const models: CommandModule = {
 
   async query(name, args, ctx) {
     if (name === "list_models") {
-      return await loadModelsCatalog(ctx);
+      const providerId = (args[0] ?? "").trim();
+      return await loadModelsCatalog(ctx, providerId || undefined);
     }
     if (name !== "get_agent_model") throw new Error(`No query for: ${name}`);
 

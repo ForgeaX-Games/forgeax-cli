@@ -31,6 +31,10 @@ import { _resetLiveCatalogCache } from "../src/lib/llm-gateway/live-catalog";
 let userRoot: string;
 let prevBaseUrl: string | undefined;
 let prevKey: string | undefined;
+let prevCursorModels: string | undefined;
+let prevClaudeCodeModels: string | undefined;
+let prevCodexModels: string | undefined;
+let preva peer agent CLIModels: string | undefined;
 let realFetch: typeof fetch;
 
 function ctx() {
@@ -59,8 +63,16 @@ beforeEach(async () => {
   userRoot = mkdtempSync(resolve(tmpdir(), "forgeax-listmodels-"));
   prevBaseUrl = process.env.LITELLM_PROXY_BASE_URL;
   prevKey = process.env.LITELLM_PROXY_KEY;
+  prevCursorModels = process.env.FORGEAX_CURSOR_AGENT_MODELS;
+  prevClaudeCodeModels = process.env.FORGEAX_CLAUDE_CODE_MODELS;
+  prevCodexModels = process.env.FORGEAX_CODEX_MODELS;
+  preva peer agent CLIModels = process.env.FORGEAX_CODEBUDDY_MODELS;
   process.env.LITELLM_PROXY_BASE_URL = "https://test-proxy.invalid/v1";
   process.env.LITELLM_PROXY_KEY = "sk-test-1234567890";
+  delete process.env.FORGEAX_CURSOR_AGENT_MODELS;
+  delete process.env.FORGEAX_CLAUDE_CODE_MODELS;
+  delete process.env.FORGEAX_CODEX_MODELS;
+  delete process.env.FORGEAX_CODEBUDDY_MODELS;
   realFetch = globalThis.fetch;
   resetPathManager();
   await resetSessionManager();
@@ -75,6 +87,14 @@ afterEach(async () => {
   else process.env.LITELLM_PROXY_BASE_URL = prevBaseUrl;
   if (prevKey === undefined) delete process.env.LITELLM_PROXY_KEY;
   else process.env.LITELLM_PROXY_KEY = prevKey;
+  if (prevCursorModels === undefined) delete process.env.FORGEAX_CURSOR_AGENT_MODELS;
+  else process.env.FORGEAX_CURSOR_AGENT_MODELS = prevCursorModels;
+  if (prevClaudeCodeModels === undefined) delete process.env.FORGEAX_CLAUDE_CODE_MODELS;
+  else process.env.FORGEAX_CLAUDE_CODE_MODELS = prevClaudeCodeModels;
+  if (prevCodexModels === undefined) delete process.env.FORGEAX_CODEX_MODELS;
+  else process.env.FORGEAX_CODEX_MODELS = prevCodexModels;
+  if (preva peer agent CLIModels === undefined) delete process.env.FORGEAX_CODEBUDDY_MODELS;
+  else process.env.FORGEAX_CODEBUDDY_MODELS = preva peer agent CLIModels;
   await resetSessionManager();
   resetPathManager();
   rmSync(userRoot, { recursive: true, force: true });
@@ -82,12 +102,13 @@ afterEach(async () => {
 });
 
 interface ListModelsResp {
-  models: Array<{ id: string; source?: string; live?: boolean; contextWindow?: number; reasoning?: boolean; input?: string[] }>;
+  models: Array<{ id: string; source?: string; live?: boolean; driverId?: string; costMetering?: string; contextWindow?: number; reasoning?: boolean; input?: string[] }>;
   live: { source: string; error?: string; ids: number };
+  driver?: { id: string; source: string; error?: string; ids: number };
 }
 
-async function callListModels(): Promise<ListModelsResp> {
-  return (await models.query!("list_models", [], ctx())) as ListModelsResp;
+async function callListModels(args: string[] = []): Promise<ListModelsResp> {
+  return (await models.query!("list_models", args, ctx())) as ListModelsResp;
 }
 
 describe("list_models — disk + LiteLLM merge", () => {
@@ -251,5 +272,54 @@ describe("list_models — disk + LiteLLM merge", () => {
     await callListModels();
     // Cache should suppress the latter two; only one network call.
     expect(fetchCount).toBe(1);
+  });
+
+  test("cursor-agent provider returns driver-scoped model catalog", async () => {
+    process.env.FORGEAX_CURSOR_AGENT_MODELS = "gpt-5.5-medium, claude-opus-4-8-thinking-high";
+
+    const resp = await callListModels(["cursor-agent"]);
+
+    expect(resp.live.source).toBe("skipped");
+    expect(resp.driver).toEqual({ id: "cursor-agent", source: "env", ids: 2 });
+    expect(resp.models.map((m) => m.id)).toEqual(["gpt-5.5-medium", "claude-opus-4-8-thinking-high"]);
+    expect(resp.models.every((m) => m.source === "driver")).toBe(true);
+    expect(resp.models.every((m) => m.driverId === "cursor-agent")).toBe(true);
+    expect(resp.models.every((m) => m.costMetering === "none")).toBe(true);
+  });
+
+  test("claude-code provider returns driver-scoped Claude catalog", async () => {
+    process.env.FORGEAX_CLAUDE_CODE_MODELS = "opus, sonnet";
+
+    const resp = await callListModels(["claude-code"]);
+
+    expect(resp.live.source).toBe("skipped");
+    expect(resp.driver).toEqual({ id: "claude-code", source: "env", ids: 2 });
+    expect(resp.models.map((m) => m.id)).toEqual(["opus", "sonnet"]);
+    expect(resp.models.every((m) => m.source === "driver")).toBe(true);
+    expect(resp.models.every((m) => m.driverId === "claude-code")).toBe(true);
+  });
+
+  test("codex provider returns driver-scoped Codex catalog", async () => {
+    process.env.FORGEAX_CODEX_MODELS = "gpt-5.2, gpt-5.1-codex-max-medium";
+
+    const resp = await callListModels(["codex"]);
+
+    expect(resp.live.source).toBe("skipped");
+    expect(resp.driver).toEqual({ id: "codex", source: "env", ids: 2 });
+    expect(resp.models.map((m) => m.id)).toEqual(["gpt-5.2", "gpt-5.1-codex-max-medium"]);
+    expect(resp.models.every((m) => m.source === "driver")).toBe(true);
+    expect(resp.models.every((m) => m.driverId === "codex")).toBe(true);
+  });
+
+  test("codebuddy provider returns driver-scoped a peer agent CLI catalog", async () => {
+    process.env.FORGEAX_CODEBUDDY_MODELS = "default-model, gemini-3.1-pro, gpt-5.5";
+
+    const resp = await callListModels(["codebuddy"]);
+
+    expect(resp.live.source).toBe("skipped");
+    expect(resp.driver).toEqual({ id: "codebuddy", source: "env", ids: 3 });
+    expect(resp.models.map((m) => m.id)).toEqual(["default-model", "gemini-3.1-pro", "gpt-5.5"]);
+    expect(resp.models.every((m) => m.source === "driver")).toBe(true);
+    expect(resp.models.every((m) => m.driverId === "codebuddy")).toBe(true);
   });
 });
