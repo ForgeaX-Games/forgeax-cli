@@ -23,6 +23,11 @@ import type { AgentEntry, SkillEntry } from '../plugins/kinds';
 import { getPluginSnapshot } from '../plugins/registry';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { assetRoot } from '@forgeax/platform-io';
+import {
+  memLangFromPersonaFile,
+  pickMemoryFilesForLang,
+  type MemLang,
+} from './memory-locale';
 
 export interface ComposedSystemPrompt {
   agentId: string;
@@ -149,7 +154,8 @@ export async function composeSystemPrompt(agentId: string): Promise<ComposedSyst
     const pluginDir = pluginDirOf(entry.pluginId);
     if (pluginDir) {
       const memDirAbs = resolveMemoryDir(pluginDir, entry.definition.memoryDir);
-      const loaded = await loadMemoryDir(memDirAbs, warnings);
+      const memLang = memLangFromPersonaFile(entry.personaPath);
+      const loaded = await loadMemoryDir(memDirAbs, memLang, warnings);
       memorySections.push(...loaded);
     } else {
       warnings.push(`cannot resolve plugin dir for memoryDir of ${entry.pluginId}`);
@@ -224,6 +230,7 @@ function resolveMemoryDir(pluginDir: string, raw: string): string {
 
 async function loadMemoryDir(
   absDir: string,
+  lang: MemLang,
   warnings: string[],
 ): Promise<Array<{ file: string; body: string }>> {
   if (!existsSync(absDir)) return [];
@@ -234,7 +241,12 @@ async function loadMemoryDir(
     warnings.push(`memoryDir unreadable (${absDir}): ${(e as Error).message}`);
     return [];
   }
-  const mds = entries.filter((f) => f.toLowerCase().endsWith('.md')).sort();
+  // Pick one variant per base so a bilingual agent never gets both the zh and
+  // en copy of the same memory file injected at once (see memory-locale.ts).
+  const mds = pickMemoryFilesForLang(
+    entries.filter((f) => f.toLowerCase().endsWith('.md')),
+    lang,
+  );
   const out: Array<{ file: string; body: string }> = [];
   for (const f of mds) {
     const abs = join(absDir, f);

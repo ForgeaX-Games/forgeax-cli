@@ -21,6 +21,11 @@ import type { ContextSlot } from "../../../../src/kits/slot/types";
 import { SlotPriority } from "../../../../src/kits/slot/types";
 import type { AgentContext } from "../../../../src/core/types";
 import { defaultProjectRoot } from '@forgeax/platform-io';
+import {
+  memLangFromPersonaFile,
+  pickMemoryFilesForLang,
+  type MemLang,
+} from "../../../../src/agents/memory-locale";
 
 function findMarketplaceRoot(): string | null {
   const root = defaultProjectRoot();
@@ -48,14 +53,22 @@ function resolveMemoryDir(raw: string): string | null {
   return null;
 }
 
-function loadMemoryFiles(absDir: string): Array<{ file: string; body: string }> {
+function loadMemoryFiles(
+  absDir: string,
+  lang: MemLang,
+): Array<{ file: string; body: string }> {
   let entries: string[] = [];
   try {
     entries = readdirSync(absDir);
   } catch {
     return [];
   }
-  const mds = entries.filter((f) => f.toLowerCase().endsWith(".md")).sort();
+  // Pick one variant per base so a bilingual agent never gets both the zh and
+  // en copy of the same memory file injected at once (see memory-locale.ts).
+  const mds = pickMemoryFilesForLang(
+    entries.filter((f) => f.toLowerCase().endsWith(".md")),
+    lang,
+  );
   const out: Array<{ file: string; body: string }> = [];
   for (const f of mds) {
     try {
@@ -86,7 +99,8 @@ export default function memorySlot(_ctx: AgentContext): ContextSlot | null {
       if (!raw) return "";
       const abs = resolveMemoryDir(raw);
       if (!abs) return "";
-      const files = loadMemoryFiles(abs);
+      const lang = memLangFromPersonaFile(aj.personaFile);
+      const files = loadMemoryFiles(abs, lang);
       if (files.length === 0) return "";
       const blocks = files.map((m) => `## ${m.file}\n\n${m.body}`).join("\n\n");
       return `# Long-term Memory\n\n${blocks}`;

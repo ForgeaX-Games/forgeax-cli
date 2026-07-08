@@ -103,7 +103,7 @@ export interface UiAssetCanvasReport {
 export interface UiAssetCleanup {
   normalizeStandaloneUiAsset(
     dataUrl: string,
-    options?: { mode?: 'icon' | 'chrome'; fillRatio?: number; chromeEdgeRefine?: 'dark-ui' | undefined },
+    options?: { mode?: 'icon' | 'chrome'; fillRatio?: number; chromeEdgeRefine?: 'dark-ui' | undefined; pixelPerfect?: boolean },
   ): Promise<string>;
   inspectUiAssetCanvas(dataUrl: string): Promise<UiAssetCanvasReport>;
 }
