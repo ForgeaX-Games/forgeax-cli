@@ -613,10 +613,14 @@ const models: CommandModule = {
     }
 
     const session = await ctx.sm.open(sid);
-    if (!session.tree.get(agentPath)) {
-      throw new Error(`${name}: agent path not found in tree: ${agentPath}`);
-    }
-
+    // Don't gate the write on in-memory tree membership: the FSWatcher that
+    // feeds session.tree lags a freshly-scaffolded / just-opened session by a
+    // tick, so an otherwise-valid write would spuriously fail with "agent path
+    // not found in tree" (surfaced as an empty {} in the picker). The real
+    // precondition is that agent.json exists (readAgentJsonRaw throws a clear
+    // error if not); the restart below is already guarded by scheduler.getAgent,
+    // so a not-yet-scheduled agent simply skips restart and picks up the new
+    // model when it starts. This mirrors get_agent_model's pre-scaffold tolerance.
     const agentJsonFile = ctx.paths.session(sid).agent(agentPath).agentJson();
     const raw = readAgentJsonRaw(agentJsonFile, name);
 

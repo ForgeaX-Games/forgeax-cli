@@ -139,16 +139,36 @@ class AgentLayer implements AgentLayerAPI {
 
 // ─── PathManager ─────────────────────────────────────────────────────────────
 
+interface PathManagerOpts { builtinRoot?: string; userRoot?: string; stateRoot?: string; projectRoot?: string; layout?: SessionLayout }
+
 class PathManager implements PathManagerAPI {
-  private readonly _builtin: BuiltinLayer;
-  private readonly _user: UserLayer;
+  // NOT readonly: `reconfigure` re-points these in place on a workspace
+  // hot-switch. Identity of the PathManager singleton must stay stable so
+  // long-lived holders (notably SessionManager, which captures the instance at
+  // initSessionManager(pm)) follow the switch instead of pinning the boot root.
+  private _builtin!: BuiltinLayer;
+  private _user!: UserLayer;
   /** Where session state trees land + how sessions are enumerated. Injected by
    *  the product shell (studio = project-local); defaults to the generic
    *  layout (`<userRoot>/sessions`) so a standalone, game-agnostic cli runs
    *  exactly as before the seam existed. */
-  private readonly _layout: SessionLayout;
+  private _layout!: SessionLayout;
 
-  constructor(opts: { builtinRoot?: string; userRoot?: string; stateRoot?: string; projectRoot?: string; layout?: SessionLayout } = {}) {
+  constructor(opts: PathManagerOpts = {}) {
+    this.reconfigure(opts);
+  }
+
+  /**
+   * Re-point every layer at a (possibly new) root set. Called by the
+   * constructor AND by initPathManager on a workspace switch — mutating in
+   * place (rather than constructing a fresh instance) is what lets the
+   * SessionManager singleton, which holds ONE PathManager reference from boot,
+   * see the new root. Replacing the singleton object instead left SM resolving
+   * `list()` / `session(sid)` against the OLD root while getPathManager()
+   * callers saw the NEW one — the "列会话 repo-root、写 agent.json Desktop-root"
+   * split that made cross-workspace model switching fail with "agent.json missing".
+   */
+  reconfigure(opts: PathManagerOpts = {}): void {
     const projectRoot = resolve(opts.projectRoot ?? defaultProjectRoot());
     const userRoot = resolve(opts.userRoot ?? resolveUserDir());
     this._builtin = new BuiltinLayer(resolve(opts.builtinRoot ?? defaultBuiltinRoot()));
@@ -191,7 +211,14 @@ class PathManager implements PathManagerAPI {
 
 let _instance: PathManager | null = null;
 
-export function initPathManager(opts?: { builtinRoot?: string; userRoot?: string; stateRoot?: string; projectRoot?: string; layout?: SessionLayout }): PathManager {
+export function initPathManager(opts?: PathManagerOpts): PathManager {
+  // Reconfigure the EXISTING singleton in place when present (workspace
+  // hot-switch) so captured references (SessionManager) follow the new root.
+  // Only construct a fresh instance on first init (or after resetPathManager).
+  if (_instance) {
+    _instance.reconfigure(opts);
+    return _instance;
+  }
   _instance = new PathManager(opts);
   return _instance;
 }

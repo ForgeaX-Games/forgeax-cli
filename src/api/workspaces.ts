@@ -29,7 +29,7 @@
  */
 
 import { Hono } from 'hono';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, isAbsolute, resolve as resolvePath } from 'node:path';
 import { defaultProjectRoot } from '@forgeax/platform-io';
@@ -114,7 +114,7 @@ export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
   });
 
   r.post('/activate', async (c) => {
-    let body: { path?: string; label?: string; initIfMissing?: boolean };
+    let body: { path?: string; label?: string; initIfMissing?: boolean; scaffold?: boolean };
     try { body = (await c.req.json()) as typeof body; }
     catch { return c.json({ error: 'invalid json' }, 400); }
     const raw = String(body?.path ?? '').trim();
@@ -126,7 +126,16 @@ export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
     abs = resolvePath(abs);
     if (isBlocklisted(abs)) return c.json({ error: `${friendlyPath(abs)} is on the system blocklist` }, 400);
 
-    if (!existsSync(abs)) return c.json({ error: `not found: ${friendlyPath(abs)}` }, 404);
+    const initIfMissing = body.initIfMissing !== false;
+
+    // Create the target dir when switching to a not-yet-existing root in create
+    // mode (first-run onboarding activates ~/ForgeaxProjects, which may not exist
+    // yet). Pure "open existing" (initIfMissing=false) still 404s on a miss.
+    if (!existsSync(abs)) {
+      if (!initIfMissing) return c.json({ error: `not found: ${friendlyPath(abs)}` }, 404);
+      try { mkdirSync(abs, { recursive: true }); }
+      catch (e) { return c.json({ error: `mkdir failed: ${(e as Error).message}` }, 500); }
+    }
     let st;
     try { st = statSync(abs); }
     catch (e) { return c.json({ error: (e as Error).message }, 500); }
@@ -134,10 +143,12 @@ export function createWorkspacesRouter(deps: WorkspacesRouterDeps = {}): Hono {
 
     const oldRoot = defaultProjectRoot();
 
-    // 1. Scaffold if missing.
-    const initIfMissing = body.initIfMissing !== false;
+    // 1. Scaffold a blank stub game if the workspace has none — UNLESS the caller
+    //    opts out (`scaffold:false`). First-run onboarding switches the root then
+    //    creates its OWN named game, so it must NOT get a junk `workspace` stub.
+    const doScaffold = body.scaffold !== false;
     let scaffolded = false;
-    if (initIfMissing && !hasGames(abs)) {
+    if (initIfMissing && doScaffold && !hasGames(abs)) {
       try {
         const r = scaffoldDefaultWorkspace(abs);
         scaffolded = r.created;

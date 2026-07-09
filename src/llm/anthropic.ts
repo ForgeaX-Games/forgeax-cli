@@ -383,10 +383,36 @@ function annotateMessageCache(messages: any[]): void {
   }
 }
 
-function createAnthropicProvider(opts: ProviderFactoryOpts): LLMProvider {
+/**
+ * Transport seam for the Anthropic-Messages wire format. The request/response
+ * body + SSE grammar are identical across Anthropic-compatible gateways; only
+ * the endpoint URL and auth headers differ.
+ */
+interface AnthropicTransport {
+  /** Default base when the resolver leaves baseUrl undefined. */
+  defaultBase: string;
+  /** Full messages endpoint from a normalized (no trailing slash) base. */
+  messagesUrl(base: string): string;
+  /** Auth + versioning headers for the given key. */
+  authHeaders(apiKey: string): Record<string, string>;
+}
+
+const ANTHROPIC_TRANSPORT: AnthropicTransport = {
+  defaultBase: "https://api.anthropic.com",
+  messagesUrl: (base) => `${base}/v1/messages`,
+  authHeaders: (apiKey) => ({
+    "anthropic-version": "2023-06-01",
+    "x-api-key": apiKey,
+  }),
+};
+
+function createAnthropicStyleProvider(
+  opts: ProviderFactoryOpts,
+  transport: AnthropicTransport,
+): LLMProvider {
   const { apiKey, baseUrl } = opts;
-  const base = (baseUrl ?? "https://api.anthropic.com").replace(/\/+$/, "");
-  const url = `${base}/v1/messages`;
+  const base = (baseUrl ?? transport.defaultBase).replace(/\/+$/, "");
+  const url = transport.messagesUrl(base);
   const model = opts.model;
   const temperature = opts.temperature ?? 0.7;
   const maxTokens = opts.maxTokens ?? 4096;
@@ -394,8 +420,7 @@ function createAnthropicProvider(opts: ProviderFactoryOpts): LLMProvider {
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "anthropic-version": "2023-06-01",
-    "x-api-key": apiKey,
+    ...transport.authHeaders(apiKey),
   };
 
   return {
@@ -618,6 +643,14 @@ function createAnthropicProvider(opts: ProviderFactoryOpts): LLMProvider {
   };
 }
 
+function createAnthropicProvider(opts: ProviderFactoryOpts): LLMProvider {
+  return createAnthropicStyleProvider(opts, ANTHROPIC_TRANSPORT);
+}
+
 registerProvider("anthropic-messages", createAnthropicProvider);
 
-export { createAnthropicProvider, contentToAnthropic, messagesToAnthropic };
+export {
+  createAnthropicProvider,
+  contentToAnthropic,
+  messagesToAnthropic,
+};

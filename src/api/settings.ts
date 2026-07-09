@@ -45,6 +45,26 @@ const SAFE_ENV_KEYS = new Set([
   'DEEPSEEK_BASE_URL',
 ]);
 
+/**
+ * The .env credentials file is INSTALL-GLOBAL, not per-workspace.
+ *
+ * The server loads $ROOT/.env once at boot (run.ts) into process.env; those
+ * credentials + FORGEAX_MODEL are process-global and survive a workspace
+ * hot-switch (POST /api/workspaces/activate only remaps FORGEAX_PROJECT_ROOT).
+ * If Settings read/wrote `<defaultProjectRoot()>/.env` it would follow the
+ * MUTABLE active workspace root — so activating a fresh workspace made the
+ * drawer read that new root's (empty) .env: keys vanished, FORGEAX_MODEL reset
+ * to the fallback, and the "connect a model" gate fired even though the running
+ * server still had valid creds in process.env. Anchor to the file the server
+ * actually loaded (FORGEAX_ENV_FILE, exported by run.ts) so credentials are
+ * stable across workspaces. Fallback keeps the packaged app / tests unchanged.
+ */
+function envFilePath(): string {
+  const explicit = process.env.FORGEAX_ENV_FILE;
+  if (explicit && explicit.trim()) return explicit;
+  return resolve(defaultProjectRoot(), '.env');
+}
+
 function parseEnv(raw: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of raw.split('\n')) {
@@ -102,7 +122,7 @@ export function createSettingsRouter(): Hono {
 
   r.get('/', async (c) => {
     const projectRoot = defaultProjectRoot();
-    const envPath = resolve(projectRoot, '.env');
+    const envPath = envFilePath();
     let env: Record<string, string> = {};
     if (existsSync(envPath)) {
       try { env = parseEnv(await readFile(envPath, 'utf-8')); } catch { /* */ }
@@ -139,8 +159,7 @@ export function createSettingsRouter(): Hono {
     let body: Record<string, string>;
     try { body = (await c.req.json()) as Record<string, string>; }
     catch { return c.json({ error: 'invalid json' }, 400); }
-    const projectRoot = defaultProjectRoot();
-    const envPath = resolve(projectRoot, '.env');
+    const envPath = envFilePath();
     let originalText = '';
     let env: Record<string, string> = {};
     if (existsSync(envPath)) {
