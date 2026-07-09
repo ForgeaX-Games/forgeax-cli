@@ -8,6 +8,7 @@
  * newline-JSON-RPC 线协议 + 控制面方法形状。
  */
 import { connect as netConnect, type Socket } from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import { existsSync } from 'node:fs';
 import { tt } from '../lib/turn-trace';
 import { homedir } from 'node:os';
@@ -49,6 +50,10 @@ interface Pending { resolve: (v: unknown) => void; reject: (e: Error) => void }
 export class SidecarClient {
   private sock: Socket | null = null;
   private buf = '';
+  // StringDecoder:sidecar 回流的 newline-JSON 帧按字节流分片,可能切在多字节 UTF-8 序列中间;
+  // 逐块 `toString` 会把不完整尾字节解成 U+FFFD 并丢字节,静默损坏流式中文输出/工具结果
+  // (同 agent-host/ipc.ts、core/rpc.ts,见验收报告 A.5)。缓不完整尾字节到下一片再解。
+  private readonly decoder = new StringDecoder('utf8');
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readonly exitCbs = new Set<(info: ExitInfo) => void>();
@@ -90,7 +95,7 @@ export class SidecarClient {
   }
 
   private ingest(chunk: Buffer): void {
-    this.buf += chunk.toString('utf8');
+    this.buf += this.decoder.write(chunk);
     let i: number;
     while ((i = this.buf.indexOf('\n')) >= 0) {
       const line = this.buf.slice(0, i); this.buf = this.buf.slice(i + 1);
@@ -123,6 +128,9 @@ export class SidecarClient {
   startSession(req: StartSessionReq): Promise<SessionGrant> { return this.request('startSession', req) as Promise<SessionGrant>; }
   cancel(callId: string): Promise<void> { return this.request('cancel', { callId }) as Promise<void>; }
   shutdownSession(sessionId: string): Promise<void> { return this.request('shutdownSession', { sessionId }) as Promise<void>; }
+  /** 请整个 sidecar 进程优雅退出(reap 所有 session + 关 socket + exit)。用于凭据变更后
+   *  强制 sidecar 重生以**重读进程 env**(cred-vault 的真 key/upstream 在 spawn 时冻结)。 */
+  shutdown(): Promise<void> { return this.request('shutdown') as Promise<void>; }
   getProcess(sessionId: string): Promise<{ pid: number; pgid: number } | null> { return this.request('getProcess', { sessionId }) as Promise<{ pid: number; pgid: number } | null>; }
   listSessions(): Promise<unknown[]> { return this.request('listSessions') as Promise<unknown[]>; }
   onExit(cb: (info: ExitInfo) => void): () => void { this.exitCbs.add(cb); return () => this.exitCbs.delete(cb); }

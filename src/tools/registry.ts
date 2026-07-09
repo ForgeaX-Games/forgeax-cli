@@ -31,6 +31,7 @@ import { createImageGen } from '../lib/image-gateway/create-image-gen';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getSessionManager } from '../core/session-manager';
 import { getPathManager } from '../fs/path-manager';
+import { getHostAuthoring, type HostAuthoring } from './host-authoring';
 
 export type ToolHandler = (
   args: unknown,
@@ -51,6 +52,10 @@ export type ToolHandler = (
      *  handler 经此生图,不必反向 import 编排层的 vendor 实现。懒构造,非图像
      *  工具 0 成本。 */
     imageGen: ImageGen;
+    /** GAP 5 — 宿主 authoring 缝。插件 handler 从其安装目录向上解析不到
+     *  `@forgeax/*`(ESM 裸说明符),所以「写插件 / reload」这类需要宿主编排层
+     *  能力的 authoring 操作只能经此注入。见 tools/host-authoring.ts。 */
+    host: HostAuthoring;
   },
 ) => Promise<unknown> | unknown;
 
@@ -322,6 +327,7 @@ export async function callTool(req: ToolCall): Promise<ToolResult> {
       cwd: entry.pluginDir,
       projectRoot: defaultProjectRoot(),
       imageGen: createImageGen(filteredEnv),
+      host: getHostAuthoring(),
     });
     bus.emit(
       'tool.completed',

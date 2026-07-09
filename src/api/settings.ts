@@ -17,6 +17,7 @@ import { resolve } from 'node:path';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { friendlyPath } from '@forgeax/platform-io';
 import { getSessionManager } from '../core/session-manager';
+import { DEFAULT_UPLOAD_REPO } from '../upload/config';
 
 const SAFE_ENV_KEYS = new Set([
   'ANTHROPIC_API_KEY',
@@ -34,6 +35,9 @@ const SAFE_ENV_KEYS = new Set([
   // src/lib/image-gateway/clients/dispatcher.ts for the
   // primary/fallback chain (seedream → gemini → azure-gpt-image).
   'ARK_IMAGE_KEY',
+  // NOTE: when adding an LLM auth/routing key here, also add it to
+  // SIDECAR_CRED_KEYS below so a settings change restarts the sidecar
+  // (whose cred-vault froze the old credential at spawn time).
   'ARK_VIDEO_KEY',
   'AZURE_GPT_IMAGE_KEY',
   'AZURE_GPT_IMAGE_ENDPOINT',
@@ -43,6 +47,14 @@ const SAFE_ENV_KEYS = new Set([
   // 直连 DeepSeek (deepseek-v4 provider; llm provider 读这俩 var).
   'DEEPSEEK_API_KEY',
   'DEEPSEEK_BASE_URL',
+  // Workspace → GitHub upload (see src/upload). All three are drawer-editable.
+  // Decision 2026-07-09: FORGEAX_UPLOAD_REPO is user-configurable (default =
+  // DEFAULT_UPLOAD_REPO shared org repo) — users may upload to any repo their own
+  // token can write. Residual risk of a network-repointable destination is
+  // accepted pending the loopback hardening (server binds 127.0.0.1 in dev-local).
+  'FORGEAX_UPLOAD_GITHUB_TOKEN',
+  'FORGEAX_UPLOAD_REPO',
+  'FORGEAX_UPLOAD_BRANCH',
 ]);
 
 /**
@@ -64,6 +76,25 @@ function envFilePath(): string {
   if (explicit && explicit.trim()) return explicit;
   return resolve(defaultProjectRoot(), '.env');
 }
+
+// LLM 鉴权/路由类 key —— 这些 key 的真值被 sidecar(agent-host)的 cred-vault 在**子进程
+// spawn 时冻结**(cred-vault issueScoped 现取 ANTHROPIC_API_KEY、转发时现取 ANTHROPIC_BASE_URL,
+// 均从冻结的 process.env 读)。仅把新值写进 .env + live-apply server 自己的 process.env 到不了
+// 已在跑的 sidecar,故这些 key 变更后必须重启 sidecar,否则新凭据要等整进程重启才生效
+// (正是本 bug:设置 litellm key 不生效,必须改 .env + 重启)。model/多模态图像 key 不在此列:
+// model 每轮下发、图像 key 由 server 侧插件现读 process.env,无需重启 sidecar。
+const SIDECAR_CRED_KEYS = new Set([
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'GEMINI_API_KEY',
+  'LITELLM_PROXY_KEY',
+  'LITELLM_PROXY_BASE_URL',
+  'DEEPSEEK_API_KEY',
+  'DEEPSEEK_BASE_URL',
+]);
 
 function parseEnv(raw: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -113,8 +144,10 @@ function serializeEnv(env: Record<string, string>, original?: string): string {
  */
 export function maskKey(v: string | undefined): string | null {
   if (!v) return null;
-  if (v.length <= 8) return '***';
-  return `${v.slice(0, 4)}...${v.slice(-4)}`;
+  if (v.length <= 8) return '****';
+  // Middle-starred so a saved key reads as clearly PRESENT (not an empty field)
+  // while leaking only the head/tail the owner already knows.
+  return `${v.slice(0, 4)}********${v.slice(-4)}`;
 }
 
 export function createSettingsRouter(): Hono {
@@ -145,6 +178,12 @@ export function createSettingsRouter(): Hono {
         LITELLM_PROXY_BASE_URL: env.LITELLM_PROXY_BASE_URL ?? null,
         DEEPSEEK_API_KEY: maskKey(env.DEEPSEEK_API_KEY),
         DEEPSEEK_BASE_URL: env.DEEPSEEK_BASE_URL ?? null,
+        // Workspace upload — token masked (theft hygiene); repo shows the
+        // EFFECTIVE destination (env override or the shared default) so the
+        // drawer always displays where an upload would actually land.
+        FORGEAX_UPLOAD_GITHUB_TOKEN: maskKey(env.FORGEAX_UPLOAD_GITHUB_TOKEN),
+        FORGEAX_UPLOAD_REPO: env.FORGEAX_UPLOAD_REPO?.trim() || DEFAULT_UPLOAD_REPO,
+        FORGEAX_UPLOAD_BRANCH: env.FORGEAX_UPLOAD_BRANCH ?? null,
       },
       // UI displays these in the "关于" section — redact $HOME → ~ for
       // portability + privacy hygiene (was leaking operator home prefix).
@@ -168,9 +207,11 @@ export function createSettingsRouter(): Hono {
     }
     // Only allow whitelisted keys to be patched.
     let touched = 0;
+    let credChanged = false;   // 某个 LLM 鉴权/路由 key 的**值**变了 → 需重启 sidecar
     for (const [k, v] of Object.entries(body)) {
       if (!SAFE_ENV_KEYS.has(k)) continue;
       if (typeof v !== 'string') continue;
+      if (SIDECAR_CRED_KEYS.has(k) && (env[k] ?? '') !== v) credChanged = true;
       env[k] = v;
       process.env[k] = v;   // live-apply so the running server picks it up without a restart (U3 first-run onboarding)
       touched++;
@@ -178,6 +219,17 @@ export function createSettingsRouter(): Hono {
     if (touched === 0) return c.json({ error: 'no recognized keys in body', allowed: [...SAFE_ENV_KEYS] }, 400);
     try {
       await writeFile(envPath, serializeEnv(env, originalText), 'utf-8');
+      // sidecar 的 cred-vault 冻结了旧凭据(spawn 时的 env 快照)——重启它,让下一次对话用
+      // 刚写入的新凭据 spawn。不重启则新 key/base-url 要等整进程重启才生效(本 bug 根因)。
+      // best-effort:重启失败不该让"已保存"的写回退;失败只记 warning,用户仍可手动重启兜底。
+      if (credChanged) {
+        try {
+          const { restartSidecar } = await import('../kernel/sidecar-singleton');
+          await restartSidecar();
+        } catch (e) {
+          console.warn(`[settings] 凭据已写入 .env,但 sidecar 重启失败(新凭据可能要手动重启才生效):${(e as Error).message}`);
+        }
+      }
       return c.json({ ok: true, touched, envPath: friendlyPath(envPath) });
     } catch (e) {
       return c.json({ error: (e as Error).message }, 500);

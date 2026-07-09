@@ -39,6 +39,7 @@ import { CliEventBridge } from "../../observatory/cli-event-bridge";
 import { denyPermissionsForSession } from "../../core/permission-registry";
 // M1 内核路径(FORGEAX_KERNEL=kernel):chat → 内核契约 → wire,前端零改。
 import { composeTurnRequest } from "../../kernel/compose-turn-request";
+import { hostToolSpecsForAgent } from "../lib/host-tools-for-agent";
 import { resolveKernel, listAvailableKernels } from "../../kernel/resolve-kernel";
 import { toKernelErrorPayload } from "../../kernel/kernel-unavailable";
 import { toWireEvents, newWireFoldState } from "../../kernel/to-wire-events";
@@ -157,12 +158,18 @@ export function createCliRouter() {
     if (kernelEnabled()) {
       const callId = typeof body.callId === "string" && body.callId.trim() ? body.callId.trim() : undefined;
       const agentId = body.agentId ?? "default";
+      // 该 agent 的插件 host-tools(exposedToAI + 命中 agent.json host-tools allow)→
+      // extraTools 下发内核。conscious-agent 路径经 kits 桥自带这步;/api/cli/chat
+      // (租用内核聊天入口)此前漏了它,导致 team + gen3d 等插件工具对 cbc/cc/codex
+      // 不可见。与桥同一套 allow 规则,无需活着的 conscious agent。
+      const extraTools = hostToolSpecsForAgent(body.sessionId, agentId);
       const turnReq = await composeTurnRequest({
         message,
         agentId,
         threadId: body.threadId,
         sessionId: body.sessionId,
         callId,
+        ...(extraTools.length ? { extraTools } : {}),
         ...(Array.isArray(body.attachments) && body.attachments.length ? { attachments: body.attachments } : {}),
         ...(body.replyLanguage === "en" || body.replyLanguage === "zh" ? { replyLanguage: body.replyLanguage } : {}),
       });

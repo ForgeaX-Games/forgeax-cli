@@ -19,6 +19,7 @@
 
 import { existsSync, readdirSync, openSync, readSync, closeSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { StringDecoder } from 'node:string_decoder';
 import { join } from 'node:path';
 import { getPathManager } from '../fs/path-manager';
 import { TelemetryRecord, type SpanData } from '@forgeax/types';
@@ -97,10 +98,14 @@ export async function replaySessionTelemetry(sid: string): Promise<TelemetryReco
   return merged;
 }
 
-/** Per-file tail cursor: byte offset already consumed + partial-line carry. */
+/** Per-file tail cursor: byte offset already consumed + partial-line carry.
+ *  `dec` (StringDecoder) holds any incomplete trailing UTF-8 bytes across reads:
+ *  a tailed file may be read mid-write, splitting a multi-byte char at the byte
+ *  boundary; decoding the raw slice with `toString` would corrupt it (report A.5). */
 interface FileCursor {
   offset: number;
   carry: string;
+  dec: StringDecoder;
 }
 
 /** Read bytes [cursor.offset, size) of `file`, split into complete lines, parse
@@ -109,7 +114,7 @@ interface FileCursor {
 function drainFile(file: string, cursor: FileCursor, onRecord: (rec: TelemetryRecord) => void): void {
   let size: number;
   try { size = statSync(file).size; } catch { return; }
-  if (size < cursor.offset) { cursor.offset = 0; cursor.carry = ''; } // rotated/truncated
+  if (size < cursor.offset) { cursor.offset = 0; cursor.carry = ''; cursor.dec = new StringDecoder('utf8'); } // rotated/truncated → reset decoder too
   if (size <= cursor.offset) return;
 
   let fd: number;
@@ -119,7 +124,7 @@ function drainFile(file: string, cursor: FileCursor, onRecord: (rec: TelemetryRe
     const buf = Buffer.allocUnsafe(len);
     const read = readSync(fd, buf, 0, len, cursor.offset);
     cursor.offset += read;
-    cursor.carry += buf.toString('utf-8', 0, read);
+    cursor.carry += cursor.dec.write(buf.subarray(0, read));
   } finally {
     closeSync(fd);
   }
@@ -153,7 +158,7 @@ export function tailSessionTelemetry(
     const file = join(dir, fname);
     let offset = 0;
     try { offset = statSync(file).size; } catch { /* not created yet → 0 */ }
-    cursors[fname] = { offset, carry: '' };
+    cursors[fname] = { offset, carry: '', dec: new StringDecoder('utf8') };
   }
 
   const drainAll = (): void => {

@@ -6,18 +6,18 @@
  *  exactly that, so root doesn't sit and wait for a reply that's never
  *  going to come back through its own bubble.
  *
- *  Auto-scaffold: if the named agent isn't in the tree yet, we look it up
- *  via `resolvePersonaForAgent` (plugin first, marketplace fallback) and
- *  call `ensureAgentScaffold` + `attachAgent` + `startAgent` — same pipe
- *  the chat-tab UI uses for `to:'<name>'`. After scaffold we briefly poll
- *  the tree for the new node so the EventBus queue is registered before
- *  we route the event (the AgentTree changes via FSWatcher debounced
+ *  Auto-scaffold: if the named agent isn't in the tree yet, `ensurePersonaScaffold`
+ *  resolves it (plugin first, marketplace fallback) and runs
+ *  ensureAgentScaffold + attachAgent + startAgent — the same shared pipe the
+ *  chat-tab UI (`to:'<name>'`) and set_agent_models use. After scaffold we
+ *  briefly poll the tree for the new node so the EventBus queue is registered
+ *  before we route the event (the AgentTree changes via FSWatcher debounced
  *  ~300ms, hence the wait).
  */
 
 import type { ToolDefinition, ToolOutput, AgentContext, Event } from "../../../../src/core/types";
-import { ensureAgentScaffold, isValidAgentName } from "../../../../src/core/agent-scaffold";
-import { resolvePersonaForAgent } from "../../../../src/agents/loader";
+import { isValidAgentName } from "../../../../src/core/agent-scaffold";
+import { ensurePersonaScaffold } from "../../../../src/core/persona-scaffold";
 import { getSessionManager } from "../../../../src/core/session-manager";
 
 const SCAFFOLD_TIMEOUT_MS = 5000;
@@ -117,33 +117,24 @@ export default {
       return `Error: cannot delegate to self ('${agentId}').`;
     }
 
-    // 1) Scaffold + attach if not yet in the tree.
+    // 1) Scaffold + attach if not yet in the tree (shared persona pipe with
+    //    POST /messages + set_agent_models).
     const sid = ctx.tree.sid;
     if (!ctx.tree.get(agentId)) {
-      const persona = await resolvePersonaForAgent(agentId);
-      if (!persona) {
-        return (
-          `Error: no agent registered with id '${agentId}'. ` +
-          `Call list_subagents to see who's available.`
-        );
-      }
-      const overrides: Record<string, unknown> = {
-        personaFile: persona.personaPath,
-        ...(persona.memoryDir ? { memoryDir: persona.memoryDir } : {}),
-      };
-      if (persona.tools && persona.tools.length > 0) {
-        overrides.kits = { config: { "host-tools": { allow: persona.tools } } };
-      }
-      await ensureAgentScaffold(sid, agentId, {
-        agentType: "conscious",
-        overrides,
-      });
       const session = getSessionManager().peek(sid);
       if (!session) {
         return `Error: session ${sid} is no longer open — cannot delegate.`;
       }
-      await session.scheduler.attachAgent(agentId);
-      await session.scheduler.startAgent(agentId);
+      const res = await ensurePersonaScaffold(session, agentId);
+      if (!res.ok) {
+        if (res.code === "persona_not_found") {
+          return (
+            `Error: no agent registered with id '${agentId}'. ` +
+            `Call list_subagents to see who's available.`
+          );
+        }
+        return `Error: delegate scaffold for '${agentId}' failed — ${res.error}`;
+      }
       const ok = await waitForTreeNode(ctx, agentId);
       if (!ok) {
         return (

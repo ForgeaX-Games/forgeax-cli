@@ -25,7 +25,8 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { CommandModule } from "../../src/commands/types";
-import { isValidAgentPath } from "../../src/core/agent-scaffold";
+import { isValidAgentName, isValidAgentPath } from "../../src/core/agent-scaffold";
+import { ensurePersonaScaffold } from "../../src/core/persona-scaffold";
 import { fetchLiveCatalog } from "../../src/lib/llm-gateway/live-catalog";
 import { runCapture } from "../../src/lib/node-spawn";
 import { resolveBinary } from "../../src/cli-providers/shared/resolve-binary";
@@ -613,14 +614,22 @@ const models: CommandModule = {
     }
 
     const session = await ctx.sm.open(sid);
-    // Don't gate the write on in-memory tree membership: the FSWatcher that
-    // feeds session.tree lags a freshly-scaffolded / just-opened session by a
-    // tick, so an otherwise-valid write would spuriously fail with "agent path
-    // not found in tree" (surfaced as an empty {} in the picker). The real
-    // precondition is that agent.json exists (readAgentJsonRaw throws a clear
-    // error if not); the restart below is already guarded by scheduler.getAgent,
-    // so a not-yet-scheduled agent simply skips restart and picks up the new
-    // model when it starts. This mirrors get_agent_model's pre-scaffold tolerance.
+    if (!session.tree.get(agentPath)) {
+      // Symmetry with get_agent_model's pre-scaffold tolerance: the chat tab
+      // pins a marketplace/plugin persona (suzu / mochi / …) before the session
+      // tree contains it, so picking that agent's model must materialize it —
+      // the same lazy persona scaffold /messages runs on first send. Simple-name
+      // ids only; a nested path that's missing is a genuine "not found". This
+      // also covers the freshly-scaffolded / just-opened session case (FSWatcher
+      // lag) that the onboarding relax previously targeted: ensurePersonaScaffold
+      // is idempotent, so an already-materialized agent simply proceeds.
+      if (!isValidAgentName(agentPath)) {
+        throw new Error(`${name}: agent path not found in tree: ${agentPath}`);
+      }
+      const res = await ensurePersonaScaffold(session, agentPath);
+      if (!res.ok) throw new Error(`${name}: ${res.error}`);
+    }
+
     const agentJsonFile = ctx.paths.session(sid).agent(agentPath).agentJson();
     const raw = readAgentJsonRaw(agentJsonFile, name);
 

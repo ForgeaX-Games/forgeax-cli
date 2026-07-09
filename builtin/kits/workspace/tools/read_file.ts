@@ -18,6 +18,17 @@ const BLOCKED_DEVICE_PATHS = new Set([
   "/proc/kcore",
 ]);
 
+/** Credential-bearing files the agent must never read (token/key exfil guard).
+ *  Matches a basename of `.env` or anything ending in `.env` (e.g. dev-stack.env),
+ *  plus common key file extensions. Exported for unit tests. */
+export function isSecretEnvFile(absPath: string): boolean {
+  const base = absPath.split(/[\\\/]/).pop() ?? "";
+  if (base === ".env" || base.endsWith(".env")) return true;
+  if (/\.(key|pem)$/.test(base)) return true;
+  if (base === "keys.yaml") return true;
+  return false;
+}
+
 function formatTextOutput(
   raw: string,
   offset: number | undefined,
@@ -95,6 +106,13 @@ export default {
 
     if (BLOCKED_DEVICE_PATHS.has(absPath) || absPath.startsWith("/dev/") || absPath.startsWith("/proc/")) {
       return `Error: reading device/proc paths is not allowed — ${absPath}`;
+    }
+
+    // Never let the agent read credential files. The workspace upload token
+    // (FORGEAX_UPLOAD_GITHUB_TOKEN) and LLM keys live in $ROOT/.env; allowing
+    // read_file on a host .env would let a prompt-injected brief exfiltrate them.
+    if (isSecretEnvFile(absPath)) {
+      return `Error: reading credential/.env files is not allowed — ${absPath}`;
     }
 
     const fileStat = await ctx.fs.stat(absPath);

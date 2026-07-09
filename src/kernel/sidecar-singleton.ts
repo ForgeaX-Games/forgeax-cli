@@ -4,6 +4,7 @@
  * 试连已有实例;连不上 → `Bun.spawn` agent-host(随 server 生命周期;agent-host 自身单例,
  * 重复 spawn 安全)→ 重试连接。缓存 client;连接失效下次重连。
  */
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -14,6 +15,8 @@ import { SidecarClient, defaultSockPath } from './sidecar-client';
  *  monorepo 源码态回退到相对路径(发包前过渡)。耦合从「硬编码兄弟路径」收敛到
  *  「`@forgeax/agent-host` 包依赖 + `./serve` 导出」——见 package.json。 */
 function resolveAgentHostMain(): string {
+  const override = process.env.FORGEAX_AGENT_HOST_ENTRY?.trim();
+  if (override) return resolve(override);
   try {
     return fileURLToPath(import.meta.resolve('@forgeax/agent-host/serve'));
   } catch {
@@ -66,6 +69,37 @@ export async function ensureSidecar(): Promise<SidecarClient> {
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error('sidecar (agent-host) not reachable after spawn');
+}
+
+/**
+ * 重启 sidecar —— 让它**重读进程 env 里的凭据**。cred-vault(agent-host 侧)在发 scoped token
+ * 时才现取 `process.env.ANTHROPIC_API_KEY`、转发时现取 `ANTHROPIC_BASE_URL`,但那是 sidecar
+ * **子进程 spawn 时冻结的 env 快照**——server 经 `PUT /api/settings/env` 的 live-apply 只改到
+ * server 自己的 `process.env`,到不了已在跑的 sidecar。故设置页改了 LLM 凭据后必须让 sidecar
+ * 真正退出重生:下次 `ensureSidecar()` 会用**当前** server 进程 env(已含新凭据)spawn 新实例。
+ *
+ * 步骤:请运行中的 sidecar(本进程 spawn 的或外部单例都算)`shutdown` → 等旧 socket 消失
+ * (避免下次 ensureSidecar 抢在退出窗口里重连回旧冻结实例)→ 清空 singleton + 杀本进程句柄。
+ * best-effort:连不上/已退出都视作前置已满足。
+ */
+export async function restartSidecar(): Promise<void> {
+  const client = cached ?? (await tryConnect());
+  if (client) {
+    try { await client.shutdown(); } catch { /* 已在退出 / 连不上 */ }
+    try { client.close(); } catch { /* ignore */ }
+  }
+  cached = null;
+  try { proc?.kill(); } catch { /* ignore */ }
+  proc = null;
+  // 等旧实例真正放掉 socket(优雅 shutdown 会 unlink);win32 命名管道无文件表征 → 跳过,
+  // 靠下次 ensureSidecar 的 tryConnect+ping 失败来触发重 spawn。最多等 ~3s。
+  if (process.platform !== 'win32') {
+    const sockPath = defaultSockPath();
+    for (let i = 0; i < 30; i++) {
+      if (!existsSync(sockPath)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
 }
 
 /** 测试/关停用。 */

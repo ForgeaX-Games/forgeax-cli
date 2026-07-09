@@ -266,6 +266,10 @@ interface MarketplaceManifestAgent {
   role?: string;
   peerFile?: string;
   personaFiles?: { zh?: string; en?: string };
+  /** Host 工具白名单 glob(如 ["gen3d:*","team:*"])。历史上是死字段:marketplace
+   *  legacy 分支从不透传它,host-tools 桥拿不到 → Forge(legacy agent)看不见任何
+   *  host 工具 allow。resolvePersonaForAgent 现已透传(GAP 4 修复),救活此字段。 */
+  tools?: string[];
 }
 
 // Memoize: marketplace location does not change without a server restart, and
@@ -385,7 +389,10 @@ export async function resolvePersonaForAgent(agentId: string): Promise<{
   if (!personaRel) return null;
   const abs = join(mpRoot, personaRel);
   if (!existsSync(abs)) return null;
-  return { personaPath: abs, source: 'marketplace' };
+  // GAP 4 修复:透传 marketplace legacy agent 的 tools glob。此前只有 plugin 分支
+  // 回 tools,legacy(Forge 等)恒无 → host-tools 桥注入空 allow。现透传后,
+  // manifest.json 里 forge 的 "tools":["gen3d:*","character:*","team:*"] 生效。
+  return { personaPath: abs, tools: a.tools, source: 'marketplace' };
 }
 
 function pluginDirOf(pluginId: string): string | null {

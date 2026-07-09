@@ -16,8 +16,8 @@ import { Hono } from 'hono';
 import { getSessionManager } from '../core/session-manager';
 import type { Session } from '../core/session';
 import type { Event } from '../core/types';
-import { ensureAgentScaffold, isValidAgentName } from '../core/agent-scaffold';
-import { resolvePersonaForAgent } from '../agents/loader';
+import { isValidAgentName } from '../core/agent-scaffold';
+import { ensurePersonaScaffold } from '../core/persona-scaffold';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getPathManager } from '../fs/path-manager';
 import { resolveAsk } from '../core/ask-user-registry';
@@ -185,50 +185,24 @@ export function createSessionsRouter() {
       const isSimpleName =
         !candidate.includes('/') && !candidate.includes('#') && isValidAgentName(candidate);
       if (isSimpleName && !session.tree.get(candidate)) {
-        try {
-          const persona = await resolvePersonaForAgent(candidate);
-          if (persona) {
-            await ensureAgentScaffold(session.sid, candidate, {
-              agentType: 'conscious',
-              overrides: {
-                personaFile: persona.personaPath,
-                ...(persona.memoryDir ? { memoryDir: persona.memoryDir } : {}),
-                ...(persona.tools && persona.tools.length > 0
-                  ? { kits: { config: { 'host-tools': { allow: persona.tools } } } }
-                  : {}),
-              },
-            });
-            // Eagerly attach + start so the EventBus queue is registered
-            // before we emit. Without this we'd race the FSWatcher → tree
-            // → scheduler.attachAndStart pipeline and the first event
-            // would route into a void.
-            await session.scheduler.attachAgent(candidate);
-            await session.scheduler.startAgent(candidate);
-          } else {
-            // 找不到 persona —— 既不在 plugin agent 列表，也不在 marketplace
-            // manifest. 不静默吃掉错误：把消息当成「发去不存在的 sub-agent」
-            // 显式 400 给前端，让 ChatPanel 渲染 system 红字而不是把消息塞进
-            // root agent。这能避免「点击 mochi 头像但 forge 接管对话」的
-            // 困惑（现象上是 #91 的另一面：persona 解析失败时旧路径会 fall-
-            // through 到 resolveAgentPath，因为 simple-name 不会命中任何节
-            // 点，最终 target 仍 undefined，事件不带 `to`，被当 root 兜底）。
+        // Lazy persona scaffold (shared with delegate_to_subagent + set_agent_models).
+        const res = await ensurePersonaScaffold(session, candidate);
+        if (!res.ok) {
+          if (res.code === 'scaffold_failed') {
+            process.stderr.write(
+              `[sessions] persona auto-scaffold for '${candidate}' failed: ${res.error}\n`,
+            );
             return c.json({
-              error:
-                `persona '${candidate}' 未找到 —— 不在 marketplace 或 plugin 列表里。` +
-                `请确认 plugin 已安装、id 拼写正确，或换一个已知 agent。`,
-              code: 'persona_not_found',
+              error: `auto-scaffold 失败: ${res.error}`,
+              code: 'scaffold_failed',
               candidate,
-            }, 404);
+            }, 500);
           }
-        } catch (err: any) {
-          process.stderr.write(
-            `[sessions] persona auto-scaffold for '${candidate}' failed: ${err?.message ?? err}\n`,
-          );
-          return c.json({
-            error: `auto-scaffold 失败: ${err?.message ?? String(err)}`,
-            code: 'scaffold_failed',
-            candidate,
-          }, 500);
+          // persona_not_found — surface an explicit 404 instead of silently
+          // falling through to resolveAgentPath (which, for a simple name that
+          // matches no node, leaves target undefined → event routed to root:
+          // the "点击 mochi 头像但 forge 接管对话" #91 confusion).
+          return c.json({ error: res.error, code: 'persona_not_found', candidate }, 404);
         }
       }
       try {

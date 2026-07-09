@@ -60,10 +60,12 @@ import { fileURLToPath } from 'node:url';
 import type { TelemetryRecord } from '@forgeax/types';
 import { createTelemetryFileSink, type TelemetryFileSink } from './telemetry-file-sink';
 
-/** forgeax-core serve 入口:经**包解析**定位(`@forgeax/forgeax-core/cli` 导出 + server 包依赖,
- *  发布后跨包仍成立),monorepo 源码态回退相对路径(发包前过渡)。耦合从「硬编码兄弟路径」
- *  收敛到包依赖,与 sidecar(agent-host)同款。 */
+/** forgeax-core serve 入口:优先 env 显式指定(逃生闸/自定义部署),否则经**包解析**定位
+ *  (`@forgeax/forgeax-core/cli` 导出 —— 发布/tarball 后跨包成立),最后 monorepo 源码态回退
+ *  相对路径(发包前过渡)。耦合从「硬编码兄弟路径」收敛到包依赖,与 sidecar(agent-host)同款。 */
 function resolveCoreServeEntry(): string {
+  const override = process.env.FORGEAX_CORE_SERVE_ENTRY?.trim();
+  if (override) return resolve(override);
   try {
     return fileURLToPath(import.meta.resolve('@forgeax/forgeax-core/cli'));
   } catch {

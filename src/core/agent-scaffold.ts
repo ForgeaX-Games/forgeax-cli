@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { getPathManager } from "../fs/path-manager";
 import { deepMerge } from "../utils/deep-merge";
 import { AGENT_DEFAULTS } from "../defaults/agent-json";
+import { resolvePersonaForAgent } from "../agents/loader";
 import type { AgentJson } from "./types";
 
 // ─── 类型 ────────────────────────────────────────────────────────────────────
@@ -125,10 +126,34 @@ export async function ensureAgentScaffold(
   // 1) agent.json
   if (!existsSync(layer.agentJson())) {
     const base = agentType === "script" ? scriptAgentDefaults() : (AGENT_DEFAULTS as unknown as AgentJson);
-    const merged = opts.overrides
+    // 单一收口:host-tools allow 从 agent 的 manifest/persona 派生(SSOT),在这里
+    // 注入——而不是让每个建 session 的调用方各自记得传。此前只有 sessions.ts
+    // bootstrap / delegate 这几条路注入,别的路(reload 新建 session、裸 mkdir
+    // watcher、messages 首建)漏注 → 该 agent 的 host_tool_bridge allow 为空,
+    // 连 gen3d:* / team:* 都不下发给内核(codebuddy/cc/codex),模型「看不到工具」。
+    // 收口到唯一的 scaffolder 后,任何路建出的 agent 都拿到默认 allow。
+    // 调用方显式传了 host-tools allow → 尊重之(不覆盖);否则按 manifest 补默认。
+    let overrides = opts.overrides;
+    const callerAllow = (overrides as { kits?: { config?: { ['host-tools']?: { allow?: unknown } } } } | undefined)
+      ?.kits?.config?.['host-tools']?.allow;
+    if (agentType !== "script" && !callerAllow) {
+      const agentName = agentPath.split("/").pop() ?? agentPath;
+      try {
+        const persona = await resolvePersonaForAgent(agentName);
+        if (persona?.tools && persona.tools.length > 0) {
+          overrides = deepMerge(
+            { kits: { config: { "host-tools": { allow: persona.tools } } } },
+            (overrides ?? {}) as unknown as Record<string, unknown>,
+          ) as unknown as Partial<AgentJson>;
+        }
+      } catch {
+        /* best-effort: persona 解析失败不挡 scaffold(退化为空 allow,与旧行为一致) */
+      }
+    }
+    const merged = overrides
       ? (deepMerge(
           base as unknown as Record<string, unknown>,
-          opts.overrides as unknown as Record<string, unknown>,
+          overrides as unknown as Record<string, unknown>,
         ) as unknown as AgentJson)
       : base;
     await writeFile(layer.agentJson(), JSON.stringify(merged, null, 2) + "\n", "utf-8");

@@ -1,34 +1,33 @@
 {
   "name": "forgeax-cli",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "description": "ForgeaX reusable orchestration layer: R2 compose/resolve/toWire/checkTool, session/scheduler/tree, soul (digital life), kits, llm, kernel adaptors, ledger, HTTP api routers, ws, builtin kits/personas.",
-  "main": "src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./brand": "./src/brand/index.ts",
-    "./cli-providers": "./src/cli-providers/index.ts",
-    "./builtin/*": "./builtin/*.ts",
-    "./lib/llm-gateway": "./src/lib/llm-gateway/index.ts",
-    "./lib/image-gateway": "./src/lib/image-gateway/index.ts",
-    "./*": ["./src/*.ts", "./src/*/index.ts"]
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./kernel/forgeax-core-kernel": {
+      "types": "./dist/kernel/forgeax-core-kernel.d.ts",
+      "import": "./dist/kernel/forgeax-core-kernel.js"
+    }
   },
-  "bin": {
-    "forgeax-pack": "./bin/forgeax-pack",
-    "forge": "./bin/forge"
-  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "build": "bun build.mjs",
+    "pack:tgz": "npm pack",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src",
     "check:business-agnostic": "bun scripts/check-business-agnostic.mjs"
   },
   "dependencies": {
-    "@forgeax/agent-host": "workspace:*",
-    "@forgeax/agent-runtime": "workspace:*",
-    "@forgeax/platform-io": "workspace:*",
-    "@forgeax/types": "workspace:*",
     "@google/genai": "^1.0.0",
     "chokidar": "^4.0.0",
     "hono": "^4.6.0",
