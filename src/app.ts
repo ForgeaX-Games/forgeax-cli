@@ -12,7 +12,6 @@
 import { Hono } from 'hono';
 
 import { createFilesRouter } from '@forgeax/platform-io';
-import { createAssetsRouter } from '@forgeax/platform-io';
 import { createProjectsRouter } from '@forgeax/platform-io';
 import { createFsBrowserRouter } from '@forgeax/platform-io';
 import { createWorkspacesRouter } from './api/workspaces';
@@ -172,7 +171,6 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
 
   app.route('/api/files', createFilesRouter());
   app.route('/api/games', createGameAssetsRouter());
-  app.route('/api/assets', createAssetsRouter());
   app.route('/api/projects', createProjectsRouter());
   app.route('/api/fs', createFsBrowserRouter());
   app.route('/api/workspaces', createWorkspacesRouter({
