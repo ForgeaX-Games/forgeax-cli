@@ -69,6 +69,10 @@ export function toWireEvents(ev: KernelEvent, st: WireFoldState): ChatEvent[] {
     case 'x.subagent.tool':
     case 'x.subagent.done':
       return [];
+    // 可观测性事件(压缩边界 / API 重试),wire ChatEvent 无对应 → 丢弃
+    case 'compact_boundary':
+    case 'api_retry':
+      return [];
     default: {
       const _never: never = ev;
       return _never;
