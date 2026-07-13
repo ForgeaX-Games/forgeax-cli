@@ -38,6 +38,19 @@
         },
         "required": ["actionId"]
       }
+    },
+    {
+      "name": "ui_screenshot",
+      "description": "Capture a rendered screenshot of the connected UI surface — fallback visual evidence, not the primary perception channel. Prefer ui_snapshot (text manifest + state summary) to observe the surface; reach for pixels only when text cannot answer (visual layout, rendering glitches). Best-effort: embedded regions such as cross-origin frames or GPU-composited canvases may render blank, and web-font text may fall back to system fonts — judge structure via ui_snapshot, not pixels. On success the result contains the image plus { width, height } metadata. Returns { captured:false, reason } when the surface is connected but pixel capture is unsupported in the current environment (do not retry), and { unavailable, reason } when no UI surface is connected.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "'app' (default) captures the whole surface; 'panel:<id>' captures one docked panel region by its panel id"
+          }
+        }
+      }
     }
   ]
 }

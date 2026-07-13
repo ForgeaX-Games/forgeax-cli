@@ -20,8 +20,8 @@
  *
  *  (mcp-config 形态即 command+env 同上;工具以 mcp__fxt__* 出现。)
  *  收口环境变量:
- *    FORGEAX_FXT_EXPOSE=ui_snapshot,ui_invoke   只暴露白名单内工具(外部驱动面
- *      建议只开 ui_*;留空 = 全量,内核 profile 路径的历史行为)。
+ *    FORGEAX_FXT_EXPOSE=ui_snapshot,ui_invoke,ui_screenshot   只暴露白名单内工具
+ *      (外部驱动面建议只开 ui_*;留空 = 全量,内核 profile 路径的历史行为)。
  *    FORGEAX_DISABLE_PERCEPTION=1 / FORGEAX_DISABLE_UI_BRIDGE=1  整类摘除。
  *  安全边界:本进程只有「查询/调用」两类工具;ui-lease / ui-manifest 写端点
  *  (权限闸的信任锚)**刻意不在** MCP 面上,外部 client 无法改写权限声明。
@@ -280,7 +280,7 @@ if (process.env.FORGEAX_DISABLE_PERCEPTION === '1') {
   delete TOOLS.capture_frame;
 }
 
-// ── UI 语义操作层(产品 AI 化 P0):ui_snapshot / ui_invoke ────────────────
+// ── UI 语义操作层(产品 AI 化 P0):ui_snapshot / ui_invoke / ui_screenshot ──
 // 契约 SSOT = ../ui-bridge-contract.json(与 compose-turn-request.ts 共读同一文件,
 // 各内核看到字节一致的工具说明)。
 // 执行**必须经 bridgeCall → 宿主 /:sid/kernel-tool**,而不是像 world/frame 那样
@@ -307,6 +307,35 @@ for (const spec of UI_CONTRACT.tools ?? []) {
       run: async (args) =>
         (await bridgeCall('ui_invoke', { actionId: args?.actionId ?? null, args: args?.args ?? {} })).text,
     };
+  } else if (spec?.name === 'ui_screenshot') {
+    // ui_screenshot(P3)只读兜底证据,同 ui_snapshot 走 kernel-tool 闸。宿主成功时
+    // 回 ContentPart 数组([{type:'image',data,mimeType},{type:'text',text:meta}]),
+    // 这里翻成 MCP image content block(base64 不当文本喂模型);其余形状(unavailable /
+    // captured:false)原样文本透传。
+    TOOLS.ui_screenshot = {
+      spec,
+      run: async (args) => {
+        const r = await bridgeCall('ui_screenshot', args ?? {});
+        if (r.isError) return r.text;
+        try {
+          const parts = JSON.parse(r.text);
+          // 守卫不绑定 image 在数组中的位置(§2.5:勿硬编码生产端形状),只认「存在一枚
+          // 带 string data 的 image part」;下方 map 逐项按 p.type 处理,与顺序无关。
+          if (Array.isArray(parts) && parts.some((p) => p?.type === 'image' && typeof p?.data === 'string')) {
+            return {
+              content: parts.map((p) =>
+                p.type === 'image'
+                  ? { type: 'image', data: p.data, mimeType: p.mimeType ?? 'image/png' }
+                  : { type: 'text', text: String(p.text ?? '') },
+              ),
+            };
+          }
+        } catch {
+          /* 非 JSON → 按文本透传 */
+        }
+        return r.text;
+      },
+    };
   }
 }
 // FORGEAX_DISABLE_UI_BRIDGE=1 → 整体摘除 ui_* 工具(per-kernel profile 开关,同
@@ -314,6 +343,7 @@ for (const spec of UI_CONTRACT.tools ?? []) {
 if (process.env.FORGEAX_DISABLE_UI_BRIDGE === '1') {
   delete TOOLS.ui_snapshot;
   delete TOOLS.ui_invoke;
+  delete TOOLS.ui_screenshot;
 }
 
 // P2-14 对外驱动面收口:FORGEAX_FXT_EXPOSE=名单(逗号分隔)→ 只保留白名单内工具。
@@ -366,10 +396,15 @@ function handle(msg) {
     dbg(`call ${name} ${JSON.stringify(args)}`);
     if (tool) {
       // 内置工具:本地执行(支持 sync 或 async run —— query_world/capture_frame 走 HTTP 取数)。
+      // run 返回 { content: [...] } → 原样作 MCP result(ui_screenshot 回 image block);
+      // 其余返回值按文本包一层(既有工具零回归)。
       Promise.resolve()
         .then(() => tool.run(args))
         .then((out) => {
-          send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: String(out) }] } });
+          const result = out && typeof out === 'object' && Array.isArray(out.content)
+            ? { content: out.content }
+            : { content: [{ type: 'text', text: String(out) }] };
+          send({ jsonrpc: '2.0', id, result });
         })
         .catch((e) => {
           send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: `error: ${e?.message ?? e}` }] } });

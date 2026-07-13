@@ -152,6 +152,9 @@ export function checkKernelTool(
   // classifyTool 的子串误分类('snapshot' 含 'sh' → 命中 exec),否则 imported 内核
   // 每次只读 snapshot 都会误弹 exec 确认卡。
   if (toolName === 'ui_snapshot') return decide('allow', 'read');
+  // ui_screenshot 同理:只读的像素兜底证据(无副作用),归 read 直放。'screenshot'
+  // 同样含 'sh' → 不特判会误落 exec(方案 §7 风险 8 预告的花絮,按预告特判)。
+  if (toolName === 'ui_screenshot') return decide('allow', 'read');
 
   const cap = classifyTool(toolName);
 

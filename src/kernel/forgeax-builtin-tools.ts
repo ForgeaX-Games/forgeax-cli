@@ -42,6 +42,7 @@ const BUILTIN_NAMES: ReadonlySet<string> = new Set([
   'remember',
   'ui_snapshot',
   'ui_invoke',
+  'ui_screenshot',
 ]);
 
 /** 该工具是否为内置 forgeax 工具(宿主侧有实现,不查 agent kit 注册表)。 */
@@ -50,7 +51,7 @@ export function isForgeaxBuiltinTool(name: string): boolean {
 }
 
 /** 感知/UI 往返的 query kind(闭合 union:server 端点与本模块共守)。 */
-export type PerceptionKind = 'world' | 'frame' | 'ui_snapshot' | 'ui_invoke';
+export type PerceptionKind = 'world' | 'frame' | 'ui_snapshot' | 'ui_invoke' | 'ui_screenshot';
 
 /** 内置工具执行上下文(显式声明的输入,Pipeline Isolation)。 */
 export interface BuiltinToolCtx {
@@ -70,6 +71,8 @@ export interface BuiltinToolCtx {
 const PERCEPTION_TIMEOUT_MS = 8_000;
 /** ui_invoke 通道默认超时(略宽于取数:invoke 要等 action 执行/受理)。 */
 const UI_INVOKE_TIMEOUT_MS = 10_000;
+/** ui_screenshot 通道超时(DOM 序列化 + 栅格化比取数慢,再宽一档)。 */
+const UI_SCREENSHOT_TIMEOUT_MS = 15_000;
 
 function memoryRef(ctx: BuiltinToolCtx): LayeredMemoryRef {
   return { root: soulMemoryRoot(ctx.projectRoot, ctx.agentId), ...(ctx.game ? { game: ctx.game } : {}) };
@@ -114,7 +117,7 @@ async function perceptionQuery(
   timeoutMs: number = PERCEPTION_TIMEOUT_MS,
 ): Promise<unknown> {
   if (!ctx.eventBus) return { unavailable: true, reason: 'no event bus' };
-  const isUiKind = kind === 'ui_snapshot' || kind === 'ui_invoke';
+  const isUiKind = kind === 'ui_snapshot' || kind === 'ui_invoke' || kind === 'ui_screenshot';
   if (isUiKind && !ctx.sid) return { unavailable: true, reason: 'no session id for ui bridge' };
   const reqId = randomUUID();
   ctx.eventBus.publish(
@@ -152,6 +155,25 @@ export async function runForgeaxBuiltinTool(
     // 的 ActionRegistry。契约(schema/description)SSOT = ui-bridge-contract.json。
     case 'ui_snapshot':
       return perceptionQuery(ctx, 'ui_snapshot', args ?? {});
+    case 'ui_screenshot': {
+      // P3:兜底证据通道。UI 侧成功回 { dataUrl, width, height, ... } → 转 ContentPart
+      // 数组([image, text meta]),原生内核路径经 createToolResultMessage 变成真正的
+      // image content block(模型看得到像素);unavailable / captured:false 原样透传
+      // (JSON 文本,模型按契约 description 处理,勿重试)。
+      const out = await perceptionQuery(ctx, 'ui_screenshot', args ?? {}, UI_SCREENSHOT_TIMEOUT_MS);
+      if (out && typeof out === 'object' && typeof (out as { dataUrl?: unknown }).dataUrl === 'string') {
+        const { dataUrl, ...meta } = out as { dataUrl: string } & Record<string, unknown>;
+        const m = /^data:(image\/[a-z0-9+.-]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+        if (m) {
+          return [
+            { type: 'image', data: m[2]!, mimeType: m[1]! },
+            { type: 'text', text: JSON.stringify(meta) },
+          ];
+        }
+        return { captured: false, reason: 'surface returned a malformed image data URL', ...meta };
+      }
+      return out;
+    }
     case 'ui_invoke': {
       // 超时按 manifest 里 action 声明的 timeoutMs 放宽(clamp [1s,30s]);慢 action 的
       // 正道是 UI 侧快速回 accepted(受理即答),不是拉长超时硬等——见契约 description。

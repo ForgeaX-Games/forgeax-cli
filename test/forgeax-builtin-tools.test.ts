@@ -20,7 +20,7 @@ afterAll(() => {
 
 describe('isForgeaxBuiltinTool', () => {
   test('认得内置工具(memory/echo/ui_*),不认 kit / seam / 未知工具', () => {
-    for (const n of ['remember', 'memory_search', 'echo', 'ui_snapshot', 'ui_invoke']) {
+    for (const n of ['remember', 'memory_search', 'echo', 'ui_snapshot', 'ui_invoke', 'ui_screenshot']) {
       expect(isForgeaxBuiltinTool(n)).toBe(true);
     }
     // 游戏语义工具已迁产品壳经 HostToolSpec seam 注入(P1-7),不再是编排层内置。
@@ -104,5 +104,14 @@ describe('ui_* 优雅降级(UI 语义操作层)', () => {
     };
     expect(invoke.unavailable).toBe(true);
     expect(String(invoke.reason)).toContain('session');
+  });
+
+  test('无 eventBus / 无 sid → ui_screenshot 返回 unavailable(不抛,不转 ContentPart)', async () => {
+    const noBus = { projectRoot: join(TMP, 'p-perc'), agentId: 'forge' };
+    const shot = (await runForgeaxBuiltinTool('ui_screenshot', {}, noBus)) as { unavailable: boolean };
+    expect(shot.unavailable).toBe(true);
+    const noSid = { ...noBus, eventBus: { publish: () => {} } };
+    const shot2 = (await runForgeaxBuiltinTool('ui_screenshot', {}, noSid)) as { unavailable: boolean };
+    expect(shot2.unavailable).toBe(true);
   });
 });

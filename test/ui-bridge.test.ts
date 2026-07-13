@@ -16,7 +16,7 @@ import {
   firstClassUiToolSpecs,
   resolveFirstClassUiTool,
 } from '../src/api/lib/ui-manifest-registry';
-import { checkKernelTool } from '../src/kernel/trust-gate';
+import { checkKernelTool, classifyTool } from '../src/kernel/trust-gate';
 import { registerPerception, resolvePerception } from '../src/api/lib/perception-registry';
 import { runForgeaxBuiltinTool } from '../src/kernel/forgeax-builtin-tools';
 import { initOrchestrationSeams, resetOrchestrationSeams, getHostTool, getHostTools } from '../src/orchestration-seams';
@@ -168,10 +168,63 @@ describe('perception-registry — ui_* 回灌的 lease 把关', () => {
   });
 });
 
+describe('ui_screenshot 往返 — dataUrl → ContentPart 图像块(P3)', () => {
+  /** 桩 eventBus:捕获 perception:query 的 reqId,异步用给定 snapshot 回灌
+   *  (perceptionQuery 先 publish 后 registerPerception,故必须延后 resolve)。 */
+  function replyingBus(reply: unknown, lease: string) {
+    return {
+      publish(event: { payload?: unknown }) {
+        const reqId = (event.payload as { reqId?: string })?.reqId;
+        if (reqId) setTimeout(() => resolvePerception(reqId, reply, lease), 0);
+      },
+    };
+  }
+
+  test('成功回 dataUrl → [image, text meta] ContentPart 数组(模型看得到像素)', async () => {
+    const lease = leaseFor(SID);
+    const ctx = {
+      projectRoot: '/tmp',
+      agentId: 'forge',
+      sid: SID,
+      eventBus: replyingBus({ dataUrl: 'data:image/jpeg;base64,QUJD', width: 800, height: 600 }, lease),
+    };
+    const out = (await runForgeaxBuiltinTool('ui_screenshot', { target: 'app' }, ctx)) as Array<Record<string, unknown>>;
+    expect(Array.isArray(out)).toBe(true);
+    expect(out[0]).toEqual({ type: 'image', data: 'QUJD', mimeType: 'image/jpeg' });
+    expect(out[1]!.type).toBe('text');
+    expect(JSON.parse(String(out[1]!.text))).toEqual({ width: 800, height: 600 });
+  });
+
+  test('畸形 dataUrl → captured:false(fail-soft,不产出坏 image part)', async () => {
+    const lease = leaseFor(SID);
+    const ctx = {
+      projectRoot: '/tmp',
+      agentId: 'forge',
+      sid: SID,
+      eventBus: replyingBus({ dataUrl: 'not-a-data-url', width: 1 }, lease),
+    };
+    const out = (await runForgeaxBuiltinTool('ui_screenshot', {}, ctx)) as { captured?: boolean; width?: number };
+    expect(out.captured).toBe(false);
+    expect(out.width).toBe(1);
+  });
+
+  test('UI 侧回 captured:false / unavailable → 原样透传', async () => {
+    const lease = leaseFor(SID);
+    const ctx = {
+      projectRoot: '/tmp',
+      agentId: 'forge',
+      sid: SID,
+      eventBus: replyingBus({ captured: false, reason: 'canvas tainted' }, lease),
+    };
+    const out = (await runForgeaxBuiltinTool('ui_screenshot', {}, ctx)) as { captured: boolean; reason: string };
+    expect(out).toEqual({ captured: false, reason: 'canvas tainted' });
+  });
+});
+
 describe('ui-bridge-contract — 契约单源与产品中立', () => {
-  test('两个工具在契约里且 schema 齐全', () => {
+  test('三个工具在契约里且 schema 齐全', () => {
     const names = uiBridgeContract.tools.map((t) => t.name).sort();
-    expect(names).toEqual(['ui_invoke', 'ui_snapshot']);
+    expect(names).toEqual(['ui_invoke', 'ui_screenshot', 'ui_snapshot']);
     for (const t of uiBridgeContract.tools) {
       expect(typeof t.description).toBe('string');
       expect(t.description.length).toBeGreaterThan(40);
@@ -196,6 +249,28 @@ describe('ui-bridge-contract — 契约单源与产品中立', () => {
     const snap = uiBridgeContract.tools.find((t) => t.name === 'ui_snapshot')!;
     const detail = (snap.inputSchema as { properties: { detail: { enum: string[] } } }).properties.detail;
     expect(detail.enum).toContain('a11y');
+  });
+
+  test('ui_screenshot 契约(P3):兜底定位 + captured:false 勿重试 + panel target', () => {
+    const shot = uiBridgeContract.tools.find((t) => t.name === 'ui_screenshot')!;
+    expect(shot.description).toMatch(/fallback/i);
+    expect(shot.description).toMatch(/ui_snapshot/); // 主感知通道指回文本 snapshot
+    expect(shot.description).toMatch(/do not retry/i);
+    const target = (shot.inputSchema as { properties: { target: { description: string } } }).properties.target;
+    expect(target.description).toContain('panel:');
+  });
+});
+
+describe('trust-gate — ui_screenshot read 特判(P3)', () => {
+  test("classifyTool 会把 'screenshot' 误分 exec(含 'sh');特判后 allow/read 直放", () => {
+    // 花絮成立的前提(方案 §7 风险 8):子串分类确实误判 —— 若哪天分类器改了,这条
+    // 提醒重审特判是否还需要。
+    expect(classifyTool('ui_screenshot')).toBe('exec');
+    for (const tier of ['own', 'imported'] as const) {
+      const d = checkKernelTool(tier, 'ui_screenshot', { sid: SID });
+      expect(d.outcome).toBe('allow');
+      expect(d.capability).toBe('read');
+    }
   });
 });
 
