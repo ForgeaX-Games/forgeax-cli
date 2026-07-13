@@ -18,12 +18,14 @@
  */
 import type {
   KernelEvent,
+  KernelModelInfo,
   PermissionCall,
   PermissionDecision,
   PermissionMode,
   TurnDoneReason,
   TurnRequest,
 } from '@forgeax/agent-runtime';
+import { spawn } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
@@ -31,6 +33,116 @@ import type { ChatEvent } from '../cli-providers/types';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 
 const SERVER_PORT = process.env.FORGEAX_SERVER_PORT ?? '18900';
+
+// ─── 模型目录(CC-isms) ──────────────────────────────────────────────
+// 真实通道 = stream-json 控制协议:`<binary> -p --input-format stream-json
+// --output-format stream-json --verbose` 起进程后发 `initialize` control_request,
+// 响应里的 `models` 就是 TUI `/model` 展示的同一份列表(CLI 内部按订阅/企业配置/
+// env 现算,无独立 list 子命令,SDK 的 getAvailableModels 也走这条)。零 LLM 调用。
+// cbc 是 cc 近同源分叉,同协议直接复用({@link probeStreamJsonModels})。
+// 下方静态表只是回退链最后一层兜底(探测 + last-known 都失败时)。
+
+export const CLAUDE_CODE_DRIVER_LABEL = 'claude-code · subscription runtime · no local cost';
+
+export const CLAUDE_CODE_FALLBACK_MODELS = [
+  'opus',
+  'sonnet',
+  'claude-opus-4-8',
+  'claude-sonnet-5',
+  'claude-4.6-sonnet-medium',
+];
+
+/** initialize 响应里的单个模型条目。cc 用 `value/displayName/description`,
+ *  cbc(分叉)用 `id/name` —— 两种拼写都接。 */
+interface StreamJsonModelRow {
+  id?: string;
+  value?: string;
+  name?: string;
+  displayName?: string;
+  description?: string;
+}
+
+/**
+ * 经 stream-json 控制面向 CLI 要真实模型目录(cc 与 cbc 共用)。
+ *
+ * 安全:initialize 响应还带 `account`(内含登录 token)—— 本函数**只取
+ * models 数组**,其余字段一律丢弃,绝不落盘/打日志(last-known 持久化的
+ * 是本函数返回的裁剪结果,不含 account)。
+ *
+ * 生命周期:拿到响应或超时即 SIGTERM;stdin 保持打开(部分版本收到 EOF
+ * 会在应答前退出,由 kill 统一收口)。
+ */
+export function probeStreamJsonModels(binary: string, timeoutMs = 15000): Promise<KernelModelInfo[]> {
+  return new Promise((resolve, reject) => {
+    const reqId = `fx-models-${Date.now().toString(36)}`;
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(binary, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (err) {
+      reject(err as Error);
+      return;
+    }
+
+    let buf = '';
+    let stderrTail = '';
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error(
+        `${binary} stream-json initialize timed out after ${timeoutMs}ms${stderrTail ? `: ${stderrTail.slice(-300)}` : ''}`,
+      )));
+    }, timeoutMs);
+
+    child.on('error', (err) => finish(() => reject(err)));
+    child.on('exit', (code) => {
+      finish(() => reject(new Error(
+        `${binary} exited (code=${code}) before answering initialize${stderrTail ? `: ${stderrTail.slice(-300)}` : ''}`,
+      )));
+    });
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (c: string) => { stderrTail = (stderrTail + c).slice(-2000); });
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      buf += chunk;
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let msg: { type?: string; response?: { subtype?: string; request_id?: string; response?: { models?: StreamJsonModelRow[] }; error?: string } };
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.type !== 'control_response' || msg.response?.request_id !== reqId) continue;
+        if (msg.response.subtype !== 'success') {
+          finish(() => reject(new Error(`initialize control_response error: ${msg.response?.error ?? 'unknown'}`)));
+          return;
+        }
+        const rows = Array.isArray(msg.response.response?.models) ? msg.response.response.models : [];
+        const models: KernelModelInfo[] = rows
+          .map((m) => {
+            const id = (m.id ?? m.value ?? '').trim();
+            if (!id) return null;
+            const label = (m.name ?? m.displayName ?? '').trim();
+            return { id, ...(label && label !== id ? { label } : {}) };
+          })
+          .filter((m): m is KernelModelInfo => m !== null);
+        finish(() => resolve(models));
+        return;
+      }
+    });
+
+    child.stdin?.on('error', () => { /* EPIPE — finish 已统一收口 */ });
+    child.stdin?.write(JSON.stringify({ type: 'control_request', request_id: reqId, request: { subtype: 'initialize' } }) + '\n');
+  });
+}
 
 // ─── per-turn permission gate registry(B-4) ────────────────────────────
 //

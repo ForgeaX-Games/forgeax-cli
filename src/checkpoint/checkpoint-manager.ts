@@ -208,29 +208,33 @@ export class CheckpointManager {
   // ─── message snapshot(A 组)────────────────────────────────────────────
 
   /** 用户消息 emit 前调用。失败不抛(快照失败不阻塞聊天,只是该消息无
-   *  代码回退能力);纯会话(无游戏目录)记录 manifestId=null,会话回退仍可用。 */
-  snapshotForMessage(session: Session, msgId: string): void {
+   *  代码回退能力);纯会话(无游戏目录)记录 manifestId=null,会话回退仍可用。
+   *  async 快照后必须进 per-session 锁:否则 walk 可与同 session 的 rewind/restore
+   *  交错,把半 restore 的盘面拍成 manifest。 */
+  snapshotForMessage(session: Session, msgId: string): Promise<void> {
     const sc = this.ensure(session);
-    let manifestId: string | null = null;
-    if (sc.store && sc.gameDir) {
-      try {
-        manifestId = sc.store.snapshot(sc.gameDir, { sid: session.sid, msgId }).id;
-      } catch (err) {
-        process.stderr.write(
-          `[checkpoint] snapshot for ${session.sid}/${msgId} failed: ${(err as Error).message}\n`,
-        );
-        return; // 连索引都不记 —— UI 不出回退入口
+    return this.withLock(sc, async () => {
+      let manifestId: string | null = null;
+      if (sc.store && sc.gameDir) {
+        try {
+          manifestId = (await sc.store.snapshot(sc.gameDir, { sid: session.sid, msgId })).id;
+        } catch (err) {
+          process.stderr.write(
+            `[checkpoint] snapshot for ${session.sid}/${msgId} failed: ${(err as Error).message}\n`,
+          );
+          return; // 连索引都不记 —— UI 不出回退入口
+        }
       }
-    }
-    const rec: MessageRecord = { kind: "message", msgId, ts: Date.now(), manifestId };
-    try {
-      this.record(sc, rec);
-    } catch (err) {
-      process.stderr.write(`[checkpoint] index append failed: ${(err as Error).message}\n`);
-      return;
-    }
-    if (!sc.messages.has(msgId)) sc.order.push(msgId);
-    sc.messages.set(msgId, rec);
+      const rec: MessageRecord = { kind: "message", msgId, ts: Date.now(), manifestId };
+      try {
+        this.record(sc, rec);
+      } catch (err) {
+        process.stderr.write(`[checkpoint] index append failed: ${(err as Error).message}\n`);
+        return;
+      }
+      if (!sc.messages.has(msgId)) sc.order.push(msgId);
+      sc.messages.set(msgId, rec);
+    });
   }
 
   // ─── queries ─────────────────────────────────────────────────────────────
@@ -248,7 +252,7 @@ export class CheckpointManager {
   }
 
   /** 确认弹窗的 diff 预览。 */
-  preview(session: Session, msgId: string): DiffStats | { error: string; status: number } {
+  async preview(session: Session, msgId: string): Promise<DiffStats | { error: string; status: number }> {
     const sc = this.ensure(session);
     const rec = sc.messages.get(msgId);
     if (!rec) return { error: `unknown msgId: ${msgId}`, status: 404 };
@@ -312,7 +316,7 @@ export class CheckpointManager {
       let preManifestId: string | null = inheritedPre;
       if (!preManifestId && sc.store && sc.gameDir) {
         try {
-          preManifestId = sc.store.snapshot(sc.gameDir, { sid: session.sid, kind: "pre-rewind" }).id;
+          preManifestId = (await sc.store.snapshot(sc.gameDir, { sid: session.sid, kind: "pre-rewind" })).id;
         } catch (err) {
           return { error: `pre-rewind snapshot failed: ${(err as Error).message}`, status: 500 };
         }
@@ -326,8 +330,8 @@ export class CheckpointManager {
       if (mode !== "conversation" && sc.store && sc.gameDir && rec.manifestId) {
         const target = sc.store.loadManifest(rec.manifestId);
         if (!target) return { error: `manifest missing for ${msgId}`, status: 410 };
-        const dirty = wasPending ? this.dirtySet(sc) : new Set<string>();
-        const res = sc.store.restore(sc.gameDir, target, { exclude: dirty });
+        const dirty = wasPending ? await this.dirtySet(sc) : new Set<string>();
+        const res = await sc.store.restore(sc.gameDir, target, { exclude: dirty });
         filesChanged = [...res.written, ...res.deleted];
         keptDirty = res.skippedDirty;
         sc.lastRestoreManifestId = rec.manifestId;
@@ -371,8 +375,8 @@ export class CheckpointManager {
       if (pending.preManifestId && sc.store && sc.gameDir) {
         const pre = sc.store.loadManifest(pending.preManifestId);
         if (!pre) return { error: `pre-rewind manifest missing`, status: 410 };
-        const dirty = this.dirtySet(sc);
-        const res = sc.store.restore(sc.gameDir, pre, { exclude: dirty });
+        const dirty = await this.dirtySet(sc);
+        const res = await sc.store.restore(sc.gameDir, pre, { exclude: dirty });
         keptDirty = res.skippedDirty;
         sc.lastRestoreManifestId = pending.preManifestId;
         sc.lastOp = {
@@ -416,13 +420,13 @@ export class CheckpointManager {
       // safety 快照(第 1 层):同步成功后才触盘,失败整体中止
       let safetyManifestId: string;
       try {
-        safetyManifestId = sc.store.snapshot(sc.gameDir, { sid: session.sid, kind: "safety" }).id;
+        safetyManifestId = (await sc.store.snapshot(sc.gameDir, { sid: session.sid, kind: "safety" })).id;
       } catch (err) {
         return { error: `safety snapshot failed, aborted: ${(err as Error).message}`, status: 500 };
       }
       const target = sc.store.loadManifest(op.restoreTargetManifestId);
       if (!target) return { error: "restore target manifest missing", status: 410 };
-      sc.store.restore(sc.gameDir, target, { only: files });
+      await sc.store.restore(sc.gameDir, target, { only: files });
       const fileList = [...files];
       this.record(sc, { kind: "overwrite", boundaryId, safetyManifestId, files: fileList, ts: Date.now() });
       op.overwrite = { safetyManifestId, files: fileList };
@@ -451,7 +455,7 @@ export class CheckpointManager {
       const safety = sc.store.loadManifest(op.overwrite.safetyManifestId);
       if (!safety) return { error: "safety manifest missing", status: 410 };
       const files = new Set(op.overwrite.files);
-      sc.store.restore(sc.gameDir, safety, { only: files });
+      await sc.store.restore(sc.gameDir, safety, { only: files });
       this.record(sc, { kind: "overwrite-undo", boundaryId, ts: Date.now() });
       op.keptDirty = op.overwrite.files;
       op.overwrite = null;
@@ -464,28 +468,31 @@ export class CheckpointManager {
     });
   }
 
-  /** 新 user_input 到达 → 定格。messages 路由在 emit 前调用。 */
-  finalizePending(session: Session): void {
+  /** 新 user_input 到达 → 定格。messages 路由在 emit 前调用。进 per-session 锁:
+   *  async 化后不能与 in-flight 的 rewind/cancel 交错清挂起态。 */
+  finalizePending(session: Session): Promise<void> {
     const sc = this.ensure(session);
-    if (!sc.pending) return;
-    // target/mode 随事件回带:UI 的置灰段移除靠它定位,且不能依赖客户端是否已先
-    // 处理过 rewind:done —— done(走 /rewind 的 WS)与 finalized(走 /messages 的 WS)
-    // 跨双通道到达顺序不保证,客户端若在 done 落地前收到 finalized,缺 target 就漏删。
-    const { boundaryId, targetMsgId, mode } = sc.pending;
-    this.record(sc, { kind: "rewind-status", boundaryId, status: "finalized", ts: Date.now() });
-    sc.pending = null;
-    this.notify(session, "rewind:finalized", { boundaryId, targetMsgId, mode });
+    return this.withLock(sc, async () => {
+      if (!sc.pending) return;
+      // target/mode 随事件回带:UI 的置灰段移除靠它定位,且不能依赖客户端是否已先
+      // 处理过 rewind:done —— done(走 /rewind 的 WS)与 finalized(走 /messages 的 WS)
+      // 跨双通道到达顺序不保证,客户端若在 done 落地前收到 finalized,缺 target 就漏删。
+      const { boundaryId, targetMsgId, mode } = sc.pending;
+      this.record(sc, { kind: "rewind-status", boundaryId, status: "finalized", ts: Date.now() });
+      sc.pending = null;
+      this.notify(session, "rewind:finalized", { boundaryId, targetMsgId, mode });
+    });
   }
 
   // ─── internals ───────────────────────────────────────────────────────────
 
   /** 挂起态脏检测:diff(当前盘, 上次 restore 落点)→ changed + onlyOnDisk。
    *  无 restore 基准(从未 code 回退)→ 空集。 */
-  private dirtySet(sc: SessionCheckpoints): Set<string> {
+  private async dirtySet(sc: SessionCheckpoints): Promise<Set<string>> {
     if (!sc.store || !sc.gameDir || !sc.lastRestoreManifestId) return new Set();
     const baseline = sc.store.loadManifest(sc.lastRestoreManifestId);
     if (!baseline) return new Set();
-    const d = sc.store.diffDiskVsManifest(sc.gameDir, baseline);
+    const d = await sc.store.diffDiskVsManifest(sc.gameDir, baseline);
     return new Set([...d.changed, ...d.onlyOnDisk]);
   }
 

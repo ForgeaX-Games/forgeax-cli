@@ -39,46 +39,85 @@ function countBlobs(store: SnapshotStore): number {
 }
 
 describe("SnapshotStore", () => {
-  test("snapshot 覆盖全目录 + ignore 规则", () => {
+  test("snapshot 覆盖全目录 + ignore 规则", async () => {
     write("main.ts", "console.log(1)\n");
     write("src/util.ts", "export const x = 1\n");
     mkdirSync(join(gameDir, "node_modules/pkg"), { recursive: true });
     writeFileSync(join(gameDir, "node_modules/pkg/index.js"), "ignored");
     writeFileSync(join(gameDir, ".DS_Store"), "ignored");
     const store = new SnapshotStore(storeDir);
-    const m = store.snapshot(gameDir);
+    const m = await store.snapshot(gameDir);
     expect(Object.keys(m.files).sort()).toEqual(["main.ts", "src/util.ts"]);
     expect(store.loadManifest(m.id)?.id).toBe(m.id);
   });
 
-  test("CAS 去重:未变文件零新增 blob;相同内容跨版本只存一份", () => {
+  test("CAS 去重:未变文件零新增 blob;相同内容跨版本只存一份", async () => {
     write("a.ts", "AAA\n");
     write("b.ts", "BBB\n");
     const store = new SnapshotStore(storeDir);
-    store.snapshot(gameDir);
+    await store.snapshot(gameDir);
     expect(countBlobs(store)).toBe(2);
     write("b.ts", "BBB2\n");
-    store.snapshot(gameDir);
+    await store.snapshot(gameDir);
     expect(countBlobs(store)).toBe(3); // 只多 b 的新版本
     write("b.ts", "BBB\n"); // 改回老内容
-    store.snapshot(gameDir);
+    await store.snapshot(gameDir);
     expect(countBlobs(store)).toBe(3); // 内容寻址:不重复存
   });
 
-  test("restore:跨版本一次到位,含删除/新增语义", () => {
+  test("根级 sessions(会话状态树)不进快照;非根级同名目录不误伤", async () => {
+    write("main.ts", "console.log(1)\n");
+    write("sessions/sid-1/agents/forge/events/events-1.jsonl", "{}\n");
+    write("sessions/sid-1/logs/latest.log", "log\n");
+    write("src/sessions/keep.ts", "export {}\n");
+    const store = new SnapshotStore(storeDir);
+    const m = await store.snapshot(gameDir);
+    expect(Object.keys(m.files).sort()).toEqual(["main.ts", "src/sessions/keep.ts"]);
+
+    // hello 场景:消息后只有会话状态在变 → 回退预览必须为空
+    write("sessions/sid-1/logs/latest.log", "log grew\n");
+    write("sessions/sid-2/session.json", "{}\n");
+    expect((await store.diffStats(gameDir, m)).filesChanged).toEqual([]);
+
+    // restore 不触碰会话状态(不删 checkpoint 之后新建的会话目录)
+    const res = await store.restore(gameDir, m);
+    expect(res.deleted).toEqual([]);
+    expect(existsSync(join(gameDir, "sessions/sid-2/session.json"))).toBe(true);
+  });
+
+  test("旧 manifest(剪枝前拍的)读取时剥离根级 sessions/**", async () => {
+    write("main.ts", "console.log(1)\n");
+    const store = new SnapshotStore(storeDir);
+    const m = await store.snapshot(gameDir);
+    // 模拟修复前的旧 manifest:手工塞入 sessions/** 条目
+    const mPath = join(store.storeRoot, "manifests", `${m.id}.json`);
+    const raw = JSON.parse(readFileSync(mPath, "utf-8"));
+    raw.files["sessions/sid-0/session.json"] = { h: "0".repeat(64), size: 2, mode: 0o644 };
+    writeFileSync(mPath, JSON.stringify(raw));
+
+    const loaded = store.loadManifest(m.id)!;
+    expect(Object.keys(loaded.files)).toEqual(["main.ts"]);
+    // 剥离后 preview 无幻影差异、restore 不会把陈旧会话状态写回盘
+    expect((await store.diffStats(gameDir, loaded)).filesChanged).toEqual([]);
+    const res = await store.restore(gameDir, loaded);
+    expect(res.written).toEqual([]);
+    expect(existsSync(join(gameDir, "sessions/sid-0/session.json"))).toBe(false);
+  });
+
+  test("restore:跨版本一次到位,含删除/新增语义", async () => {
     write("a.ts", "v1-a\n");
     write("gone.ts", "will-be-deleted\n");
     const store = new SnapshotStore(storeDir);
-    const m1 = store.snapshot(gameDir);
+    const m1 = await store.snapshot(gameDir);
 
     // turn1: 改 a、删 gone、加 new
     write("a.ts", "v2-a\n");
     rmSync(join(gameDir, "gone.ts"));
     write("deep/new.ts", "added-later\n");
-    const m2 = store.snapshot(gameDir);
+    const m2 = await store.snapshot(gameDir);
 
     // 回退到 m1:a 还原、gone 复活、new 删除(空目录清理)
-    const res = store.restore(gameDir, m1);
+    const res = await store.restore(gameDir, m1);
     expect(readFileSync(join(gameDir, "a.ts"), "utf-8")).toBe("v1-a\n");
     expect(readFileSync(join(gameDir, "gone.ts"), "utf-8")).toBe("will-be-deleted\n");
     expect(existsSync(join(gameDir, "deep/new.ts"))).toBe(false);
@@ -87,7 +126,7 @@ describe("SnapshotStore", () => {
     expect(res.deleted).toEqual(["deep/new.ts"]);
 
     // 再向前跳回 m2(撤销回退的等价操作)
-    store.restore(gameDir, m2);
+    await store.restore(gameDir, m2);
     expect(readFileSync(join(gameDir, "a.ts"), "utf-8")).toBe("v2-a\n");
     expect(existsSync(join(gameDir, "gone.ts"))).toBe(false);
     expect(readFileSync(join(gameDir, "deep/new.ts"), "utf-8")).toBe("added-later\n");
@@ -97,59 +136,59 @@ describe("SnapshotStore", () => {
     write("stable.ts", "same\n");
     write("hot.ts", "v1\n");
     const store = new SnapshotStore(storeDir);
-    const m1 = store.snapshot(gameDir);
+    const m1 = await store.snapshot(gameDir);
     write("hot.ts", "v2\n");
     const before = statSync(join(gameDir, "stable.ts")).mtimeMs;
     await new Promise((r) => setTimeout(r, 20));
-    const res = store.restore(gameDir, m1);
+    const res = await store.restore(gameDir, m1);
     expect(res.written).toEqual(["hot.ts"]);
     expect(statSync(join(gameDir, "stable.ts")).mtimeMs).toBe(before);
   });
 
-  test("exclude:脏文件保留(不写回不删除)", () => {
+  test("exclude:脏文件保留(不写回不删除)", async () => {
     write("a.ts", "v1\n");
     const store = new SnapshotStore(storeDir);
-    const m1 = store.snapshot(gameDir);
+    const m1 = await store.snapshot(gameDir);
     write("a.ts", "user-edit\n");
     write("user-new.ts", "user-created\n");
-    const res = store.restore(gameDir, m1, { exclude: new Set(["a.ts", "user-new.ts"]) });
+    const res = await store.restore(gameDir, m1, { exclude: new Set(["a.ts", "user-new.ts"]) });
     expect(readFileSync(join(gameDir, "a.ts"), "utf-8")).toBe("user-edit\n");
     expect(existsSync(join(gameDir, "user-new.ts"))).toBe(true);
     expect(res.skippedDirty.sort()).toEqual(["a.ts", "user-new.ts"]);
   });
 
-  test("only:局部恢复(这些文件也回退 / 撤销)", () => {
+  test("only:局部恢复(这些文件也回退 / 撤销)", async () => {
     write("a.ts", "v1\n");
     write("b.ts", "v1\n");
     const store = new SnapshotStore(storeDir);
-    const m1 = store.snapshot(gameDir);
+    const m1 = await store.snapshot(gameDir);
     write("a.ts", "v2\n");
     write("b.ts", "v2\n");
-    store.restore(gameDir, m1, { only: new Set(["a.ts"]) });
+    await store.restore(gameDir, m1, { only: new Set(["a.ts"]) });
     expect(readFileSync(join(gameDir, "a.ts"), "utf-8")).toBe("v1\n");
     expect(readFileSync(join(gameDir, "b.ts"), "utf-8")).toBe("v2\n"); // 不在 only 内,不动
   });
 
-  test("diffStats:行级统计 + 二进制按变更计数", () => {
+  test("diffStats:行级统计 + 二进制按变更计数", async () => {
     write("code.ts", "line1\nline2\nline3\n");
     writeFileSync(join(gameDir, "bin.dat"), Buffer.from([0, 1, 2, 3]));
     const store = new SnapshotStore(storeDir);
-    const m1 = store.snapshot(gameDir);
+    const m1 = await store.snapshot(gameDir);
     write("code.ts", "line1\nCHANGED\nline3\nline4\n");
     writeFileSync(join(gameDir, "bin.dat"), Buffer.from([0, 9, 9]));
-    const stats = store.diffStats(gameDir, m1);
+    const stats = await store.diffStats(gameDir, m1);
     expect(stats.filesChanged.sort()).toEqual(["bin.dat", "code.ts"]);
     expect(stats.insertions).toBe(1);
     expect(stats.deletions).toBe(2);
     expect(stats.binaryOrLarge).toBe(1);
   });
 
-  test("diffStats.files:逐文件 status / 行数 / binary", () => {
+  test("diffStats.files:逐文件 status / 行数 / binary", async () => {
     write("code.ts", "a\nb\nc\n");
     write("old.ts", "x\n");
     writeFileSync(join(gameDir, "bin.dat"), Buffer.from([0, 1, 2, 3]));
     const store = new SnapshotStore(storeDir);
-    const m1 = store.snapshot(gameDir);
+    const m1 = await store.snapshot(gameDir);
 
     // 改 code、删 old、增 extra、改 bin —— 回到 m1 视角:code=改,old=新增(写回),
     // extra=删除,bin=改(二进制)。
@@ -158,7 +197,7 @@ describe("SnapshotStore", () => {
     write("extra.ts", "new1\nnew2\n");
     writeFileSync(join(gameDir, "bin.dat"), Buffer.from([9, 9]));
 
-    const stats = store.diffStats(gameDir, m1);
+    const stats = await store.diffStats(gameDir, m1);
     const byPath = Object.fromEntries(stats.files.map((f) => [f.path, f]));
 
     expect(stats.files.length).toBe(stats.filesChanged.length);

@@ -131,6 +131,14 @@ const DEFAULT_MAX_SESSIONS = 32;
 export class SessionManager {
   private map = new Map<string, Session>();
   private lru: LRUList;
+  /** list() 的 closed-session 活动时间缓存。key = session root **绝对路径**(不用
+   *  sid:SM 是进程单例、PathManager 原地切根,同一 sid 在不同 workspace 解析到
+   *  不同物理目录 —— 绝对路径 key 天然免疫切根/迁移串值)。closed session 的
+   *  agents/ 树只有本进程写(写必先 open),所以 close() 失效一次即可。 */
+  private readonly _activityCache = new Map<string, number>();
+  /** list() 的 closed-session config 缓存,mtime 判新鲜(session.json 可被设置页
+   *  改写)。open session 不走这——直接读 FSWatcher 热维护的 session.config。 */
+  private readonly _configCache = new Map<string, { mtimeMs: number; cfg: SessionConfig }>();
   /** SessionManager-singleton logger —— *只接收 session 元事件*（create / open /
    *  close / delete / boot autoStart / cross-session 操作）。落 `<userRoot>/debug.log`，
    *  不接收任何 agent turn / 模型消息（路由由 logger.ts 的 console bridge 完成）。
@@ -265,6 +273,13 @@ export class SessionManager {
     // dispose 期间 open 会拿到一个正在自毁的 Session 实例。
     this.map.delete(sid);
     this.lru.remove(sid);
+    // list() 的 closed-session 缓存以 close 为失效边界:open 期间的最后一段写入
+    // 要在下次 list 时重算(activity),config 也可能在 open 期间被热改。
+    try {
+      const layer = this.paths.session(sid);
+      this._activityCache.delete(layer.root());
+      this._configCache.delete(layer.configFile());
+    } catch { /* layout 解析失败 → 无缓存可清 */ }
     // 从 console bridge router 摘 session logger —— dispose 后期会 close 它，
     // 这里先反注册防止"刚 unregister 又被命中→写已关闭 stream"。残留的 in-flight
     // console.* 没命中 router → 自动 fallback 到 globalLogger（SM.logger），合理。
@@ -281,7 +296,19 @@ export class SessionManager {
     }
   }
 
-  list(): SessionListEntry[] {
+  /** 列举全部(或按绑定 game 收口的)session。
+   *
+   *  性能契约:list 是 UI 热路径(tab 列表 / observatory),且 Bun 单线程 —— 这里
+   *  的每一次同步盘 IO 都直接阻塞所有并发请求。三层收口:
+   *    - `opts.game`:slug 不匹配的 sid 在读 config / 算活动时间**之前**跳过
+   *      (route 的 `?game=` 下推到这,别在外面先全量再过滤);
+   *    - config:open session 读内存 SSOT(session.config,FSWatcher 热维护),
+   *      closed session 走 mtime-keyed 缓存 —— 一次 statSync 同时承担旧的
+   *      existsSync 存在性检查与缓存新鲜度判定;
+   *    - lastActivityAt:closed session 的 agents/ 树只有本进程写(必须先 open),
+   *      所以算一次缓存到 close 为止;open session 每次现算(walk 小,≤LRU 32 个)。
+   *      跨进程共享 legacy home 根的写入会让缓存轻微陈旧 —— 只影响排序,可接受。 */
+  list(opts: { game?: string } = {}): SessionListEntry[] {
     const out: SessionListEntry[] = [];
     // Enumeration goes through the active SessionLayout (generic = scan
     // <userRoot>/sessions; studio = its project-local layout), so list() never
@@ -289,33 +316,50 @@ export class SessionManager {
     const entries = this.paths.listSessionIds();
 
     for (const sid of entries) {
+      // 绑定 game slug 由路径派生(path-as-SSOT),不读盘上字段。
+      const slug = this._deriveSlug(sid);
+      if (opts.game && slug !== opts.game) continue;
       const layer = this.paths.session(sid);
-      if (!existsSync(layer.configFile())) continue;
+      const live = this.map.get(sid);
+
       let cfg: SessionConfig;
-      try { cfg = JSON.parse(readFileSync(layer.configFile(), "utf-8")) as SessionConfig; }
-      catch { continue; }
+      if (live) {
+        cfg = live.config;
+      } else {
+        const configFile = layer.configFile();
+        let st: ReturnType<typeof statSync>;
+        try { st = statSync(configFile); } catch { continue; } // 无 config → 非 session
+        const cached = this._configCache.get(configFile);
+        if (cached && cached.mtimeMs === st.mtimeMs) {
+          cfg = cached.cfg;
+        } else {
+          try { cfg = JSON.parse(readFileSync(configFile, "utf-8")) as SessionConfig; }
+          catch { continue; }
+          this._configCache.set(configFile, { mtimeMs: st.mtimeMs, cfg });
+        }
+      }
+
       // Activity time: newest mtime under agents/ (where ledger + per-agent
       // jsonl event files land, so any message bump moves it forward); fall
       // back to session dir mtime when the agents tree is empty (= session
-      // just created, no exchanges yet). Mirrors observatory.ts's
-      // listSessionsWithMtime, but kept here so /api/sessions (single source
-      // of truth for tabs) carries the field too — observatory remains its
-      // own dashboard-focused view.
+      // just created, no exchanges yet). /api/sessions is the single source of
+      // truth for the field — observatory derives from it, no second walk.
       const sessionDir = layer.root();
       let lastActivityAt: number | undefined;
-      try {
-        const agentsMtime = newestMtimeUnder(join(sessionDir, "agents"));
-        if (agentsMtime > 0) {
-          lastActivityAt = agentsMtime;
-        } else {
-          lastActivityAt = statSync(sessionDir).mtimeMs;
-        }
-      } catch { /* skip — leave undefined */ }
+      if (!live && this._activityCache.has(sessionDir)) {
+        lastActivityAt = this._activityCache.get(sessionDir);
+      } else {
+        try {
+          const agentsMtime = newestMtimeUnder(join(sessionDir, "agents"));
+          lastActivityAt = agentsMtime > 0 ? agentsMtime : statSync(sessionDir).mtimeMs;
+          if (!live) this._activityCache.set(sessionDir, lastActivityAt);
+        } catch { /* skip — leave undefined, don't cache the error */ }
+      }
+
       out.push({
         sid,
         displayName: cfg.displayName,
-        // 绑定 game slug 由路径派生(path-as-SSOT),不读盘上字段。
-        defaultDir: this._deriveSlug(sid),
+        defaultDir: slug,
         autoStart: cfg.autoStart ?? true,
         lastActivityAt,
       });

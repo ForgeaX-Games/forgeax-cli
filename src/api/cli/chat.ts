@@ -201,7 +201,7 @@ export function createCliRouter() {
       // 之前漏了这步,导致经 CLI provider 发消息时 rewind:finalized 永不触发,挂起态(置灰
       // + 「已回退到此处」)永久卡住。失败不阻塞聊天。
       if (persistSession) {
-        try { getCheckpointManager().finalizePending(persistSession); } catch (e) {
+        try { await getCheckpointManager().finalizePending(persistSession); } catch (e) {
           console.warn(`[cli/chat] finalizePending failed: ${(e as Error).message}`);
         }
       }
@@ -350,7 +350,7 @@ export function createCliRouter() {
         const session = await getSessionManager().open(req.sessionId);
         // checkpoint 定格:与 kernel 路径同语义(见上)。新用户消息 → 定格挂起的软回退,
         // 否则经 legacy CLI provider 发送时置灰段永不移除。失败不阻塞聊天。
-        try { getCheckpointManager().finalizePending(session); } catch (e) {
+        try { await getCheckpointManager().finalizePending(session); } catch (e) {
           console.warn(`[cli/chat] finalizePending failed: ${(e as Error).message}`);
         }
         const node = session.tree.list().find((n) => n.display === req.agentId)

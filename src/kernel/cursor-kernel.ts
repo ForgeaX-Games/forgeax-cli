@@ -31,6 +31,7 @@ import type {
   KernelCapabilities,
   KernelEvent,
   KernelHealth,
+  KernelModelCatalog,
   TurnHandle,
   TurnRequest,
 } from '@forgeax/agent-runtime';
@@ -41,8 +42,11 @@ import { defaultProjectRoot } from '@forgeax/platform-io';
 import {
   buildCursorArgs,
   createCursorMapperState,
+  CURSOR_DRIVER_LABEL,
+  CURSOR_FALLBACK_MODELS,
   flushCursorMapper,
   mapCursorEvent,
+  probeCursorModels,
   type CursorRawEvent,
 } from './cursor-profile';
 import { buildCursorHomeWithoutUserMcp, disposeCursorHome } from './cursor-home';
@@ -52,6 +56,15 @@ export class CursorKernel implements AgentKernel {
   // 'cursor-agent' — see interface/src/lib/cli-providers.ts), so resolveKernel
   // ('cursor-agent') reaches this kernel.
   readonly id = 'cursor-agent';
+  readonly displayName = CURSOR_DRIVER_LABEL;
+  readonly fallbackModels = CURSOR_FALLBACK_MODELS;
+
+  /** 真实模型目录:`cursor-agent --list-models`(见 cursor-profile)。
+   *  失败 → 编排层降级 last-known → fallbackModels。 */
+  async listModels(): Promise<KernelModelCatalog> {
+    return { models: await probeCursorModels(), source: 'kernel' };
+  }
+
   readonly capabilities: KernelCapabilities = {
     // cursor `--stream-partial-output` 的 assistant 文本是 token 级流式。
     streaming: true,

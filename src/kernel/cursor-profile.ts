@@ -22,7 +22,64 @@
  *  - 用量:result.usage 只有 token,无 $ cost → turn.usage.costUsd 留空。
  *  - 无 per-tool 权限回调(走 --force / hooks)→ requestPermission 不接。
  */
-import type { TurnRequest } from '@forgeax/agent-runtime';
+import type { KernelModelInfo, TurnRequest } from '@forgeax/agent-runtime';
+import { resolveBinary } from '../cli-providers/shared/resolve-binary';
+import { runCapture } from '../lib/node-spawn';
+
+// ─── 模型目录(cursor-isms) ──────────────────────────────────────────
+// cursor 是四个 rented 内核里唯一有平坦 list 命令的(`cursor-agent
+// --list-models`);spawn/解析都是 cursor-ism,归口本文件,由
+// {@link CursorKernel.listModels} 消费(与 cc/cbc/codex 统一走 listModels)。
+
+export const CURSOR_DRIVER_LABEL = 'cursor-agent · subscription runtime · no local cost';
+
+/** 内核作者声明的静态兜底(探测 + last-known 都失败时的最后一层,非平台猜测)。 */
+export const CURSOR_FALLBACK_MODELS = [
+  'gpt-5.5-medium',
+  'gpt-5.1-codex-max-medium',
+  'claude-opus-4-8-thinking-high',
+  'claude-sonnet-4-6-thinking',
+];
+
+/** `--list-models` stdout 行解析:剥 bullet/序号,取首 token + 可选
+ *  ` - 描述` / `(current|default)` 注记,滤表头噪声词。描述作 label。 */
+export function parseCursorModelList(stdout: string): KernelModelInfo[] {
+  const seen = new Map<string, KernelModelInfo>();
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine
+      .trim()
+      .replace(/^[*\-•]\s*/, '')
+      .replace(/^\d+[.)]\s*/, '');
+    if (!line) continue;
+    const match = line.match(/^([a-z0-9][a-z0-9._-]*)(?:\s+-\s+(.*?))?(?:\s+\((?:current|default)\))?\s*$/i);
+    const id = match?.[1]?.trim();
+    if (!id) continue;
+    if (/^(available|models?|model|current|default|name)$/i.test(id)) continue;
+    if (seen.has(id)) continue;
+    const label = match?.[2]?.trim();
+    seen.set(id, { id, ...(label && label !== id ? { label } : {}) });
+  }
+  return [...seen.values()];
+}
+
+/** 真实获取:spawn `cursor-agent --list-models`(binary 解析与 chat 路径同源:
+ *  CURSOR_CLI_PATH → PATH)。失败抛错,由编排层回退链降级。 */
+export async function probeCursorModels(timeoutMs = 5000): Promise<KernelModelInfo[]> {
+  const binary = await resolveBinary({
+    envVarName: 'CURSOR_CLI_PATH',
+    defaultBinary: 'cursor-agent',
+  });
+  const out = await runCapture(binary, ['--list-models'], { timeoutMs, captureStderr: true });
+  if (out.code !== 0) {
+    const detail = (out.stderr || out.stdout).trim();
+    throw new Error(`cursor-agent --list-models exit ${out.code ?? 'spawn-failed'}${detail ? `: ${detail}` : ''}`);
+  }
+  const models = parseCursorModelList(out.stdout);
+  if (models.length === 0) {
+    throw new Error('cursor-agent --list-models returned no parseable model ids');
+  }
+  return models;
+}
 
 // ndjson→KernelEvent 映射本身就是 cursor-ism;经 profile 统一再出口(spine 不直接 import mapper)。
 export {

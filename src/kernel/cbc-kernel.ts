@@ -21,6 +21,7 @@ import type {
   KernelCapabilities,
   KernelEvent,
   KernelHealth,
+  KernelModelCatalog,
   PermissionMode,
   TurnHandle,
   TurnRequest,
@@ -42,12 +43,25 @@ import {
   buildCbcArgs,
   buildCbcSessionArgs,
   chatEventToKernel,
+  CODEBUDDY_DRIVER_LABEL,
+  CODEBUDDY_FALLBACK_MODELS,
+  probeStreamJsonModels,
   toCbcPermissionMode,
   type CbcPermissionMode,
 } from './cbc-profile';
 
 export class CbcKernel implements AgentKernel {
   readonly id = 'codebuddy';
+  readonly displayName = CODEBUDDY_DRIVER_LABEL;
+  readonly fallbackModels = CODEBUDDY_FALLBACK_MODELS;
+
+  /** 真实模型目录:cc 同款 stream-json 控制面(见 cbc-profile 模型目录注释)。
+   *  返回的就是 TUI `/model` 那份(云端企业配置,含 -ioa 内部渠道模型)。 */
+  async listModels(): Promise<KernelModelCatalog> {
+    const models = await probeStreamJsonModels(await this.binary());
+    return { models, source: 'kernel' };
+  }
+
   readonly capabilities: KernelCapabilities = {
     streaming: true,
     thinking: true,

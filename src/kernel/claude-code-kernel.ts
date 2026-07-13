@@ -19,6 +19,7 @@ import type {
   KernelCapabilities,
   KernelEvent,
   KernelHealth,
+  KernelModelCatalog,
   PermissionMode,
   TurnHandle,
   TurnRequest,
@@ -44,6 +45,9 @@ import {
   buildCcArgs,
   buildSessionArgs,
   chatEventToKernel,
+  CLAUDE_CODE_DRIVER_LABEL,
+  CLAUDE_CODE_FALLBACK_MODELS,
+  probeStreamJsonModels,
   registerTurnGate,
   releaseTurnGate,
   toCcPermissionMode,
@@ -52,6 +56,16 @@ import {
 
 export class ClaudeCodeKernel implements AgentKernel {
   readonly id = 'claude-code';
+  readonly displayName = CLAUDE_CODE_DRIVER_LABEL;
+  readonly fallbackModels = CLAUDE_CODE_FALLBACK_MODELS;
+
+  /** 真实模型目录:stream-json 控制面 initialize 的 `models` —— 与 TUI `/model`
+   *  同一份(按订阅现算)。失败 → 编排层降级 last-known → fallbackModels。 */
+  async listModels(): Promise<KernelModelCatalog> {
+    const models = await probeStreamJsonModels(await this.binary());
+    return { models, source: 'kernel' };
+  }
+
   readonly capabilities: KernelCapabilities = {
     streaming: true,
     thinking: true,

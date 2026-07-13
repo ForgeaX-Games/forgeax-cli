@@ -58,22 +58,21 @@ function listSessionsWithMtime(): SessionEntry[] {
   const sm = getSessionManager();
   const pm = getPathManager();
   const out: SessionEntry[] = [];
+  // Derive, don't duplicate: sm.list() already computes lastActivityAt (newest
+  // mtime under agents/, falling back to the session dir mtime) with caching.
+  // The old copy here re-walked every session's agents tree AND re-resolved
+  // every sid through the layout — doubling the /api/sessions disk cost on a
+  // hot, event-loop-blocking path.
   for (const entry of sm.list()) {
-    const sessionDir = pm.session(entry.sid).root();
-    let updated: number | undefined;
     let created: number | undefined;
     try {
-      const st = statSync(sessionDir);
-      created = st.ctimeMs;
-      const eventsDir = join(sessionDir, 'agents');
-      const newestEvent = newestMtimeUnder(eventsDir);
-      updated = newestEvent > 0 ? newestEvent : st.mtimeMs;
+      created = statSync(pm.session(entry.sid).root()).ctimeMs;
     } catch { /* ignore */ }
     out.push({
       id: entry.sid,
       displayName: entry.displayName,
       defaultDir: entry.defaultDir,
-      updated,
+      updated: entry.lastActivityAt,
       created,
     });
   }

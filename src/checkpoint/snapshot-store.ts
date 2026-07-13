@@ -16,18 +16,18 @@
  *    - 行级 diff 只在 preview 按需调用,带尺寸/行数上限,结果按 (hashA,hashB) 缓存。 */
 
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-  chmodSync,
-  rmdirSync,
-} from "node:fs";
+  chmod,
+  copyFile,
+  mkdir,
+  readdir,
+  readFile,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 
 /** 不进快照的目录/文件名(任意层级命中即剪枝)。
@@ -61,6 +61,22 @@ const IGNORED_NAMES = new Set([
   ".workbuddy",
   ".agents",
 ]);
+
+/** 只在 targetDir **根级**剪枝的目录名(区别于 IGNORED_NAMES 的任意层级)。
+ *
+ *  GameSessionLayout(PR2)把会话状态树落在 <gameDir>/sessions/<sid>/ ——
+ *  WAL、logs、checkpoints.jsonl 索引自身全在里面。它是框架状态不是游戏内容:
+ *  拍进快照的话,一句纯 hello 的回退预览也会满屏"文件变更"(每条消息都在写
+ *  events/logs),restore 更会拿陈旧 WAL 覆盖、把 checkpoint 之后新建的会话
+ *  整目录删掉。只在根级匹配 —— 游戏源码里的同名子目录(如 src/sessions/)
+ *  仍正常进快照。 */
+const IGNORED_ROOT_NAMES = new Set(["sessions"]);
+
+/** rel(POSIX,相对 targetDir)是否落在根级被剪目录下。 */
+function underIgnoredRoot(rel: string): boolean {
+  const slash = rel.indexOf("/");
+  return slash > 0 && IGNORED_ROOT_NAMES.has(rel.slice(0, slash));
+}
 
 /** 行级 diff 的安全闸:超限只报「变更」不报行数。 */
 const LINE_DIFF_MAX_BYTES = 256 * 1024;
@@ -113,35 +129,50 @@ export class SnapshotStore {
   /** absPath → 上次哈希时的 stat 指纹;命中则跳过重哈希。 */
   private readonly statCache = new Map<string, { mtimeNs: bigint; size: number; h: string }>();
   private readonly lineDiffCache = new Map<string, { insertions: number; deletions: number } | null>();
+  /** per-store 互斥链。store 按 storeRoot 共享(绑同一 game 的多个 session 用
+   *  同一实例、写同一 gameDir + statCache),同步时代靠"整个操作独占事件循环"
+   *  天然互斥;async 化后 walk/restore 可交错 —— 半 restore 的盘面被拍成 manifest、
+   *  statCache 竞态。所有触盘的公有操作(snapshot/restore/diff)必须过这条链。
+   *  per-session 的操作编排锁(checkpoint-manager.withLock)仍保留,两层职责不同。 */
+  private _chain: Promise<unknown> = Promise.resolve();
 
   constructor(public readonly storeRoot: string) {
     this.blobsDir = join(storeRoot, "blobs");
     this.manifestsDir = join(storeRoot, "manifests");
   }
 
+  private _locked<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this._chain.then(fn, fn);
+    this._chain = run.catch(() => undefined);
+    return run;
+  }
+
   // ─── snapshot ────────────────────────────────────────────────────────────
 
   /** 对 targetDir 当前盘上状态拍全量 manifest;内容未变的文件零新增存储。
    *  抛错 = 快照失败(caller 决定是否阻塞:消息路径不阻塞,覆盖路径 fail-closed)。 */
-  snapshot(targetDir: string, meta?: Record<string, unknown>): Manifest {
-    const files: Record<string, ManifestEntry> = {};
-    this._walk(targetDir, targetDir, files);
-    const manifest: Manifest = { id: randomUUID(), ts: Date.now(), files, meta };
-    mkdirSync(this.manifestsDir, { recursive: true });
-    // 先写临时名再 rename 的原子性在单机 jsonl 场景收益低;manifest 单文件直写。
-    writeFileSync(join(this.manifestsDir, `${manifest.id}.json`), JSON.stringify(manifest), "utf-8");
-    return manifest;
+  snapshot(targetDir: string, meta?: Record<string, unknown>): Promise<Manifest> {
+    return this._locked(async () => {
+      const files: Record<string, ManifestEntry> = {};
+      await this._walk(targetDir, targetDir, files);
+      const manifest: Manifest = { id: randomUUID(), ts: Date.now(), files, meta };
+      await mkdir(this.manifestsDir, { recursive: true });
+      // 先写临时名再 rename 的原子性在单机 jsonl 场景收益低;manifest 单文件直写。
+      await writeFile(join(this.manifestsDir, `${manifest.id}.json`), JSON.stringify(manifest), "utf-8");
+      return manifest;
+    });
   }
 
-  private _walk(root: string, dir: string, out: Record<string, ManifestEntry>): void {
+  private async _walk(root: string, dir: string, out: Record<string, ManifestEntry>): Promise<void> {
     let entries: string[];
     try {
-      entries = readdirSync(dir);
+      entries = await readdir(dir);
     } catch {
       return; // 目录在遍历中消失 —— 视作空
     }
     for (const name of entries) {
       if (IGNORED_NAMES.has(name)) continue;
+      if (dir === root && IGNORED_ROOT_NAMES.has(name)) continue;
       const abs = join(dir, name);
       let st;
       try {
@@ -149,12 +180,12 @@ export class SnapshotStore {
         // 的改动(如 "v1\n"→"v2\n"):snapshot 拍照后立即改写,restore 重走 _walk
         // 命中 statCache 拿到旧哈希 → 误判未变、不回写。纳秒 mtime 在两次顺序写之间
         // 严格递增,消除该竞态。
-        st = statSync(abs, { bigint: true });
+        st = await stat(abs, { bigint: true });
       } catch {
         continue; // 竞态删除
       }
       if (st.isDirectory()) {
-        this._walk(root, abs, out);
+        await this._walk(root, abs, out);
         continue;
       }
       if (!st.isFile()) continue;
@@ -165,9 +196,9 @@ export class SnapshotStore {
       if (cached && cached.mtimeNs === st.mtimeNs && cached.size === size) {
         h = cached.h;
       } else {
-        const content = readFileSync(abs);
+        const content = await readFile(abs);
         h = sha256(content);
-        this._ensureBlob(h, abs, content);
+        await this._ensureBlob(h, abs, content);
         this.statCache.set(abs, { mtimeNs: st.mtimeNs, size, h });
       }
       // stat 缓存命中时 blob 必然已存在(同一进程内写过);进程重启后缓存为空,
@@ -180,19 +211,25 @@ export class SnapshotStore {
     return join(this.blobsDir, h.slice(0, 2), h);
   }
 
-  private _ensureBlob(h: string, srcAbs: string, content?: Buffer): void {
+  private async _ensureBlob(h: string, srcAbs: string, content?: Buffer): Promise<void> {
     const p = this._blobPath(h);
     if (existsSync(p)) return;
-    mkdirSync(dirname(p), { recursive: true });
-    if (content) writeFileSync(p, content);
-    else copyFileSync(srcAbs, p);
+    await mkdir(dirname(p), { recursive: true });
+    if (content) await writeFile(p, content);
+    else await copyFile(srcAbs, p);
   }
 
   // ─── manifest io ─────────────────────────────────────────────────────────
 
   loadManifest(id: string): Manifest | null {
     try {
-      return JSON.parse(readFileSync(join(this.manifestsDir, `${id}.json`), "utf-8")) as Manifest;
+      const m = JSON.parse(readFileSync(join(this.manifestsDir, `${id}.json`), "utf-8")) as Manifest;
+      // 剪枝规则引入前拍的旧 manifest 可能已含根级 sessions/**:读取时剥离,
+      // 否则 preview 对它们显示幻影差异,restore 会把陈旧会话状态写回盘。
+      for (const rel of Object.keys(m.files)) {
+        if (underIgnoredRoot(rel)) delete m.files[rel];
+      }
+      return m;
     } catch {
       return null;
     }
@@ -208,65 +245,67 @@ export class SnapshotStore {
     targetDir: string,
     manifest: Manifest,
     opts: { exclude?: Set<string>; only?: Set<string> } = {},
-  ): RestoreResult {
-    const written: string[] = [];
-    const deleted: string[] = [];
-    const skippedDirty: string[] = [];
+  ): Promise<RestoreResult> {
+    return this._locked(async () => {
+      const written: string[] = [];
+      const deleted: string[] = [];
+      const skippedDirty: string[] = [];
 
-    const current: Record<string, ManifestEntry> = {};
-    this._walk(targetDir, targetDir, current);
+      const current: Record<string, ManifestEntry> = {};
+      await this._walk(targetDir, targetDir, current);
 
-    const considered = (rel: string): boolean => {
-      if (opts.only && !opts.only.has(rel)) return false;
-      if (opts.exclude?.has(rel)) {
-        skippedDirty.push(rel);
-        return false;
-      }
-      return true;
-    };
+      const considered = (rel: string): boolean => {
+        if (opts.only && !opts.only.has(rel)) return false;
+        if (opts.exclude?.has(rel)) {
+          skippedDirty.push(rel);
+          return false;
+        }
+        return true;
+      };
 
-    // 写回:目标里有、盘上缺失或内容不同
-    for (const [rel, entry] of Object.entries(manifest.files)) {
-      if (!considered(rel)) continue;
-      const cur = current[rel];
-      if (cur && cur.h === entry.h) continue;
-      const abs = join(targetDir, ...rel.split("/"));
-      const blob = this._blobPath(entry.h);
-      if (!existsSync(blob)) {
-        // blob 丢失 —— 跳过该文件,留给 caller 上报;不让单文件损坏炸掉整次 restore
-        process.stderr.write(`[checkpoint] missing blob ${entry.h} for ${rel}, skipped\n`);
-        continue;
-      }
-      mkdirSync(dirname(abs), { recursive: true });
-      copyFileSync(blob, abs);
-      try { chmodSync(abs, entry.mode); } catch { /* 非关键 */ }
-      this.statCache.delete(abs);
-      written.push(rel);
-    }
-
-    // 删除:盘上有、目标里没有
-    for (const rel of Object.keys(current)) {
-      if (manifest.files[rel]) continue;
-      if (!considered(rel)) continue;
-      const abs = join(targetDir, ...rel.split("/"));
-      try {
-        unlinkSync(abs);
+      // 写回:目标里有、盘上缺失或内容不同
+      for (const [rel, entry] of Object.entries(manifest.files)) {
+        if (!considered(rel)) continue;
+        const cur = current[rel];
+        if (cur && cur.h === entry.h) continue;
+        const abs = join(targetDir, ...rel.split("/"));
+        const blob = this._blobPath(entry.h);
+        if (!existsSync(blob)) {
+          // blob 丢失 —— 跳过该文件,留给 caller 上报;不让单文件损坏炸掉整次 restore
+          process.stderr.write(`[checkpoint] missing blob ${entry.h} for ${rel}, skipped\n`);
+          continue;
+        }
+        await mkdir(dirname(abs), { recursive: true });
+        await copyFile(blob, abs);
+        try { await chmod(abs, entry.mode); } catch { /* 非关键 */ }
         this.statCache.delete(abs);
-        deleted.push(rel);
-        this._pruneEmptyDirs(targetDir, dirname(abs));
-      } catch { /* 已不存在 */ }
-    }
+        written.push(rel);
+      }
 
-    return { written, deleted, skippedDirty };
+      // 删除:盘上有、目标里没有
+      for (const rel of Object.keys(current)) {
+        if (manifest.files[rel]) continue;
+        if (!considered(rel)) continue;
+        const abs = join(targetDir, ...rel.split("/"));
+        try {
+          await unlink(abs);
+          this.statCache.delete(abs);
+          deleted.push(rel);
+          await this._pruneEmptyDirs(targetDir, dirname(abs));
+        } catch { /* 已不存在 */ }
+      }
+
+      return { written, deleted, skippedDirty };
+    });
   }
 
   /** 删除文件后清掉空目录(只清到 targetDir 为止)。 */
-  private _pruneEmptyDirs(root: string, dir: string): void {
+  private async _pruneEmptyDirs(root: string, dir: string): Promise<void> {
     let d = dir;
     while (d.startsWith(root) && d !== root) {
       try {
-        if (readdirSync(d).length > 0) return;
-        rmdirSync(d);
+        if ((await readdir(d)).length > 0) return;
+        await rmdir(d);
       } catch {
         return;
       }
@@ -276,52 +315,56 @@ export class SnapshotStore {
 
   // ─── diff ────────────────────────────────────────────────────────────────
 
-  /** 盘上状态 vs manifest 的文件级差异(零行级计算,亚毫秒级)。 */
-  diffDiskVsManifest(targetDir: string, manifest: Manifest): {
+  /** 盘上状态 vs manifest 的文件级差异(零行级计算)。 */
+  diffDiskVsManifest(targetDir: string, manifest: Manifest): Promise<{
     changed: string[]; onlyOnDisk: string[]; onlyInManifest: string[];
-  } {
-    const current: Record<string, ManifestEntry> = {};
-    this._walk(targetDir, targetDir, current);
-    return diffEntryMaps(current, manifest.files);
+  }> {
+    return this._locked(async () => {
+      const current: Record<string, ManifestEntry> = {};
+      await this._walk(targetDir, targetDir, current);
+      return diffEntryMaps(current, manifest.files);
+    });
   }
 
   /** preview 用的统计:文件级必出,行级带闸。base=null 表示对比当前盘。 */
-  diffStats(targetDir: string, target: Manifest, base?: Manifest | null): DiffStats {
-    let a: Record<string, ManifestEntry>;
-    if (base) {
-      a = base.files;
-    } else {
-      a = {};
-      this._walk(targetDir, targetDir, a);
-    }
-    const d = diffEntryMaps(a, target.files);
-    const filesChanged = [...d.changed, ...d.onlyOnDisk, ...d.onlyInManifest];
-    let insertions = 0;
-    let deletions = 0;
-    let binaryOrLarge = 0;
-    const files: FileDiffStat[] = [];
-
-    const countPair = (
-      rel: string,
-      status: FileDiffStat["status"],
-      aEntry: ManifestEntry | undefined,
-      bEntry: ManifestEntry | undefined,
-    ) => {
-      const stats = this._lineDiff(aEntry, bEntry);
-      if (stats === null) {
-        binaryOrLarge++;
-        files.push({ path: rel, status, insertions: 0, deletions: 0, binary: true });
+  diffStats(targetDir: string, target: Manifest, base?: Manifest | null): Promise<DiffStats> {
+    return this._locked(async () => {
+      let a: Record<string, ManifestEntry>;
+      if (base) {
+        a = base.files;
       } else {
-        insertions += stats.insertions;
-        deletions += stats.deletions;
-        files.push({ path: rel, status, insertions: stats.insertions, deletions: stats.deletions, binary: false });
+        a = {};
+        await this._walk(targetDir, targetDir, a);
       }
-    };
-    for (const rel of d.changed) countPair(rel, "modified", a[rel], target.files[rel]);
-    for (const rel of d.onlyOnDisk) countPair(rel, "deleted", a[rel], undefined);
-    for (const rel of d.onlyInManifest) countPair(rel, "added", undefined, target.files[rel]);
+      const d = diffEntryMaps(a, target.files);
+      const filesChanged = [...d.changed, ...d.onlyOnDisk, ...d.onlyInManifest];
+      let insertions = 0;
+      let deletions = 0;
+      let binaryOrLarge = 0;
+      const files: FileDiffStat[] = [];
 
-    return { filesChanged, insertions, deletions, binaryOrLarge, files };
+      const countPair = (
+        rel: string,
+        status: FileDiffStat["status"],
+        aEntry: ManifestEntry | undefined,
+        bEntry: ManifestEntry | undefined,
+      ) => {
+        const stats = this._lineDiff(aEntry, bEntry);
+        if (stats === null) {
+          binaryOrLarge++;
+          files.push({ path: rel, status, insertions: 0, deletions: 0, binary: true });
+        } else {
+          insertions += stats.insertions;
+          deletions += stats.deletions;
+          files.push({ path: rel, status, insertions: stats.insertions, deletions: stats.deletions, binary: false });
+        }
+      };
+      for (const rel of d.changed) countPair(rel, "modified", a[rel], target.files[rel]);
+      for (const rel of d.onlyOnDisk) countPair(rel, "deleted", a[rel], undefined);
+      for (const rel of d.onlyInManifest) countPair(rel, "added", undefined, target.files[rel]);
+
+      return { filesChanged, insertions, deletions, binaryOrLarge, files };
+    });
   }
 
   /** 单文件行级 diff(从 blob 池读内容);null = 二进制/超限,只算「变更」。 */

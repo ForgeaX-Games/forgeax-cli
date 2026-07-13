@@ -38,6 +38,38 @@ import {
 
 const SERVER_PORT = process.env.FORGEAX_SERVER_PORT ?? '18900';
 
+// ─── 模型目录(cbc-isms) ─────────────────────────────────────────────
+// 真实通道 = cc 同款 stream-json 控制面(cbc 分叉保留了该协议):initialize
+// 响应的 `models` 就是 TUI `/model` 的同一份列表(云端企业配置 + 内置 +
+// ~/.codebuddy/models.json 合并,含 -ioa 内部渠道模型)。实测 2026-07:
+// `codebuddy -p --input/output-format stream-json` + initialize 返回 24 个
+// 真模型;而 `codebuddy models` 裸词会被当 prompt 发给 LLM(没有 list 子命令)。
+// 探测函数复用 cc-profile 的 {@link probeStreamJsonModels}(单一来源)。
+// 下方静态表只是回退链最后一层兜底。id 是 cbc 点号方言的**展示 id**;
+// chat 路径的连字符→点号翻译见 {@link toCbcModelId}。
+
+export { probeStreamJsonModels } from './cc-profile';
+
+export const CODEBUDDY_DRIVER_LABEL = 'codebuddy · subscription runtime · no local cost';
+
+export const CODEBUDDY_FALLBACK_MODELS = [
+  'default-model',
+  'gemini-3.1-pro',
+  'gemini-3.0-flash',
+  'gemini-3.5-flash',
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite',
+  'gpt-5.5',
+  'gpt-5.4',
+  'gpt-5.3-codex',
+  'gpt-5.1-codex',
+  'gpt-5.1-codex-mini',
+  'deepseek-v3-2-volc',
+  'glm-5.0',
+  'kimi-k2.5',
+];
+
 /** cbc `--permission-mode` 取值枚举(与 cc 同:default/acceptEdits/plan/bypassPermissions)。 */
 export type CbcPermissionMode = CcPermissionMode;
 

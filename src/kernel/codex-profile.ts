@@ -26,6 +26,20 @@
  */
 import type { TurnRequest } from '@forgeax/agent-runtime';
 
+// ─── 模型目录(Codex-isms) ───────────────────────────────────────────
+// 真实通道 = `codex app-server` JSON-RPC `model/list`(TUI /model 同源),
+// 实现在 {@link CodexKernel.listModels}(app-server client 生命周期在内核侧)。
+// 下方静态表只是回退链最后一层兜底(app-server 起不来 + 无 last-known 时)。
+
+export const CODEX_DRIVER_LABEL = 'codex · subscription runtime · no local cost';
+
+export const CODEX_FALLBACK_MODELS = [
+  'gpt-5.2',
+  'gpt-5.1-codex-max-medium',
+  'gpt-5.4-mini-medium',
+  'gpt-5-mini',
+];
+
 // JSONL→KernelEvent 映射本身就是 codex-ism;经 profile 统一再出口(spine 不直接 import mapper)。
 export {
   createCodexMapperState,

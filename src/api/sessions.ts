@@ -61,8 +61,10 @@ export function createSessionsRouter() {
     // (generic / brand-new workspace with no active game) → return everything,
     // preserving the un-scoped behaviour.
     const game = c.req.query('game') || getPathManager().resolveScope() || null;
-    const all = sm.list();
-    const sessions = game ? all.filter((e) => e.defaultDir === game) : all;
+    // Scope pushed down into sm.list({game}): non-matching sids are skipped
+    // BEFORE their config read / activity walk (list is a hot sync path — see
+    // SessionManager.list header), instead of paying full cost then filtering.
+    const sessions = sm.list(game ? { game } : {});
     return c.json({ sessions });
   });
 
@@ -254,10 +256,10 @@ export function createSessionsRouter() {
     const msgId: string | undefined = isUserInput ? randomUUID() : undefined;
     if (isUserInput && msgId) {
       const cpm = getCheckpointManager();
-      try { cpm.finalizePending(session); } catch (err: any) {
+      try { await cpm.finalizePending(session); } catch (err: any) {
         process.stderr.write(`[checkpoint] finalizePending failed: ${err?.message ?? err}\n`);
       }
-      try { cpm.snapshotForMessage(session, msgId); } catch (err: any) {
+      try { await cpm.snapshotForMessage(session, msgId); } catch (err: any) {
         process.stderr.write(`[checkpoint] snapshotForMessage failed: ${err?.message ?? err}\n`);
       }
     }
@@ -292,7 +294,7 @@ export function createSessionsRouter() {
     const session = await sm.open(c.req.param('sid'));
     const body = await c.req.json().catch(() => ({}));
     if (typeof body.msgId !== 'string') return c.json({ error: 'msgId required' }, 400);
-    const result = getCheckpointManager().preview(session, body.msgId);
+    const result = await getCheckpointManager().preview(session, body.msgId);
     if ('error' in result) return c.json({ error: result.error }, result.status as 404);
     return c.json(result);
   });

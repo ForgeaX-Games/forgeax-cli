@@ -19,6 +19,7 @@ import type {
   KernelCapabilities,
   KernelEvent,
   KernelHealth,
+  KernelModelCatalog,
   TurnHandle,
   TurnRequest,
 } from '@forgeax/agent-runtime';
@@ -34,6 +35,8 @@ import { sidecarEnabled } from './kernel-mode';
 import { resolveBinary } from '../cli-providers/shared/resolve-binary';
 import {
   buildCodexArgs,
+  CODEX_DRIVER_LABEL,
+  CODEX_FALLBACK_MODELS,
   createCodexMapperState,
   flushCodexMapper,
   mapCodexEvent,
@@ -51,6 +54,8 @@ import {
 
 export class CodexKernel implements AgentKernel {
   readonly id = 'codex';
+  readonly displayName = CODEX_DRIVER_LABEL;
+  readonly fallbackModels = CODEX_FALLBACK_MODELS;
   readonly capabilities: KernelCapabilities = {
     // `codex exec --json` 的 agent_message 是整段(item.completed),非 token 级流式。
     streaming: false,
@@ -73,6 +78,60 @@ export class CodexKernel implements AgentKernel {
       envVarName: 'CODEX_CLI_PATH',
       defaultBinary: 'codex',
     }));
+  }
+
+  /** 真实模型目录:app-server JSON-RPC `model/list`(TUI /model 同源)。
+   *  一次性 client:initialize 握手 → model/list → SIGTERM;失败/超时 → 编排层
+   *  降级 last-known → fallbackModels。
+   *
+   *  超时兜底(与 cc/cbc/cursor 探针同构):`CodexAppServerClient` 只在收到应答或
+   *  子进程 `exit` 时才结算 request——若 app-server 起来了却**挂住不回**(hang,
+   *  非 crash),`await` 会永不返回,`finally` 的 shutdown 也永不执行,泄漏子进程 +
+   *  把这个悬挂 promise 钉进 `catalogCache`,后续 codex `/model` 全部一起卡死。
+   *  故用超时竞速:到点 `shutdown()`(SIGTERM → exit handler reject 在飞 request)
+   *  并 reject,让降级链正常接手。 */
+  async listModels(): Promise<KernelModelCatalog> {
+    const TIMEOUT_MS = 15_000;
+    const client = new CodexAppServerClient({
+      binary: await this.binary(),
+      cwd: defaultProjectRoot(),
+      onServerRequest: () => ({}),
+      onNotification: () => { /* 目录探测不消费通知 */ },
+    });
+    const work = (async (): Promise<KernelModelCatalog> => {
+      await client.ensureStarted();
+      const res = await client.request('model/list', {}) as {
+        models?: Array<{ id?: string; model?: string; displayName?: string; name?: string; description?: string }>;
+        data?: Array<{ id?: string; model?: string; displayName?: string; name?: string }>;
+      };
+      const rows = Array.isArray(res?.models) ? res.models : Array.isArray(res?.data) ? res.data : [];
+      const models = rows
+        .map((m) => {
+          const id = (m.id ?? m.model ?? '').trim();
+          if (!id) return null;
+          const label = (m.displayName ?? m.name ?? '').trim();
+          return { id, ...(label && label !== id ? { label } : {}) };
+        })
+        .filter((m): m is { id: string; label?: string } => m !== null);
+      return { models, source: 'kernel' };
+    })();
+    // 若超时先赢,work 稍后可能因 exit-handler reject 而拒绝——吞掉避免 unhandledRejection。
+    work.catch(() => { /* race/finally 已统一收口 shutdown */ });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            client.shutdown();
+            reject(new Error(`codex app-server model/list timed out after ${TIMEOUT_MS}ms`));
+          }, TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      client.shutdown();
+    }
   }
 
   /**
