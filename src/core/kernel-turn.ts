@@ -36,6 +36,19 @@ function uuidv5(name: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** `turn.done.reason === 'error'` 但上游没发过显式 error 事件时,合成可读错误——
+ *  否则 error 保持 undefined,UI 会把失败渲染成「空响应」占位而非错误卡
+ *  (bug-empty-response-2026-07-13)。显式 error / 非-error reason 原样透传。 */
+export function inferKernelTurnError(
+  reason: string | undefined,
+  existingError: string | undefined,
+  model?: string,
+): string | undefined {
+  if (existingError) return existingError;
+  if (reason !== 'error') return undefined;
+  return `kernel turn ended with reason=error but produced no error payload${model ? ` (model: ${model})` : ''}`;
+}
+
 export interface KernelTurnOpts {
   /** = agentPath;既是 compose 的 agentId,也是 threadId key 的一部分。 */
   agentId: string;
@@ -195,6 +208,8 @@ export async function runKernelTurn(opts: KernelTurnOpts): Promise<{ aborted: bo
     if (!signal.aborted) error = (err as Error).message;
     tt('kt.catch', { agent: agentId, turn, aborted: signal.aborted, error: (err as Error).message });
   } finally {
+    // abort 短路对齐 catch 分支的 !signal.aborted:取消的 turn 即便内核发 reason=error 也不合成错误卡。
+    if (!signal.aborted) error = inferKernelTurnError(reason, error, opts.model);
     // 第 2 层:收尾 CLI 内核 kernel.turn span(status/reason/usage/model 落 trace+log)。
     //   即便上面 throw / abort 也保证收口,避免假性「永不收口」误报。
     const doneReason = reason ?? (signal.aborted ? 'cancelled' : error ? 'error' : undefined);
