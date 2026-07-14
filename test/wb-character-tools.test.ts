@@ -60,7 +60,7 @@ function mirrorPluginToTmp() {
   mkdirSync(join(PLUGIN_DIR, 'server'), { recursive: true });
   mkdirSync(join(PLUGIN_DIR, 'schemas'), { recursive: true });
   // Copy the live manifest (D3 already updated entry.backend in it).
-  const manifestSrc = resolve(REPO_ROOT, 'packages/marketplace/plugins/wb-character/forgeax-extension.json');
+  const manifestSrc = resolve(REPO_ROOT, 'packages/marketplace/extensions/wb-character/forgeax-extension.json');
   copyFileSync(manifestSrc, join(PLUGIN_DIR, 'forgeax-extension.json'));
   // Schema files don't need to exist for ToolRegistry dispatch (they're
   // referenced by argsSchema/returnsSchema as path strings only). Touch
@@ -89,7 +89,7 @@ function mirrorPluginToTmp() {
   writeFileSync(
     join(PLUGIN_DIR, 'server', 'tool-handlers.ts'),
     `// scratch copy — points to the in-repo tool-handlers.ts via re-export
-     export { default, tools } from '${resolve(REPO_ROOT, 'packages/marketplace/plugins/wb-character/server/tool-handlers')}';
+     export { default, tools } from '${resolve(REPO_ROOT, 'packages/marketplace/extensions/wb-character/server/tool-handlers')}';
     `,
   );
 }

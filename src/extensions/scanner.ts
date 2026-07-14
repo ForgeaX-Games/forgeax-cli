@@ -11,6 +11,7 @@
  */
 import { existsSync, statSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
+import { renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { parseManifest } from '@forgeax/types';
@@ -39,16 +40,36 @@ export interface ScanResult {
 
 /** Resolve the canonical root directory for each layer.
  *
- *  L0: `<repo>/packages/marketplace/plugins`
- *  L1: `~/.forgeax/plugins`
- *  L2: `<projectRoot>/.forgeax/plugins`
+ *  L0: `<repo>/packages/marketplace/extensions`
+ *  L1: `~/.forgeax/extensions`
+ *  L2: `<projectRoot>/.forgeax/extensions`
  *
  *  Returns null for a layer when its root doesn't exist (so newcomers
  *  without ~/.forgeax don't trip an error). Caller can override roots
  *  via `opts` for tests. */
+/** ADR 0025 M3.5 — user-disk layer migration (the sanctioned compat
+ *  exception, same family as the scanner's legacy-id normalize): machines
+ *  from before the Extension rename carry `.forgeax/plugins` layer dirs.
+ *  Rename once at the single resolution point; idempotent — skipped when
+ *  the new dir already exists or the legacy one is absent. */
+function migrateLegacyLayerDir(base: string): void {
+  const legacy = resolve(base, '.forgeax/plugins');
+  const current = resolve(base, '.forgeax/extensions');
+  try {
+    if (safeIsDir(legacy) && !safeIsDir(current)) {
+      renameSync(legacy, current);
+      console.warn(`[extensions/scanner] migrated legacy layer dir ${legacy} -> ${current}`);
+    }
+  } catch (e) {
+    console.warn(`[extensions/scanner] legacy layer dir migration failed (${legacy}): ${(e as Error).message}`);
+  }
+}
+
 export function defaultLayerRoots(opts?: { repoRoot?: string; projectRoot?: string }): Record<ExtensionLayer, string | null> {
   const repoRoot = opts?.repoRoot ?? findRepoRoot();
   const projectRoot = opts?.projectRoot ?? defaultProjectRoot();
+  migrateLegacyLayerDir(homedir());
+  if (projectRoot) migrateLegacyLayerDir(projectRoot);
   const candidates = (paths: string[]) => paths.find((p) => safeIsDir(p)) ?? null;
   return {
     // L0 (host-bundled marketplace). assetRoot() resolves to `packages/` in dev
@@ -57,16 +78,16 @@ export function defaultLayerRoots(opts?: { repoRoot?: string; projectRoot?: stri
     // `packages/marketplace` in the bundle (marketplace lives at
     // resources/marketplace) and would otherwise yield 0 plugins.
     L0: candidates([
-      resolve(assetRoot(), 'marketplace/plugins'),
+      resolve(assetRoot(), 'marketplace/extensions'),
       ...(repoRoot
         ? [
-            resolve(repoRoot, 'packages/marketplace/plugins'),
-            resolve(repoRoot, 'marketplace/plugins'),
+            resolve(repoRoot, 'packages/marketplace/extensions'),
+            resolve(repoRoot, 'marketplace/extensions'),
           ]
         : []),
     ]),
-    L1: candidates([resolve(homedir(), '.forgeax/plugins')]),
-    L2: projectRoot ? candidates([resolve(projectRoot, '.forgeax/plugins')]) : null,
+    L1: candidates([resolve(homedir(), '.forgeax/extensions')]),
+    L2: projectRoot ? candidates([resolve(projectRoot, '.forgeax/extensions')]) : null,
   };
 }
 
@@ -131,12 +152,12 @@ async function scanLayer(layer: ExtensionLayer, root: string): Promise<ScanResul
         continue;
       }
       // ADR 0025 M3 — persistent-id namespace migration: manifests authored
-      // before the Extension rename carry `@forgeax-extension/*`. Normalize at
+      // before the Extension rename carry `@forgeax-plugin/*`. Normalize at
       // this single read point so user-forked L1/L2 extensions (old ids on
       // the user's disk — the sanctioned compat exception) keep resolving.
-      if (typeof parsed.manifest.id === 'string' && parsed.manifest.id.startsWith('@forgeax-extension/')) {
+      if (typeof parsed.manifest.id === 'string' && parsed.manifest.id.startsWith('@forgeax-plugin/')) {
         const legacyId = parsed.manifest.id;
-        parsed.manifest.id = legacyId.replace('@forgeax-extension/', '@forgeax-extension/');
+        parsed.manifest.id = legacyId.replace('@forgeax-plugin/', '@forgeax-extension/');
         console.warn(`[extensions/scanner] normalized legacy id ${legacyId} -> ${parsed.manifest.id} (${manifestPath})`);
       }
       // Doc 14 §4 — refuse entry.standalone.devOnly:true under production.

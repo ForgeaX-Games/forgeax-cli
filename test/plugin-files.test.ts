@@ -17,14 +17,14 @@ const PROJ_ROOT = TMP;
 
 beforeEach(() => {
   rmSync(TMP, { recursive: true, force: true });
-  mkdirSync(join(TMP, '.forgeax', 'plugins', SLUG, 'src'), { recursive: true });
+  mkdirSync(join(TMP, '.forgeax', 'extensions', SLUG, 'src'), { recursive: true });
   writeFileSync(
-    join(TMP, '.forgeax', 'plugins', SLUG, 'forgeax-extension.json'),
+    join(TMP, '.forgeax', 'extensions', SLUG, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', id: '@me/demo', kind: 'tool' }),
     'utf-8',
   );
   writeFileSync(
-    join(TMP, '.forgeax', 'plugins', SLUG, 'src', 'index.ts'),
+    join(TMP, '.forgeax', 'extensions', SLUG, 'src', 'index.ts'),
     'export const x = 1;\n',
     'utf-8',
   );
@@ -55,7 +55,7 @@ describe('Doc 09 §2.1 — plugin-files backend', () => {
   it('write creates parent dirs + reload picks up the change', () => {
     const r = writeExtensionFile(PROJ_ROOT, SLUG, 'docs/README.md', '# hi\n');
     expect(r.ok).toBe(true);
-    const abs = join(TMP, '.forgeax', 'plugins', SLUG, 'docs', 'README.md');
+    const abs = join(TMP, '.forgeax', 'extensions', SLUG, 'docs', 'README.md');
     expect(existsSync(abs)).toBe(true);
     expect(readFileSync(abs, 'utf-8')).toBe('# hi\n');
   });

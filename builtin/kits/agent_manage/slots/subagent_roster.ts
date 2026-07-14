@@ -103,7 +103,7 @@ export function buildRoster(ctx: AgentContext): RosterRow[] {
     if (d) descByPluginId.set(m.manifest.id, d.length > 260 ? `${d.slice(0, 257)}…` : d);
   }
 
-  // 2) Plugin agents (marketplace plugins under packages/marketplace/plugins).
+  // 2) Plugin agents (marketplace plugins under packages/marketplace/extensions).
   for (const entry of listAgents()) {
     const id = entry.definition.id;
     if (id === selfId || seen.has(id)) continue;

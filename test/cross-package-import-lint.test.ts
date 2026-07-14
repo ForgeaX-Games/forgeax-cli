@@ -77,7 +77,7 @@ const RULES: Rule[] = [
   },
   {
     scope: 'marketplace',
-    root: 'packages/marketplace/plugins',
+    root: 'packages/marketplace/extensions',
     forbid: (spec) => {
       if (spec.includes('packages/server')) return 'marketplace plugin must not import server internals';
       if (spec.includes('packages/interface')) return 'marketplace plugin must not import interface internals';

@@ -73,6 +73,20 @@ afterEach(() => {
 });
 
 describe('kind dispatcher', () => {
+  it('normalizes legacy @forgeax-plugin/* id at scan (sanctioned compat exception)', async () => {
+    // User-forked L1/L2 extensions predate the Extension rename and keep the
+    // old namespace on disk — the scanner's single read point rewrites it.
+    mkmanifest('L1', 'wb-legacy', {
+      id: '@forgeax-plugin/wb-legacy',
+      kind: 'workbench',
+      displayName: { zh: 'legacy' },
+      provides: { workbench: { id: 'legacy', position: 100 } },
+    });
+    const scan = await scanAllLayers(ROOTS());
+    expect(scan.errors).toEqual([]);
+    expect(scan.found.map((f) => f.manifest.id)).toEqual(['@forgeax-extension/wb-legacy']);
+  });
+
   it('extracts workbench entry with position/standalone/panelSize', async () => {
     mkmanifest('L0', 'wb-test', {
       id: '@forgeax-extension/wb-test',

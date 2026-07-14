@@ -10,7 +10,7 @@
  *      defensively, so callers can also rm the tmp dir at will.
  *
  *   2. `installPack(zipPath, opts)` — re-unzip, copy each plugin tree to
- *      `<destRoot>/.forgeax/plugins/<id>/`, honouring conflictPolicy. We do
+ *      `<destRoot>/.forgeax/extensions/<id>/`, honouring conflictPolicy. We do
  *      NOT call `reloadExtensions()` here — the API endpoint chains that. Tests
  *      can install + assert on the dest tree without touching the live
  *      snapshot.
@@ -273,7 +273,7 @@ export async function installPack(input: FxpackInstallInput): Promise<FxpackInst
   }
 
   try {
-    const pluginsRoot = join(input.destRoot, '.forgeax', 'plugins');
+    const pluginsRoot = join(input.destRoot, '.forgeax', 'extensions');
     mkdirSync(pluginsRoot, { recursive: true });
     const installed: string[] = [];
     const skipped: string[] = [];

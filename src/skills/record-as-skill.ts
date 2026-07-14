@@ -80,7 +80,7 @@ export function recordAsSkill(input: RecordSkillInput): RecordSkillResult {
   }
 
   const slug = slugFor(input.pluginId);
-  const pluginDir = join(input.projectRoot, '.forgeax', 'plugins', slug);
+  const pluginDir = join(input.projectRoot, '.forgeax', 'extensions', slug);
   if (existsSync(pluginDir)) {
     return { ok: false, code: 'exists', error: `${pluginDir} already exists; pick a new pluginId` };
   }

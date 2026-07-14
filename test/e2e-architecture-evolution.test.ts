@@ -238,7 +238,7 @@ describe('architecture-evolution · trinity lifecycle', () => {
           kind: 'tool',
           displayName: { en: 'roundtrip' },
           author: { name: 'tester' },
-          permissions: ['fs:read:.forgeax/plugins/roundtrip/**'],
+          permissions: ['fs:read:.forgeax/extensions/roundtrip/**'],
           provides: { tools: [{ id: 'roundtrip.ping', exposedToAI: true }] },
           entry: { backend: './handler.ts' },
           compatibleWith: { 'forgeax-bus': '^1.0.0' },
@@ -274,21 +274,21 @@ describe('architecture-evolution · trinity lifecycle', () => {
     const userRoot = join(TMP, 'user-home');
     mkdirSync(userRoot, { recursive: true });
     const inst = await installPack({ zipPath: fxpack, destRoot: userRoot, destLayer: 'L2' });
-    // installPack writes <destRoot>/.forgeax/plugins/<id>/ regardless of
+    // installPack writes <destRoot>/.forgeax/extensions/<id>/ regardless of
     // destLayer — the layer label is metadata for the ledger; on-disk path
-    // is the same. We then point our L2 scan root at <destRoot>/.forgeax/plugins.
+    // is the same. We then point our L2 scan root at <destRoot>/.forgeax/extensions.
     expect(inst.ok).toBe(true);
     if (!inst.ok) return;
     expect(inst.installed).toEqual(['@me/roundtrip']);
     expect(
-      existsSync(join(userRoot, '.forgeax/plugins/roundtrip/forgeax-extension.json')),
+      existsSync(join(userRoot, '.forgeax/extensions/roundtrip/forgeax-extension.json')),
     ).toBe(true);
 
     // Re-scan with the freshly-installed tree as a custom L2 root.
     const scan = await scanAllLayers({
       L0: join(TMP, 'L0'),
       L1: join(TMP, 'L1'),
-      L2: join(userRoot, '.forgeax/plugins'),
+      L2: join(userRoot, '.forgeax/extensions'),
     });
     const merge = mergeManifests(scan.found);
     const kinds = buildKindRegistry(merge.manifests);
@@ -316,7 +316,7 @@ describe('architecture-evolution · trinity lifecycle', () => {
     // semantically (no transform during pack/install).
     const installedManifest = JSON.parse(
       readFileSync(
-        join(userRoot, '.forgeax/plugins/roundtrip/forgeax-extension.json'),
+        join(userRoot, '.forgeax/extensions/roundtrip/forgeax-extension.json'),
         'utf-8',
       ),
     );

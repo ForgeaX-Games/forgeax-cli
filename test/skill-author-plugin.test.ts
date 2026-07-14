@@ -2,7 +2,7 @@
  * Phase D6 (1/4) — meta:author-plugin discovery + dispatch contract.
  *
  * Mirrors the real marketplace plugin at
- *   packages/marketplace/plugins/skill-author-plugin/
+ *   packages/marketplace/extensions/skill-author-plugin/
  * into a /tmp scratch L1 root and verifies:
  *   1. The skill is registered with id `meta:author-plugin` and slash trigger
  *      `/author-plugin`.
@@ -27,7 +27,7 @@ import { _resetEventBusForTests } from '../src/events/bus';
 const REPO_ROOT = resolve(import.meta.dir, '../../..');
 const TMP = `/tmp/forgeax-skill-author-${process.pid}`;
 const PLUGIN_DIR = join(TMP, 'L1', 'skill-author-plugin');
-const SRC_DIR = resolve(REPO_ROOT, 'packages/marketplace/plugins/skill-author-plugin');
+const SRC_DIR = resolve(REPO_ROOT, 'packages/marketplace/extensions/skill-author-plugin');
 
 async function reload() {
   const scan = await scanAllLayers({

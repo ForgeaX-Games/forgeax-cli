@@ -3,7 +3,7 @@
  *
  * 把 plugin <dir>/avatar/AVATAR.md (YAML frontmatter + markdown 表格) 解析成
  * 运行时可用的 AgentAvatarRules 对象, file 字段被规范化成 /api/files/raw?path=
- * 形式的相对 URL (项目根下的 packages/marketplace/plugins/<id>/avatar/<webm>).
+ * 形式的相对 URL (项目根下的 packages/marketplace/extensions/<id>/avatar/<webm>).
  *
  * 见 ADR-0019 §Decision §3, §5.
  */

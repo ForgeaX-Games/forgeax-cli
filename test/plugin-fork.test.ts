@@ -4,7 +4,7 @@
  * The fork helper does three things, in order: copy src tree → patch manifest
  * id + displayName → leave the registry stale (caller calls reloadExtensions).
  * These tests pin all three on a tmp-rooted fixture so we don't pollute the
- * real ~/.forgeax/plugins/.
+ * real ~/.forgeax/extensions/.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -79,7 +79,7 @@ describe('plugin fork', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.id).toBe('@me/src-fork');
-    expect(r.dir).toBe(join(TMP, '.forgeax/plugins/src-fork'));
+    expect(r.dir).toBe(join(TMP, '.forgeax/extensions/src-fork'));
 
     const manifest = JSON.parse(readFileSync(join(r.dir, 'forgeax-extension.json'), 'utf-8'));
     expect(manifest.id).toBe('@me/src-fork');

@@ -193,7 +193,7 @@ async function cmdList(args: ParsedArgs): Promise<void> {
   for (const { layer: lyr, root } of roots) {
     process.stdout.write(`# ${lyr} · ${root}\n`);
     const ledger = readInstalled(root);
-    const dir = join(root, '.forgeax', 'plugins');
+    const dir = join(root, '.forgeax', 'extensions');
     const onDisk = existsSync(dir) ? readdirSync(dir).filter((f) => {
       try { return statSync(join(dir, f)).isDirectory(); } catch { return false; }
     }) : [];

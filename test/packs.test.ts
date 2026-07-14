@@ -36,7 +36,7 @@ function writeMinimalPlugin(srcDir: string, id: string, version = '0.1.0'): void
     kind: 'tool',
     displayName: { en: id },
     author: { name: 'tester' },
-    permissions: [`fs:read:.forgeax/plugins/${id}/**`],
+    permissions: [`fs:read:.forgeax/extensions/${id}/**`],
     provides: { tools: [{ id: `${id}:hello` }] },
     entry: { backend: './handlers.ts' },
     compatibleWith: { 'forgeax-bus': '^1.0.0' },
@@ -165,7 +165,7 @@ describe('packs importer', () => {
     if (!insp.ok) return;
     expect(insp.manifest.contains).toHaveLength(1);
     expect(insp.trust.permissions['@me/inspectable']).toEqual([
-      'fs:read:.forgeax/plugins/@me/inspectable/**',
+      'fs:read:.forgeax/extensions/@me/inspectable/**',
     ]);
     expect(insp.trust.signed).toBe(false);
     expect(insp.trust.warnings.some((w) => w.includes('未签名'))).toBe(true);
@@ -231,7 +231,7 @@ describe('packs importer', () => {
     expect(r.code).toBe('manifest_missing');
   });
 
-  it('installPack writes plugin tree under <destRoot>/.forgeax/plugins/<id>/', async () => {
+  it('installPack writes plugin tree under <destRoot>/.forgeax/extensions/<id>/', async () => {
     const src = join(TMP, 'src', 'i');
     writeMinimalPlugin(src, '@me/installable');
     const out = join(TMP, 'i.fxpack');
@@ -255,7 +255,7 @@ describe('packs importer', () => {
     expect(r.skipped).toEqual([]);
 
     const installedManifest = readFileSync(
-      join(destRoot, '.forgeax', 'plugins', 'installable', 'forgeax-extension.json'),
+      join(destRoot, '.forgeax', 'extensions', 'installable', 'forgeax-extension.json'),
       'utf-8',
     );
     expect(JSON.parse(installedManifest).id).toBe('@me/installable');
@@ -273,9 +273,9 @@ describe('packs importer', () => {
     });
 
     const destRoot = join(TMP, 'dest');
-    mkdirSync(join(destRoot, '.forgeax/plugins/skippable'), { recursive: true });
+    mkdirSync(join(destRoot, '.forgeax/extensions/skippable'), { recursive: true });
     writeFileSync(
-      join(destRoot, '.forgeax/plugins/skippable/MARKER'),
+      join(destRoot, '.forgeax/extensions/skippable/MARKER'),
       'pre-existing',
       'utf-8',
     );
@@ -292,7 +292,7 @@ describe('packs importer', () => {
     expect(r.installed).toEqual([]);
     // The marker survived → existing tree was untouched.
     expect(
-      readFileSync(join(destRoot, '.forgeax/plugins/skippable/MARKER'), 'utf-8'),
+      readFileSync(join(destRoot, '.forgeax/extensions/skippable/MARKER'), 'utf-8'),
     ).toBe('pre-existing');
   });
 
@@ -308,8 +308,8 @@ describe('packs importer', () => {
     });
 
     const destRoot = join(TMP, 'dest');
-    mkdirSync(join(destRoot, '.forgeax/plugins/overwriteable'), { recursive: true });
-    writeFileSync(join(destRoot, '.forgeax/plugins/overwriteable/STALE'), 'old', 'utf-8');
+    mkdirSync(join(destRoot, '.forgeax/extensions/overwriteable'), { recursive: true });
+    writeFileSync(join(destRoot, '.forgeax/extensions/overwriteable/STALE'), 'old', 'utf-8');
 
     const r = await installPack({
       zipPath: out,
@@ -321,8 +321,8 @@ describe('packs importer', () => {
     if (!r.ok) return;
     expect(r.installed).toEqual(['@me/overwriteable']);
     // STALE marker is gone, manifest is now present.
-    expect(existsSync(join(destRoot, '.forgeax/plugins/overwriteable/STALE'))).toBe(false);
-    expect(existsSync(join(destRoot, '.forgeax/plugins/overwriteable/forgeax-extension.json'))).toBe(true);
+    expect(existsSync(join(destRoot, '.forgeax/extensions/overwriteable/STALE'))).toBe(false);
+    expect(existsSync(join(destRoot, '.forgeax/extensions/overwriteable/forgeax-extension.json'))).toBe(true);
   });
 
   it('installPack returns bad_input when zip path missing', async () => {
@@ -1035,7 +1035,7 @@ describe('packs round-trip', () => {
     // forgeax-extension.json (no transform during pack/unpack).
     const original = readFileSync(join(src, 'forgeax-extension.json'), 'utf-8');
     const installed = readFileSync(
-      join(destRoot, '.forgeax/plugins/round-trip/forgeax-extension.json'),
+      join(destRoot, '.forgeax/extensions/round-trip/forgeax-extension.json'),
       'utf-8',
     );
     expect(JSON.parse(installed)).toEqual(JSON.parse(original));

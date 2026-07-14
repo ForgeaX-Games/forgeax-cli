@@ -171,10 +171,10 @@ export interface FxpackInspectInput {
 
 export interface FxpackInstallInput {
   zipPath: string;
-  /** Where to install. We always write under <destRoot>/.forgeax/plugins/<id>/ */
+  /** Where to install. We always write under <destRoot>/.forgeax/extensions/<id>/ */
   destRoot: string;
   trustLookup?: FxpackTrustLookup;
-  /** L1 (~/.forgeax/plugins) is the default; L2 picks <projectRoot>/.forgeax. */
+  /** L1 (~/.forgeax/extensions) is the default; L2 picks <projectRoot>/.forgeax. */
   destLayer: 'L1' | 'L2';
   /** What to do when an id already exists at destRoot.
    *  - 'skip'      : leave the existing copy, drop the new one

@@ -7,7 +7,7 @@
  *
  *   1. Plugin slug is matched against `[A-Za-z0-9_-]+`. Anything with `..`,
  *      `/`, or `\\` is rejected at parse time.
- *   2. All file operations resolve under `<projectRoot>/.forgeax/plugins/<slug>/`
+ *   2. All file operations resolve under `<projectRoot>/.forgeax/extensions/<slug>/`
  *      and we re-check the resolved real path is still inside that prefix.
  *   3. File extensions are whitelisted to text formats the editor knows how
  *      to render. Binary writes are rejected.
@@ -72,7 +72,7 @@ export type WriteResult =
   | FileError;
 
 function pluginRoot(projectRoot: string, slug: string): string {
-  return join(projectRoot, '.forgeax', 'plugins', slug);
+  return join(projectRoot, '.forgeax', 'extensions', slug);
 }
 
 function checkSlug(slug: string): { ok: true } | FileError {

@@ -2,7 +2,7 @@
  * Phase D6 (2/4) — Fork an existing plugin into L1 or L2.
  *
  * "Fork & Vibe" path from 09-NON-EXPERT-AUTHORING.md §2.2:
- *   - copy <srcDir>/ → <destRoot>/.forgeax/plugins/<slug>/
+ *   - copy <srcDir>/ → <destRoot>/.forgeax/extensions/<slug>/
  *   - patch forgeax-extension.json: rewrite `id`, append "(我的)" / "(mine)" to
  *     displayName so the fork is visually distinct in the sidebar
  *   - L1 has higher precedence than L0, so the fork immediately shadows the
@@ -73,12 +73,12 @@ export async function forkExtension(input: ForkInput): Promise<ForkResult> {
   const roots = defaultLayerRoots({ projectRoot: input.projectRoot });
   let destLayerRoot: string;
   if (layer === 'L1') {
-    destLayerRoot = roots.L1 ?? resolve(homedir(), '.forgeax/plugins');
+    destLayerRoot = roots.L1 ?? resolve(homedir(), '.forgeax/extensions');
   } else {
     if (!input.projectRoot) {
       return { ok: false, code: 'bad_input', error: 'projectRoot required for destLayer=L2' };
     }
-    destLayerRoot = roots.L2 ?? resolve(input.projectRoot, '.forgeax/plugins');
+    destLayerRoot = roots.L2 ?? resolve(input.projectRoot, '.forgeax/extensions');
   }
   const destDir = join(destLayerRoot, slugFor(newId));
   if (existsSync(destDir)) {

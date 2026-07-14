@@ -47,9 +47,9 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
     expect(existsSync(r.skillPath)).toBe(true);
 
     // Scanner should pick it up under the project's L2 root —
-    // .forgeax/plugins/<slug> mirrors fork + install layout.
+    // .forgeax/extensions/<slug> mirrors fork + install layout.
     // Move it into a synthetic L2 root so scanAllLayers can see it.
-    const L2 = join(TMP, '.forgeax', 'plugins');
+    const L2 = join(TMP, '.forgeax', 'extensions');
     // Pin L0/L1 to empty dirs so we don't accidentally scan the host repo.
     const L0 = join(TMP, '_empty_L0');
     const L1 = join(TMP, '_empty_L1');
