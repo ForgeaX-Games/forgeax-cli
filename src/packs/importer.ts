@@ -11,7 +11,7 @@
  *
  *   2. `installPack(zipPath, opts)` — re-unzip, copy each plugin tree to
  *      `<destRoot>/.forgeax/plugins/<id>/`, honouring conflictPolicy. We do
- *      NOT call `reloadPlugins()` here — the API endpoint chains that. Tests
+ *      NOT call `reloadExtensions()` here — the API endpoint chains that. Tests
  *      can install + assert on the dest tree without touching the live
  *      snapshot.
  *
@@ -25,7 +25,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { ManifestSchema, type PluginManifest } from '@forgeax/types';
-import { getPluginSnapshot } from '../plugins/registry';
+import { getExtensionSnapshot } from '../extensions/registry';
 import {
   FxpackManifestSchema,
   type FxpackManifest,
@@ -83,7 +83,7 @@ function walk(root: string, out: string[] = [], rel = ''): string[] {
 }
 
 function loadPluginManifest(srcDir: string): PluginManifest {
-  const raw = JSON.parse(readFileSync(join(srcDir, 'forgeax-plugin.json'), 'utf-8'));
+  const raw = JSON.parse(readFileSync(join(srcDir, 'forgeax-extension.json'), 'utf-8'));
   const parsed = ManifestSchema.safeParse(raw);
   if (!parsed.success) {
     throw Object.assign(new Error(`plugin manifest invalid in ${srcDir}: ${parsed.error.issues.map((i) => i.message).join('; ')}`), {
@@ -96,7 +96,7 @@ function loadPluginManifest(srcDir: string): PluginManifest {
 function detectConflicts(
   newPlugins: Array<{ id: string; version: string }>,
 ): FxpackTrustDescriptor['conflicts'] {
-  const snap = getPluginSnapshot();
+  const snap = getExtensionSnapshot();
   const out: FxpackTrustDescriptor['conflicts'] = [];
   for (const np of newPlugins) {
     const hit = snap.manifests.find((m) => m.manifest.id === np.id);

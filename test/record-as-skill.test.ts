@@ -14,9 +14,9 @@ import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { recordAsSkill, distillRecordedSkill } from '../src/skills/record-as-skill';
 import type { LlmCompleter } from '../src/skills/record-as-skill';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
 
 const TMP = `/tmp/forgeax-record-${process.pid}`;
 

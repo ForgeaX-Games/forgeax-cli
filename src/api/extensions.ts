@@ -1,31 +1,41 @@
 /**
- * Phase B3 — /api/plugins router.
+ * /api/extensions router (ADR 0025 M3; formerly Phase B3's /api/plugins).
  *
- * Surfaces the new ManifestScanner+Merger+KindLoader pipeline. The legacy
- * `/api/bus/plugins` endpoint (api/bus.ts) stays for now and is consumed by
- * Sidebar/WorkbenchPluginHost; B4 retires it.
+ * Surfaces the ManifestScanner+Merger+KindLoader pipeline. The legacy
+ * `/api/bus/plugins` endpoint is gone — the slim shell-strip list now lives
+ * at GET /list here (impl: extensions/slim-list.ts).
  *
- *   GET  /api/plugins/manifests   → full snapshot incl. kinds + issues
- *   POST /api/plugins/reload      → re-scan disk, return fresh snapshot
+ *   GET  /api/extensions/list[?kind=] → slim UI list (dev-port overrides + sort)
+ *   GET  /api/extensions/manifests    → full snapshot incl. kinds + issues
+ *   POST /api/extensions/reload       → re-scan disk, return fresh snapshot
  */
 import { Hono } from 'hono';
-import { getPluginSnapshot, reloadPlugins } from '../plugins/registry';
-import { forkPlugin } from '../plugins/fork';
+import { getExtensionSnapshot, reloadExtensions } from '../extensions/registry';
+import { forkExtension } from '../extensions/fork';
 import { readInstalled, readTrust, recordTrust, latestTrustFor } from '../packs/ledger';
 import { recordAsSkill, distillRecordedSkill } from '../skills/record-as-skill';
 import { complete as llmComplete } from '../lib/llm-gateway';
-import { listPluginFiles, readPluginFile, writePluginFile } from '../plugins/files';
+import { listExtensionFiles, readExtensionFile, writeExtensionFile } from '../extensions/files';
+import { loadExtensionList } from '../extensions/slim-list';
 
-export function createPluginsRouter(): Hono {
+export function createExtensionsRouter(): Hono {
   const router = new Hono();
 
+  /** Slim list for the shell strip (formerly GET /api/bus/plugins). */
+  router.get('/list', async (c) => {
+    const kind = c.req.query('kind');
+    const all = await loadExtensionList();
+    const items = kind ? all.filter((p) => p.kind === kind) : all;
+    return c.json({ kind: kind ?? null, count: items.length, items });
+  });
+
   router.get('/manifests', (c) => {
-    const snap = getPluginSnapshot();
+    const snap = getExtensionSnapshot();
     return c.json(serialize(snap));
   });
 
   router.post('/reload', async (c) => {
-    const snap = await reloadPlugins();
+    const snap = await reloadExtensions();
     return c.json(serialize(snap));
   });
 
@@ -40,7 +50,7 @@ export function createPluginsRouter(): Hono {
     if (!body?.srcId) {
       return c.json({ ok: false, code: 'bad_input', error: 'expected { srcId, newId?, destLayer?, projectRoot? }' }, 400);
     }
-    const result = await forkPlugin({
+    const result = await forkExtension({
       srcId: body.srcId,
       newId: body.newId,
       destLayer: body.destLayer,
@@ -48,7 +58,7 @@ export function createPluginsRouter(): Hono {
     });
     if (result.ok) {
       // Refresh registry so the fork is immediately discoverable.
-      await reloadPlugins();
+      await reloadExtensions();
     }
     return c.json(result, result.ok ? 200 : 400);
   });
@@ -149,7 +159,7 @@ export function createPluginsRouter(): Hono {
       : recordAsSkill(baseInput);
     if (result.ok) {
       // Refresh registry so the freshly-recorded skill is callable immediately.
-      await reloadPlugins();
+      await reloadExtensions();
       return c.json(result);
     }
     return c.json(result, result.code === 'bad_input' ? 400 : 409);
@@ -163,10 +173,10 @@ export function createPluginsRouter(): Hono {
     const slug = c.req.query('slug') ?? '';
     const path = c.req.query('path');
     if (path) {
-      const r = readPluginFile(root, slug, path);
+      const r = readExtensionFile(root, slug, path);
       return c.json(r, r.ok ? 200 : codeToHttp(r.code));
     }
-    const r = listPluginFiles(root, slug);
+    const r = listExtensionFiles(root, slug);
     return c.json(r, r.ok ? 200 : codeToHttp(r.code));
   });
 
@@ -180,11 +190,11 @@ export function createPluginsRouter(): Hono {
         400,
       );
     }
-    const r = writePluginFile(body.root ?? process.cwd(), body.slug, body.path, body.content);
+    const r = writeExtensionFile(body.root ?? process.cwd(), body.slug, body.path, body.content);
     if (r.ok) {
       // Manifest edits should be visible immediately. Reload in the
       // background — we don't await it so the editor stays responsive.
-      reloadPlugins().catch(() => { /* swallow; UI can hit /reload */ });
+      reloadExtensions().catch(() => { /* swallow; UI can hit /reload */ });
       return c.json(r);
     }
     return c.json(r, codeToHttp(r.code));
@@ -206,7 +216,7 @@ function codeToHttp(code: string): 400 | 403 | 404 | 409 | 413 | 500 {
   }
 }
 
-function serialize(snap: ReturnType<typeof getPluginSnapshot>) {
+function serialize(snap: ReturnType<typeof getExtensionSnapshot>) {
   return {
     generation: snap.generation,
     loadedAt: snap.loadedAt,

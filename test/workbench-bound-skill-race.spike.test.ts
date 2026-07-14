@@ -33,10 +33,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
-import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/plugins/registry';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
+import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/extensions/registry';
 import { _resetToolHandlerCacheForTests, callTool } from '../src/tools/registry';
 import { runSkill } from '../src/skills/runner';
 import { _resetEventBusForTests } from '../src/events/bus';
@@ -51,7 +51,7 @@ async function buildSnapshot(rootDir: string, includeWb: boolean) {
     const wb = join(rootDir, 'L1', 'wb-host');
     mkdirSync(join(wb, 'server'), { recursive: true });
     writeFileSync(
-      join(wb, 'forgeax-plugin.json'),
+      join(wb, 'forgeax-extension.json'),
       JSON.stringify({
         schemaVersion: 1,
         version: '0.1.0',
@@ -83,7 +83,7 @@ async function buildSnapshot(rootDir: string, includeWb: boolean) {
   const sk = join(rootDir, 'L1', 'wb-skill');
   mkdirSync(sk, { recursive: true });
   writeFileSync(
-    join(sk, 'forgeax-plugin.json'),
+    join(sk, 'forgeax-extension.json'),
     JSON.stringify({
       schemaVersion: 1,
       version: '0.1.0',

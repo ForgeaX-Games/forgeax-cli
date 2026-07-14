@@ -6,7 +6,7 @@
  * and synthesize a ts skill that re-issues each call in order. Output is
  * a complete L2 plugin directory:
  *
- *   forgeax-plugin.json  — manifest with single `skill` provide
+ *   forgeax-extension.json  — manifest with single `skill` provide
  *   skill.mjs            — esm module that calls ctx.callTool() per step
  *
  * `distillRecordedSkill()` wraps that with an LLM-driven enrichment step:
@@ -112,7 +112,7 @@ export function recordAsSkill(input: RecordSkillInput): RecordSkillResult {
     },
     provides: { skills: [skillEntry] },
   };
-  const manifestPath = join(pluginDir, 'forgeax-plugin.json');
+  const manifestPath = join(pluginDir, 'forgeax-extension.json');
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
 
   const skillPath = join(pluginDir, 'skill.mjs');

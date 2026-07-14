@@ -6,10 +6,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getEventBus, _resetEventBusForTests, type EventEnvelope } from '../src/events/bus';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
-import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/plugins/registry';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
+import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/extensions/registry';
 import { callTool, _resetToolHandlerCacheForTests } from '../src/tools/registry';
 
 beforeEach(() => {
@@ -123,13 +123,13 @@ describe('callTool auto-emit', () => {
   async function setupTool(handler: string) {
     // Bun caches dynamic-import modules by URL — use a unique filename per
     // test so a second setupTool call in the same suite doesn't return a
-    // stale module body. (forgeax-plugin.json is rebuilt to point at the
+    // stale module body. (forgeax-extension.json is rebuilt to point at the
     // new file.)
     const handlerName = `h-${crypto.randomUUID()}.mjs`;
     const dir = join(TMP, 'L1', 'demo');
     mkdirSync(dir, { recursive: true });
     writeFileSync(
-      join(dir, 'forgeax-plugin.json'),
+      join(dir, 'forgeax-extension.json'),
       JSON.stringify({
         schemaVersion: 1,
         version: '0.1.0',

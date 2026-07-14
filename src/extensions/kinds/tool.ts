@@ -24,12 +24,12 @@
 import { dirname, isAbsolute, resolve } from 'node:path';
 import type { ManifestToolEntry, PluginManifest } from '@forgeax/types';
 import type { MergedManifest } from '../merger';
-import type { PluginLayer } from '../scanner';
+import type { ExtensionLayer } from '../scanner';
 import type { KindLoadIssue } from './types';
 
 export interface ToolEntry {
   pluginId: string;
-  layer: PluginLayer;
+  layer: ExtensionLayer;
   toolId: string;
   /** Absolute path to args JSONSchema file, or the inline object. */
   argsSchema?: unknown;

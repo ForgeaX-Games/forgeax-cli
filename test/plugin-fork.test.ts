@@ -2,18 +2,18 @@
  * Phase D6 (2/4) — fork backend.
  *
  * The fork helper does three things, in order: copy src tree → patch manifest
- * id + displayName → leave the registry stale (caller calls reloadPlugins).
+ * id + displayName → leave the registry stale (caller calls reloadExtensions).
  * These tests pin all three on a tmp-rooted fixture so we don't pollute the
  * real ~/.forgeax/plugins/.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { forkPlugin, defaultForkId } from '../src/plugins/fork';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
-import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/plugins/registry';
+import { forkExtension, defaultForkId } from '../src/extensions/fork';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
+import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/extensions/registry';
 
 const TMP = `/tmp/forgeax-fork-${process.pid}`;
 
@@ -39,7 +39,7 @@ function writeSrc(root: string, dirName: string, body: Record<string, unknown>):
   const dir = join(root, dirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'forgeax-plugin.json'),
+    join(dir, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', ...body }),
     'utf-8',
   );
@@ -75,13 +75,13 @@ describe('plugin fork', () => {
       provides: { tools: [{ id: 's.t' }] },
     });
     await reload();
-    const r = await forkPlugin({ srcId: '@me/src', newId: '@me/src-fork', destLayer: 'L2', projectRoot: TMP });
+    const r = await forkExtension({ srcId: '@me/src', newId: '@me/src-fork', destLayer: 'L2', projectRoot: TMP });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.id).toBe('@me/src-fork');
     expect(r.dir).toBe(join(TMP, '.forgeax/plugins/src-fork'));
 
-    const manifest = JSON.parse(readFileSync(join(r.dir, 'forgeax-plugin.json'), 'utf-8'));
+    const manifest = JSON.parse(readFileSync(join(r.dir, 'forgeax-extension.json'), 'utf-8'));
     expect(manifest.id).toBe('@me/src-fork');
     expect(manifest.displayName.en).toContain('(我的)');
     expect(manifest.displayName.zh).toContain('(我的)');
@@ -105,7 +105,7 @@ describe('plugin fork', () => {
       provides: { tools: [{ id: 'b.t' }] },
     });
     await reload();
-    const r = await forkPlugin({ srcId: '@me/a', newId: '@me/b', destLayer: 'L2', projectRoot: TMP });
+    const r = await forkExtension({ srcId: '@me/a', newId: '@me/b', destLayer: 'L2', projectRoot: TMP });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.code).toBe('exists');
@@ -120,7 +120,7 @@ describe('plugin fork', () => {
       provides: { tools: [{ id: 's.t' }] },
     });
     await reload();
-    const r = await forkPlugin({ srcId: '@me/src', newId: 'no-scope', destLayer: 'L2', projectRoot: TMP });
+    const r = await forkExtension({ srcId: '@me/src', newId: 'no-scope', destLayer: 'L2', projectRoot: TMP });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.code).toBe('bad_input');
@@ -128,7 +128,7 @@ describe('plugin fork', () => {
 
   it('refuses unknown srcId', async () => {
     await reload();
-    const r = await forkPlugin({ srcId: '@nope/nope', destLayer: 'L2', projectRoot: TMP });
+    const r = await forkExtension({ srcId: '@nope/nope', destLayer: 'L2', projectRoot: TMP });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.code).toBe('not_found');
@@ -143,7 +143,7 @@ describe('plugin fork', () => {
       provides: { tools: [{ id: 's.t' }] },
     });
     await reload();
-    const r = await forkPlugin({ srcId: '@me/src', destLayer: 'L2' });
+    const r = await forkExtension({ srcId: '@me/src', destLayer: 'L2' });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.code).toBe('bad_input');

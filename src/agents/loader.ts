@@ -19,8 +19,8 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve, basename } from 'node:path';
 import type { SkillRef } from '@forgeax/types';
 import { pickI18n } from '@forgeax/types';
-import type { AgentEntry, SkillEntry } from '../plugins/kinds';
-import { getPluginSnapshot } from '../plugins/registry';
+import type { AgentEntry, SkillEntry } from '../extensions/kinds';
+import { getExtensionSnapshot } from '../extensions/registry';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { assetRoot } from '@forgeax/platform-io';
 import {
@@ -49,11 +49,11 @@ export interface ComposedSystemPrompt {
 }
 
 export function listAgents(): AgentEntry[] {
-  return getPluginSnapshot().kinds.agents.slice();
+  return getExtensionSnapshot().kinds.agents.slice();
 }
 
 export function lookupAgent(agentId: string): AgentEntry | null {
-  const snap = getPluginSnapshot();
+  const snap = getExtensionSnapshot();
   return snap.kinds.agents.find((a) => a.definition.id === agentId) ?? null;
 }
 
@@ -65,7 +65,7 @@ export function resolveSkill(
   ref: SkillRef,
   contextPluginId?: string,
 ): SkillEntry | null {
-  const snap = getPluginSnapshot();
+  const snap = getExtensionSnapshot();
   if (ref.source === 'plugin') {
     return snap.kinds.skills.find(
       (s) => s.pluginId === ref.pluginId && (!ref.skillId || s.definition.id === ref.skillId),
@@ -396,7 +396,7 @@ export async function resolvePersonaForAgent(agentId: string): Promise<{
 }
 
 function pluginDirOf(pluginId: string): string | null {
-  const m = getPluginSnapshot().manifests.find((mm) => mm.manifest.id === pluginId);
+  const m = getExtensionSnapshot().manifests.find((mm) => mm.manifest.id === pluginId);
   if (!m) return null;
   return dirname(m.originPath);
 }

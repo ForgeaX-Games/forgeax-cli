@@ -12,7 +12,7 @@
  *
  * `pack --closure` and `install` need the in-process plugin registry loaded
  * so dependency closure / conflict detection has data to work with; we call
- * `reloadPlugins()` lazily on first use.
+ * `reloadExtensions()` lazily on first use.
  */
 
 import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
@@ -21,7 +21,7 @@ import { homedir } from 'node:os';
 import { exportPack, closureFrom } from '../packs/exporter';
 import { inspectPack, installPack } from '../packs/importer';
 import { readInstalled } from '../packs/ledger';
-import { reloadPlugins } from '../plugins/registry';
+import { reloadExtensions } from '../extensions/registry';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 
 interface ParsedArgs {
@@ -59,7 +59,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function readPluginManifestSync(srcDir: string): { id: string; version: string; kind: string } {
-  const raw = JSON.parse(readFileSync(join(srcDir, 'forgeax-plugin.json'), 'utf-8'));
+  const raw = JSON.parse(readFileSync(join(srcDir, 'forgeax-extension.json'), 'utf-8'));
   return { id: String(raw.id), version: String(raw.version ?? '0.1.0'), kind: String(raw.kind ?? 'agent') };
 }
 
@@ -70,8 +70,8 @@ async function cmdPack(args: ParsedArgs): Promise<void> {
     process.exit(2);
   }
   const srcDir = resolve(dir);
-  if (!existsSync(join(srcDir, 'forgeax-plugin.json'))) {
-    process.stderr.write(`error: ${srcDir}/forgeax-plugin.json not found\n`);
+  if (!existsSync(join(srcDir, 'forgeax-extension.json'))) {
+    process.stderr.write(`error: ${srcDir}/forgeax-extension.json not found\n`);
     process.exit(1);
   }
   const m = readPluginManifestSync(srcDir);
@@ -81,12 +81,12 @@ async function cmdPack(args: ParsedArgs): Promise<void> {
 
   const plugins: Array<{ id: string; srcDir: string }> = [{ id: m.id, srcDir }];
   if (args.flags.closure) {
-    await reloadPlugins();
+    await reloadExtensions();
     const closure = closureFrom(m.id);
     if (closure.missing.length) {
       process.stderr.write(`warn: closure missing ids: ${closure.missing.join(', ')}\n`);
     }
-    const snap = (await import('../plugins/registry')).getPluginSnapshot();
+    const snap = (await import('../extensions/registry')).getExtensionSnapshot();
     for (const depId of closure.ids) {
       if (depId === m.id) continue;
       const hit = snap.manifests.find((mm) => mm.manifest.id === depId);
@@ -165,7 +165,7 @@ async function cmdInstall(args: ParsedArgs): Promise<void> {
   const destRoot = layer === 'L1' ? homedir() : (args.flags.root ? resolve(String(args.flags.root)) : defaultProjectRoot());
   const policy = (args.flags.policy as 'skip' | 'overwrite' | 'rename' | undefined) ?? 'skip';
 
-  await reloadPlugins(); // populate snapshot for conflict detection
+  await reloadExtensions(); // populate snapshot for conflict detection
   const result = await installPack({
     zipPath: resolve(file),
     destRoot,
@@ -181,7 +181,7 @@ async function cmdInstall(args: ParsedArgs): Promise<void> {
   for (const id of result.installed) process.stdout.write(`  + ${id}\n`);
   for (const id of result.skipped) process.stdout.write(`  = ${id} (skipped, already present)\n`);
   for (const [id, slug] of Object.entries(result.renamed)) process.stdout.write(`  ~ ${id} → ${slug}\n`);
-  await reloadPlugins();
+  await reloadExtensions();
 }
 
 async function cmdList(args: ParsedArgs): Promise<void> {
@@ -203,7 +203,7 @@ async function cmdList(args: ParsedArgs): Promise<void> {
     }
     const ledgerById = new Map(ledger.map((e) => [e.id, e]));
     for (const slug of onDisk) {
-      const manifestPath = join(dir, slug, 'forgeax-plugin.json');
+      const manifestPath = join(dir, slug, 'forgeax-extension.json');
       if (!existsSync(manifestPath)) continue;
       let id = slug;
       let version = '?';

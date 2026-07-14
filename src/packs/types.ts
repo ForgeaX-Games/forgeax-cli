@@ -2,7 +2,7 @@
  * Phase D7 — `.fxpack` portability format.
  *
  * Schema for `manifest.fxpack.json` (the bundle metadata, NOT to be confused
- * with each plugin's own `forgeax-plugin.json`). Source of truth:
+ * with each plugin's own `forgeax-extension.json`). Source of truth:
  * `docs/v2-vision/architecture-evolution/10-FXPACK-PORTABILITY.md` §2.
  *
  * Mirrored as a zod schema in this file so importer/exporter can validate
@@ -105,7 +105,7 @@ export interface FxpackTrustDescriptor {
 
 export interface FxpackExportInput {
   /** plugins to bundle; srcDir must point at the plugin's root (containing
-   *  forgeax-plugin.json). */
+   *  forgeax-extension.json). */
   plugins: Array<{ id: string; srcDir: string }>;
   type: 'single' | 'bundle';
   /** bundle metadata; required for bundle, used as fallback for single. */

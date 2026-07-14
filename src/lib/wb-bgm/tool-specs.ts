@@ -1,5 +1,5 @@
 /** Shared wb-bgm agent tool specs (name + description + input schema), pure
- *  data. The wb-bgm LOGIC moved to the marketplace plugin (@forgeax-plugin/
+ *  data. The wb-bgm LOGIC moved to the marketplace plugin (@forgeax-extension/
  *  wb-bgm); these specs remain server-side only so the two GLOBAL exposure
  *  forwarders can name/describe the tools without re-declaring schemas:
  *    - builtin/kits/bgm/tools/* (native agents) spread a spec and add `execute`

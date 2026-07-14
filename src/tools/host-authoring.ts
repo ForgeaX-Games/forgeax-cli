@@ -4,16 +4,16 @@
  *  背景:产品层的 authoring 工具(如 `team:create_role`)是 marketplace 插件,
  *  其 handler 经 `await import(entry.backend)` 跑在宿主(cli)进程里,**但 ESM 裸
  *  说明符从插件目录向上解析,解析不到 `@forgeax/*`**(实测 ERR_MODULE_NOT_FOUND)。
- *  所以 handler 拿不到 parseManifest / writeAgentPack / reloadPlugins —— 一切
+ *  所以 handler 拿不到 parseManifest / writeAgentPack / reloadExtensions —— 一切
  *  宿主能力只能经 ToolRegistry 注入的 `ctx.host` 缝流入。
  *
  *  本模块把「铸造一个 agent-pack」这件通用 authoring 事收敛成一个 host 能力:
- *    - 组装 manifest(spec → forgeax-plugin.json kind:agent)
+ *    - 组装 manifest(spec → forgeax-extension.json kind:agent)
  *    - parseManifest 自验(fail fast,§Schema-as-Contract)
  *    - 双名字空间撞名查重(plugin snapshot + marketplace legacy) —— 否则新角色会
  *      **静默遮蔽**内建角色(resolvePersonaForAgent 是 plugin-first)
  *    - 调 platform-io 的纯 IO primitive writeAgentPack 落盘(L1/L2,目录存在即拒)
- *  以及 reloadPlugins(让刚落盘的角色进 snapshot → 下一轮 roster 自动带上)。
+ *  以及 reloadExtensions(让刚落盘的角色进 snapshot → 下一轮 roster 自动带上)。
  *
  *  这是**通用缝**:任何写插件的产品工具都需要它,不是 team-forge 的产品逻辑。
  *  产品语义(角色叫什么、persona 文案、确认卡、默认头像色)全留在插件侧。
@@ -27,7 +27,7 @@ import {
 } from '@forgeax/platform-io';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { reloadPlugins } from '../plugins/registry';
+import { reloadExtensions } from '../extensions/registry';
 import { listAgents } from '../agents/loader';
 import { isValidAgentName } from '../core/agent-scaffold';
 
@@ -69,7 +69,7 @@ export interface RosterEntry {
 
 export interface HostAuthoring {
   /** 重扫插件层(L0/L1/L2),刷新 snapshot。让刚落盘的 agent-pack 生效。 */
-  reloadPlugins(): Promise<void>;
+  reloadExtensions(): Promise<void>;
   /** 组装 + 自验 + 撞名查重 + 落盘一个 agent-pack。不 reload(调用方自行决定)。 */
   createAgentPack(spec: AgentPackSpec): Promise<CreateAgentPackResult>;
   /** 当前可派单角色(plugin agents + marketplace legacy)的合集,供 list_roles。 */
@@ -186,8 +186,8 @@ function buildAgentManifest(id: string, spec: AgentPackSpec): {
 /** 组装 host-authoring 能力实例(ToolRegistry 注入进 ctx.host)。 */
 export function createHostAuthoring(): HostAuthoring {
   return {
-    async reloadPlugins() {
-      await reloadPlugins();
+    async reloadExtensions() {
+      await reloadExtensions();
     },
 
     listRoles() {
@@ -236,7 +236,7 @@ export function createHostAuthoring(): HostAuthoring {
   };
 }
 
-// 单例:host 进程内共享一份(reloadPlugins 是全局 snapshot,createAgentPack 无状态)。
+// 单例:host 进程内共享一份(reloadExtensions 是全局 snapshot,createAgentPack 无状态)。
 let _instance: HostAuthoring | null = null;
 export function getHostAuthoring(): HostAuthoring {
   if (!_instance) _instance = createHostAuthoring();

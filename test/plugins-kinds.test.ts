@@ -9,9 +9,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
 import {
   listTools,
   _resetToolHandlerCacheForTests,
@@ -19,7 +19,7 @@ import {
 import {
   _setSnapshotForTests,
   _resetSnapshotForTests,
-} from '../src/plugins/registry';
+} from '../src/extensions/registry';
 import { _resetEventBusForTests } from '../src/events/bus';
 
 const TMP = `/tmp/forgeax-kinds-${process.pid}`;
@@ -28,7 +28,7 @@ function mkmanifest(layer: 'L0' | 'L1' | 'L2', dirName: string, body: Record<str
   const dir = join(TMP, layer, dirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'forgeax-plugin.json'),
+    join(dir, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', ...body }),
     'utf-8',
   );
@@ -75,7 +75,7 @@ afterEach(() => {
 describe('kind dispatcher', () => {
   it('extracts workbench entry with position/standalone/panelSize', async () => {
     mkmanifest('L0', 'wb-test', {
-      id: '@forgeax-plugin/wb-test',
+      id: '@forgeax-extension/wb-test',
       kind: 'workbench',
       displayName: { zh: 'wb' },
       provides: { workbench: { id: 'test', position: 110, panelSize: 'lg' } },
@@ -85,7 +85,7 @@ describe('kind dispatcher', () => {
     const reg = buildKindRegistry(merged.manifests);
     expect(reg.workbench.length).toBe(1);
     expect(reg.workbench[0]).toMatchObject({
-      pluginId: '@forgeax-plugin/wb-test',
+      pluginId: '@forgeax-extension/wb-test',
       workbenchId: 'test',
       position: 110,
       panelSize: 'lg',
@@ -95,7 +95,7 @@ describe('kind dispatcher', () => {
 
   it('normalizes shorthand skill (string entry + leading-slash trigger)', async () => {
     mkmanifest('L0', 'skill-x', {
-      id: '@forgeax-plugin/skill-x',
+      id: '@forgeax-extension/skill-x',
       kind: 'skill',
       displayName: { zh: 'skill' },
       provides: { skills: [{ id: 'foo', entry: './SKILL.md', trigger: '/foo' }] },
@@ -109,7 +109,7 @@ describe('kind dispatcher', () => {
 
   it('flags agent missing personaFile but still registers definition', async () => {
     mkmanifest('L0', 'agent-x', {
-      id: '@forgeax-plugin/agent-x',
+      id: '@forgeax-extension/agent-x',
       kind: 'agent',
       displayName: { zh: 'agent' },
       provides: {
@@ -130,7 +130,7 @@ describe('kind dispatcher', () => {
 
   it('skill discovery works inside a workbench-kind plugin', async () => {
     mkmanifest('L0', 'wb-with-skills', {
-      id: '@forgeax-plugin/wb-with-skills',
+      id: '@forgeax-extension/wb-with-skills',
       kind: 'workbench',
       displayName: { zh: 'wb' },
       provides: {
@@ -147,13 +147,13 @@ describe('kind dispatcher', () => {
 
   it('sorts workbench by position then id', async () => {
     mkmanifest('L0', 'wb-late', {
-      id: '@forgeax-plugin/wb-late',
+      id: '@forgeax-extension/wb-late',
       kind: 'workbench',
       displayName: { zh: 'late' },
       provides: { workbench: { id: 'late', position: 200 } },
     });
     mkmanifest('L0', 'wb-early', {
-      id: '@forgeax-plugin/wb-early',
+      id: '@forgeax-extension/wb-early',
       kind: 'workbench',
       displayName: { zh: 'early' },
       provides: { workbench: { id: 'early', position: 100 } },

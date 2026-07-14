@@ -6,10 +6,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
-import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/plugins/registry';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
+import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/extensions/registry';
 import { _resetToolHandlerCacheForTests } from '../src/tools/registry';
 import { runSkill, listSkills } from '../src/skills/runner';
 import { getEventBus, _resetEventBusForTests } from '../src/events/bus';
@@ -55,7 +55,7 @@ function writeManifest(dirName: string, body: Record<string, unknown>): string {
   const dir = join(TMP, 'L1', dirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'forgeax-plugin.json'),
+    join(dir, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', ...body }),
     'utf-8',
   );
@@ -395,7 +395,7 @@ describe('SkillRunner', () => {
     if (!r.ok) expect(r.code).toBe('timeout');
   });
 
-  it('P7: readPluginFile is gated by fs:read permissions', async () => {
+  it('P7: readExtensionFile is gated by fs:read permissions', async () => {
     // Glob against absolute path: runner resolves relPath against originDir
     // before checking. We use `**/data/**` so the match works regardless of
     // the test's tmp dir layout.
@@ -425,12 +425,12 @@ describe('SkillRunner', () => {
     writeFileSync(join(dir, 'secret.txt'), 'must-not-be-read', 'utf-8');
     writeFileSync(
       join(dir, 'allow.ts'),
-      `export default (ctx) => ctx.readPluginFile('data/ok.txt').trim();\n`,
+      `export default (ctx) => ctx.readExtensionFile('data/ok.txt').trim();\n`,
       'utf-8',
     );
     writeFileSync(
       join(dir, 'deny.ts'),
-      `export default (ctx) => { try { return ctx.readPluginFile('secret.txt'); } catch (e) { return 'BLOCKED:' + e.message; } };\n`,
+      `export default (ctx) => { try { return ctx.readExtensionFile('secret.txt'); } catch (e) { return 'BLOCKED:' + e.message; } };\n`,
       'utf-8',
     );
     await reload();

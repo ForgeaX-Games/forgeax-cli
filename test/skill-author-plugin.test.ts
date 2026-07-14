@@ -16,10 +16,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
-import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/plugins/registry';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
+import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/extensions/registry';
 import { _resetToolHandlerCacheForTests } from '../src/tools/registry';
 import { runSkill, listSkills } from '../src/skills/runner';
 import { _resetEventBusForTests } from '../src/events/bus';
@@ -53,7 +53,7 @@ beforeEach(() => {
   mkdirSync(TMP, { recursive: true });
   for (const l of ['L0', 'L1', 'L2'] as const) mkdirSync(join(TMP, l), { recursive: true });
   mkdirSync(PLUGIN_DIR, { recursive: true });
-  copyFileSync(join(SRC_DIR, 'forgeax-plugin.json'), join(PLUGIN_DIR, 'forgeax-plugin.json'));
+  copyFileSync(join(SRC_DIR, 'forgeax-extension.json'), join(PLUGIN_DIR, 'forgeax-extension.json'));
   copyFileSync(join(SRC_DIR, 'SKILL.md'), join(PLUGIN_DIR, 'SKILL.md'));
   _resetSnapshotForTests();
   _resetToolHandlerCacheForTests();
@@ -73,7 +73,7 @@ describe('skill-author-plugin (meta:author-plugin)', () => {
     expect(scan.errors).toEqual([]);
     expect(merge.issues).toEqual([]);
     const ids = merge.manifests.map((m) => (m as { manifest: { id: string } }).manifest.id);
-    expect(ids).toContain('@forgeax-plugin/skill-author-plugin');
+    expect(ids).toContain('@forgeax-extension/skill-author-plugin');
   });
 
   it('listSkills surfaces meta:author-plugin with /author-plugin slash trigger', async () => {
@@ -98,7 +98,7 @@ describe('skill-author-plugin (meta:author-plugin)', () => {
       // contain. Don't pin the whole body — that would couple the test to
       // copy-edits.
       expect(r.text).toContain('/author-plugin');
-      expect(r.text).toContain('forgeax-plugin.json');
+      expect(r.text).toContain('forgeax-extension.json');
       expect(r.text).toContain('hello:say');
     } else {
       throw new Error(`expected prompt result, got ${JSON.stringify(r)}`);

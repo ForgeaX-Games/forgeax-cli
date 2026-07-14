@@ -21,7 +21,7 @@ import { runCapture } from '../lib/node-spawn';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ManifestSchema, type PluginManifest } from '@forgeax/types';
-import { getPluginSnapshot } from '../plugins/registry';
+import { getExtensionSnapshot } from '../extensions/registry';
 import {
   type FxpackExportInput,
   type FxpackExportResult,
@@ -168,7 +168,7 @@ function copyTree(src: string, dest: string): void {
 }
 
 function loadPluginManifest(srcDir: string): PluginManifest {
-  const path = join(srcDir, 'forgeax-plugin.json');
+  const path = join(srcDir, 'forgeax-extension.json');
   const raw = JSON.parse(readFileSync(path, 'utf-8'));
   const parsed = ManifestSchema.safeParse(raw);
   if (!parsed.success) {
@@ -226,7 +226,7 @@ function computeBundleClosure(
   const missing: string[] = [];
   if (refs.size === 0) return { add, missing };
 
-  const snap = getPluginSnapshot();
+  const snap = getExtensionSnapshot();
   const visited = new Set<string>(haveIds);
   const queue = Array.from(refs).filter((id) => !visited.has(id));
 
@@ -283,7 +283,7 @@ export interface ClosureResult {
 }
 
 export function closureFrom(rootId: string): ClosureResult {
-  const snap = getPluginSnapshot();
+  const snap = getExtensionSnapshot();
   const root = snap.manifests.find((m) => m.manifest.id === rootId);
   if (!root) return { ids: [], missing: [rootId] };
 
@@ -352,8 +352,8 @@ export async function exportPack(input: FxpackExportInput): Promise<FxpackExport
     if (!existsSync(p.srcDir)) {
       return { ok: false, code: 'bad_input', error: `plugin srcDir does not exist: ${p.srcDir}` };
     }
-    if (!existsSync(join(p.srcDir, 'forgeax-plugin.json'))) {
-      return { ok: false, code: 'bad_input', error: `not a plugin dir (missing forgeax-plugin.json): ${p.srcDir}` };
+    if (!existsSync(join(p.srcDir, 'forgeax-extension.json'))) {
+      return { ok: false, code: 'bad_input', error: `not a plugin dir (missing forgeax-extension.json): ${p.srcDir}` };
     }
   }
 

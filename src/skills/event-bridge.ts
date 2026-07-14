@@ -10,7 +10,7 @@
  *   subscribes one bus listener per `{kind:'event'}` entry, and on fire
  *   invokes runSkill with input={event}. It is idempotent: a second call
  *   tears down the previous bindings and rebuilds from the new snapshot,
- *   so reloadPlugins() can wire it after each rebuild.
+ *   so reloadExtensions() can wire it after each rebuild.
  *
  * Loop guard: a synthetic `caller.kind = 'event'` is set so emitted
  * skill.* events carry that origin. Skills that re-emit events that
@@ -22,7 +22,7 @@
  * cases without round-tripping through reload.
  */
 import type { EventBus, EventEnvelope, Unsubscribe } from '../events/bus';
-import type { PluginSnapshot } from '../plugins/registry';
+import type { ExtensionSnapshot } from '../extensions/registry';
 import { runSkill } from './runner';
 
 interface Binding {
@@ -49,7 +49,7 @@ export interface EventBridgeStats {
 
 /** (Re)wire event triggers from a snapshot. Returns the binding stats. */
 export function syncEventTriggerBindings(
-  snapshot: PluginSnapshot,
+  snapshot: ExtensionSnapshot,
   bus: EventBus,
 ): EventBridgeStats {
   // Drop everything from the previous snapshot first — bindings are

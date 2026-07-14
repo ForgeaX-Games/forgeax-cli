@@ -9,14 +9,14 @@
  * See docs/v2-vision/architecture-evolution/03-AGENT-SKILL-PLUGIN-TRINITY.md §2.1.
  */
 import type { PluginManifest } from '@forgeax/types';
-import type { PluginLayer, ScannedManifest } from './scanner';
+import type { ExtensionLayer, ScannedManifest } from './scanner';
 
 export interface MergedManifest {
   manifest: PluginManifest;
-  layer: PluginLayer;
+  layer: ExtensionLayer;
   originPath: string;
   /** Lower-precedence copies of the same id, ordered most→least specific. */
-  shadowedBy: Array<{ layer: PluginLayer; originPath: string }>;
+  shadowedBy: Array<{ layer: ExtensionLayer; originPath: string }>;
 }
 
 export interface MergeIssue {
@@ -31,7 +31,7 @@ export interface MergeResult {
   issues: MergeIssue[];
 }
 
-const LAYER_RANK: Record<PluginLayer, number> = { L0: 0, L1: 1, L2: 2 };
+const LAYER_RANK: Record<ExtensionLayer, number> = { L0: 0, L1: 1, L2: 2 };
 
 /** Apply L2 > L1 > L0 dedupe + topological sort.
  *

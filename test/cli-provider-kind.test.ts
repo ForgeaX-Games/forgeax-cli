@@ -6,10 +6,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
-import { loadDriverForEntry } from '../src/plugins/kinds/cli-provider';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
+import { loadDriverForEntry } from '../src/extensions/kinds/cli-provider';
 import {
   registerDriver,
   unregisterDriver,
@@ -23,7 +23,7 @@ function mkmanifest(layer: 'L0' | 'L1' | 'L2', dirName: string, body: Record<str
   const dir = join(TMP, layer, dirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'forgeax-plugin.json'),
+    join(dir, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', ...body }),
     'utf-8',
   );
@@ -66,7 +66,7 @@ function fakeDriver(id: string): Driver {
 describe('cli-provider kind loader', () => {
   it('extracts CliProviderEntry from manifest', async () => {
     mkmanifest('L0', 'cp-x', {
-      id: '@forgeax-plugin/cp-x',
+      id: '@forgeax-extension/cp-x',
       kind: 'cli-provider',
       displayName: { zh: '某 CLI', en: 'Some CLI' },
       provides: {
@@ -82,7 +82,7 @@ describe('cli-provider kind loader', () => {
     const reg = buildKindRegistry(merged.manifests);
     expect(reg.cliProviders.length).toBe(1);
     expect(reg.cliProviders[0]).toMatchObject({
-      pluginId: '@forgeax-plugin/cp-x',
+      pluginId: '@forgeax-extension/cp-x',
       providerId: 'some-cli',
       displayName: 'Some CLI Display',
       models: ['m1', 'm2'],
@@ -93,7 +93,7 @@ describe('cli-provider kind loader', () => {
 
   it('falls back to manifest.displayName.zh when cliProvider.displayName missing', async () => {
     mkmanifest('L0', 'cp-fb', {
-      id: '@forgeax-plugin/cp-fb',
+      id: '@forgeax-extension/cp-fb',
       kind: 'cli-provider',
       displayName: { zh: '中文名', en: 'EN' },
       provides: { cliProvider: { id: 'fb-cli' } },
@@ -105,7 +105,7 @@ describe('cli-provider kind loader', () => {
 
   it('records backendPath when entry.backend is set', async () => {
     const dir = mkmanifest('L0', 'cp-bk', {
-      id: '@forgeax-plugin/cp-bk',
+      id: '@forgeax-extension/cp-bk',
       kind: 'cli-provider',
       displayName: { zh: 'bk' },
       entry: { backend: './driver.ts' },
@@ -118,7 +118,7 @@ describe('cli-provider kind loader', () => {
 
   it('loadDriverForEntry returns already-registered in-tree driver', async () => {
     mkmanifest('L0', 'cp-native', {
-      id: '@forgeax-plugin/cp-native',
+      id: '@forgeax-extension/cp-native',
       kind: 'cli-provider',
       displayName: { zh: 'native' },
       provides: { cliProvider: { id: 'forgeax-native' } },
@@ -134,7 +134,7 @@ describe('cli-provider kind loader', () => {
 
   it('loadDriverForEntry caches the resolved driver', async () => {
     mkmanifest('L0', 'cp-cache', {
-      id: '@forgeax-plugin/cp-cache',
+      id: '@forgeax-extension/cp-cache',
       kind: 'cli-provider',
       displayName: { zh: 'c' },
       provides: { cliProvider: { id: 'c-cli' } },
@@ -155,7 +155,7 @@ describe('cli-provider kind loader', () => {
 
   it('loadDriverForEntry imports entry.backend when no in-tree driver', async () => {
     const dir = mkmanifest('L0', 'cp-imp', {
-      id: '@forgeax-plugin/cp-imp',
+      id: '@forgeax-extension/cp-imp',
       kind: 'cli-provider',
       displayName: { zh: 'imp' },
       entry: { backend: './driver.ts' },
@@ -185,7 +185,7 @@ describe('cli-provider kind loader', () => {
 
   it('loadDriverForEntry returns reason when no backend + no in-tree', async () => {
     mkmanifest('L0', 'cp-miss', {
-      id: '@forgeax-plugin/cp-miss',
+      id: '@forgeax-extension/cp-miss',
       kind: 'cli-provider',
       displayName: { zh: 'm' },
       provides: { cliProvider: { id: 'missing-cli' } },
@@ -199,7 +199,7 @@ describe('cli-provider kind loader', () => {
 
   it('loadDriverForEntry rejects when imported driver.id mismatches manifest', async () => {
     const dir = mkmanifest('L0', 'cp-mis', {
-      id: '@forgeax-plugin/cp-mis',
+      id: '@forgeax-extension/cp-mis',
       kind: 'cli-provider',
       displayName: { zh: 'mis' },
       entry: { backend: './driver.ts' },

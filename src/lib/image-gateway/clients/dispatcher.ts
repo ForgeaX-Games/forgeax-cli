@@ -30,7 +30,7 @@ export interface DispatchResult extends ImageGenResult {
 
 /** Adapt a character-forge ImageGenClient to the gateway's ImageVendor shape.
  *  `registryName` is the canonical wire-level name used in plugin schemas
- *  (forgeax-plugin.json + generate-portrait.args.json) and role chains — it may
+ *  (forgeax-extension.json + generate-portrait.args.json) and role chains — it may
  *  differ from the client's internal `vendor` field (e.g. 'nano-banana' for
  *  GeminiImageClient whose vendor is 'gemini-image'). */
 function adapt(client: ImageGenClient, registryName: string): ImageVendor {

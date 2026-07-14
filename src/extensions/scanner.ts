@@ -18,16 +18,16 @@ import type { PluginManifest } from '@forgeax/types';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { assetRoot } from '@forgeax/platform-io';
 
-export type PluginLayer = 'L0' | 'L1' | 'L2';
+export type ExtensionLayer = 'L0' | 'L1' | 'L2';
 
 export interface ScannedManifest {
-  layer: PluginLayer;
+  layer: ExtensionLayer;
   originPath: string;
   manifest: PluginManifest;
 }
 
 export interface ScanError {
-  layer: PluginLayer;
+  layer: ExtensionLayer;
   originPath: string;
   reason: string;
 }
@@ -46,7 +46,7 @@ export interface ScanResult {
  *  Returns null for a layer when its root doesn't exist (so newcomers
  *  without ~/.forgeax don't trip an error). Caller can override roots
  *  via `opts` for tests. */
-export function defaultLayerRoots(opts?: { repoRoot?: string; projectRoot?: string }): Record<PluginLayer, string | null> {
+export function defaultLayerRoots(opts?: { repoRoot?: string; projectRoot?: string }): Record<ExtensionLayer, string | null> {
   const repoRoot = opts?.repoRoot ?? findRepoRoot();
   const projectRoot = opts?.projectRoot ?? defaultProjectRoot();
   const candidates = (paths: string[]) => paths.find((p) => safeIsDir(p)) ?? null;
@@ -92,7 +92,7 @@ function safeIsDir(p: string): boolean {
   }
 }
 
-async function scanLayer(layer: PluginLayer, root: string): Promise<ScanResult> {
+async function scanLayer(layer: ExtensionLayer, root: string): Promise<ScanResult> {
   const out: ScanResult = { found: [], errors: [] };
   // Async + withFileTypes — kills the per-entry statSync probe for "is this a
   // directory?" and the readdir itself stops blocking the event loop. The
@@ -110,7 +110,7 @@ async function scanLayer(layer: PluginLayer, root: string): Promise<ScanResult> 
     if (name.startsWith('.')) continue;
     const pluginDir = join(root, name);
     if (!dirent.isDirectory() && !(dirent.isSymbolicLink() && safeIsDir(pluginDir))) continue;
-    const manifestPath = join(pluginDir, 'forgeax-plugin.json');
+    const manifestPath = join(pluginDir, 'forgeax-extension.json');
     let raw: string;
     try {
       raw = await readFile(manifestPath, 'utf-8');
@@ -129,6 +129,15 @@ async function scanLayer(layer: PluginLayer, root: string): Promise<ScanResult> 
           : 'zod parse failed';
         out.errors.push({ layer, originPath: manifestPath, reason });
         continue;
+      }
+      // ADR 0025 M3 — persistent-id namespace migration: manifests authored
+      // before the Extension rename carry `@forgeax-extension/*`. Normalize at
+      // this single read point so user-forked L1/L2 extensions (old ids on
+      // the user's disk — the sanctioned compat exception) keep resolving.
+      if (typeof parsed.manifest.id === 'string' && parsed.manifest.id.startsWith('@forgeax-extension/')) {
+        const legacyId = parsed.manifest.id;
+        parsed.manifest.id = legacyId.replace('@forgeax-extension/', '@forgeax-extension/');
+        console.warn(`[extensions/scanner] normalized legacy id ${legacyId} -> ${parsed.manifest.id} (${manifestPath})`);
       }
       // Doc 14 §4 — refuse entry.standalone.devOnly:true under production.
       // Authors use this to ship `bun --watch` shims without leaking into
@@ -175,7 +184,7 @@ export function isProduction(env: NodeJS.ProcessEnv = process.env): boolean {
  *  ManifestMerger to dedupe by id. Honours `FORGEAX_SAFE_BOOT=1` by
  *  scanning L0 only. */
 export async function scanAllLayers(
-  roots?: Partial<Record<PluginLayer, string | null>>,
+  roots?: Partial<Record<ExtensionLayer, string | null>>,
 ): Promise<ScanResult> {
   const resolved = { ...defaultLayerRoots(), ...(roots ?? {}) };
   const merged: ScanResult = { found: [], errors: [] };

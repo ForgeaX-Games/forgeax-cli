@@ -3,7 +3,7 @@
  *
  * "Fork & Vibe" path from 09-NON-EXPERT-AUTHORING.md §2.2:
  *   - copy <srcDir>/ → <destRoot>/.forgeax/plugins/<slug>/
- *   - patch forgeax-plugin.json: rewrite `id`, append "(我的)" / "(mine)" to
+ *   - patch forgeax-extension.json: rewrite `id`, append "(我的)" / "(mine)" to
  *     displayName so the fork is visually distinct in the sidebar
  *   - L1 has higher precedence than L0, so the fork immediately shadows the
  *     original (the doc explicitly relies on this)
@@ -16,7 +16,7 @@ import { mkdirSync, cpSync, readFileSync, writeFileSync, existsSync } from 'node
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { defaultLayerRoots } from './scanner';
-import { getPluginSnapshot } from './registry';
+import { getExtensionSnapshot } from './registry';
 
 export interface ForkInput {
   /** id of the plugin to fork (must exist in the current snapshot) */
@@ -48,7 +48,7 @@ function slugFor(id: string): string {
   return slash >= 0 ? id.slice(slash + 1) : id;
 }
 
-export async function forkPlugin(input: ForkInput): Promise<ForkResult> {
+export async function forkExtension(input: ForkInput): Promise<ForkResult> {
   if (!input.srcId) {
     return { ok: false, code: 'bad_input', error: 'srcId is required' };
   }
@@ -60,7 +60,7 @@ export async function forkPlugin(input: ForkInput): Promise<ForkResult> {
     return { ok: false, code: 'bad_input', error: `newId malformed: ${newId} (expected @scope/name)` };
   }
 
-  const snap = getPluginSnapshot();
+  const snap = getExtensionSnapshot();
   const src = snap.manifests.find((m) => m.manifest.id === input.srcId);
   if (!src) {
     return { ok: false, code: 'not_found', error: `srcId not in current snapshot: ${input.srcId}` };
@@ -94,9 +94,9 @@ export async function forkPlugin(input: ForkInput): Promise<ForkResult> {
     // and trust the fork to be a hand-authored plugin tree (not a built
     // workbench dist). For built workbenches, ship a `.fxpack` instead.
 
-    const manifestPath = join(destDir, 'forgeax-plugin.json');
+    const manifestPath = join(destDir, 'forgeax-extension.json');
     if (!existsSync(manifestPath)) {
-      return { ok: false, code: 'fs_error', error: `forgeax-plugin.json missing in fork dest: ${destDir}` };
+      return { ok: false, code: 'fs_error', error: `forgeax-extension.json missing in fork dest: ${destDir}` };
     }
     const raw = readFileSync(manifestPath, 'utf-8');
     const m = JSON.parse(raw) as Record<string, unknown>;

@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { reloadPlugins, _resetSnapshotForTests } from '../src/plugins/registry';
+import { reloadExtensions, _resetSnapshotForTests } from '../src/extensions/registry';
 import {
   composeSystemPrompt,
   listAgents,
@@ -22,7 +22,7 @@ function mkmanifest(layer: 'L0' | 'L1' | 'L2', dirName: string, body: Record<str
   const dir = join(TMP, layer, dirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'forgeax-plugin.json'),
+    join(dir, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', ...body }),
     'utf-8',
   );
@@ -50,7 +50,7 @@ afterEach(() => {
 describe('AgentLoader', () => {
   it('listAgents/lookupAgent reflect registered agents', async () => {
     const dir = mkmanifest('L0', 'agent-iori', {
-      id: '@forgeax-plugin/agent-iori',
+      id: '@forgeax-extension/agent-iori',
       kind: 'agent',
       displayName: { zh: 'iori' },
       provides: {
@@ -63,18 +63,18 @@ describe('AgentLoader', () => {
       },
     });
     writeFileSync(join(dir, 'PERSONA.md'), '# Iori persona body\n', 'utf-8');
-    await reloadPlugins({ roots: ROOTS() });
+    await reloadExtensions({ roots: ROOTS() });
 
     expect(listAgents().length).toBe(1);
     const e = lookupAgent('iori');
     expect(e?.definition.id).toBe('iori');
-    expect(e?.pluginId).toBe('@forgeax-plugin/agent-iori');
+    expect(e?.pluginId).toBe('@forgeax-extension/agent-iori');
     expect(lookupAgent('does-not-exist')).toBeNull();
   });
 
   it('composeSystemPrompt concatenates persona + prompt-skill body', async () => {
     const agentDir = mkmanifest('L0', 'agent-iori', {
-      id: '@forgeax-plugin/agent-iori',
+      id: '@forgeax-extension/agent-iori',
       kind: 'agent',
       displayName: { zh: 'iori' },
       provides: {
@@ -83,21 +83,21 @@ describe('AgentLoader', () => {
           role: 'planner',
           card: { name: { zh: 'Iori' }, color: '#1F6FEB', avatar: '🤖' },
           personaFile: './PERSONA.md',
-          defaultSkills: [{ source: 'plugin', pluginId: '@forgeax-plugin/skill-foo', skillId: 'foo' }],
+          defaultSkills: [{ source: 'plugin', pluginId: '@forgeax-extension/skill-foo', skillId: 'foo' }],
         },
       },
     });
     writeFileSync(join(agentDir, 'PERSONA.md'), 'PERSONA-BODY', 'utf-8');
 
     const skillDir = mkmanifest('L0', 'skill-foo', {
-      id: '@forgeax-plugin/skill-foo',
+      id: '@forgeax-extension/skill-foo',
       kind: 'skill',
       displayName: { zh: 'foo' },
       provides: { skills: [{ id: 'foo', entry: './SKILL.md', trigger: '/foo' }] },
     });
     writeFileSync(join(skillDir, 'SKILL.md'), 'SKILL-FOO-BODY', 'utf-8');
 
-    await reloadPlugins({ roots: ROOTS() });
+    await reloadExtensions({ roots: ROOTS() });
 
     const composed = await composeSystemPrompt('iori');
     expect(composed).not.toBeNull();
@@ -112,7 +112,7 @@ describe('AgentLoader', () => {
 
   it('records warning when persona file is unreadable', async () => {
     mkmanifest('L0', 'agent-broken', {
-      id: '@forgeax-plugin/agent-broken',
+      id: '@forgeax-extension/agent-broken',
       kind: 'agent',
       displayName: { zh: 'broken' },
       provides: {
@@ -124,7 +124,7 @@ describe('AgentLoader', () => {
         },
       },
     });
-    await reloadPlugins({ roots: ROOTS() });
+    await reloadExtensions({ roots: ROOTS() });
 
     const composed = await composeSystemPrompt('broken');
     expect(composed).not.toBeNull();
@@ -134,7 +134,7 @@ describe('AgentLoader', () => {
 
   it('records warning for unresolved skill ref', async () => {
     const agentDir = mkmanifest('L0', 'agent-iori', {
-      id: '@forgeax-plugin/agent-iori',
+      id: '@forgeax-extension/agent-iori',
       kind: 'agent',
       displayName: { zh: 'iori' },
       provides: {
@@ -143,12 +143,12 @@ describe('AgentLoader', () => {
           role: 'planner',
           card: { name: { zh: 'Iori' }, color: '#1F6FEB', avatar: '🤖' },
           personaFile: './PERSONA.md',
-          defaultSkills: [{ source: 'plugin', pluginId: '@forgeax-plugin/does-not-exist' }],
+          defaultSkills: [{ source: 'plugin', pluginId: '@forgeax-extension/does-not-exist' }],
         },
       },
     });
     writeFileSync(join(agentDir, 'PERSONA.md'), 'P', 'utf-8');
-    await reloadPlugins({ roots: ROOTS() });
+    await reloadExtensions({ roots: ROOTS() });
 
     const composed = await composeSystemPrompt('iori');
     expect(composed!.skillSections.length).toBe(0);
@@ -157,24 +157,24 @@ describe('AgentLoader', () => {
 
   it('resolveSkill matches plugin source and inline source', async () => {
     const skillDir = mkmanifest('L0', 'skill-foo', {
-      id: '@forgeax-plugin/skill-foo',
+      id: '@forgeax-extension/skill-foo',
       kind: 'skill',
       displayName: { zh: 'foo' },
       provides: { skills: [{ id: 'foo', entry: './SKILL.md', trigger: '/foo' }] },
     });
     writeFileSync(join(skillDir, 'SKILL.md'), 'X', 'utf-8');
-    await reloadPlugins({ roots: ROOTS() });
+    await reloadExtensions({ roots: ROOTS() });
 
     const byPlugin = resolveSkill({
       source: 'plugin',
-      pluginId: '@forgeax-plugin/skill-foo',
+      pluginId: '@forgeax-extension/skill-foo',
       skillId: 'foo',
     });
     expect(byPlugin?.definition.id).toBe('foo');
 
     const inlineSame = resolveSkill(
       { source: 'inline', skillId: 'foo' },
-      '@forgeax-plugin/skill-foo',
+      '@forgeax-extension/skill-foo',
     );
     expect(inlineSame?.definition.id).toBe('foo');
 
@@ -183,14 +183,14 @@ describe('AgentLoader', () => {
 
     const inlineWrongCtx = resolveSkill(
       { source: 'inline', skillId: 'foo' },
-      '@forgeax-plugin/some-other',
+      '@forgeax-extension/some-other',
     );
     expect(inlineWrongCtx).toBeNull();
   });
 
   it('skips ts/py-kind skills in the system prompt (deferred to SkillRunner)', async () => {
     const agentDir = mkmanifest('L0', 'agent-iori', {
-      id: '@forgeax-plugin/agent-iori',
+      id: '@forgeax-extension/agent-iori',
       kind: 'agent',
       displayName: { zh: 'iori' },
       provides: {
@@ -199,14 +199,14 @@ describe('AgentLoader', () => {
           role: 'planner',
           card: { name: { zh: 'Iori' }, color: '#1F6FEB', avatar: '🤖' },
           personaFile: './PERSONA.md',
-          defaultSkills: [{ source: 'plugin', pluginId: '@forgeax-plugin/skill-ts', skillId: 'tx' }],
+          defaultSkills: [{ source: 'plugin', pluginId: '@forgeax-extension/skill-ts', skillId: 'tx' }],
         },
       },
     });
     writeFileSync(join(agentDir, 'PERSONA.md'), 'P', 'utf-8');
 
     mkmanifest('L0', 'skill-ts', {
-      id: '@forgeax-plugin/skill-ts',
+      id: '@forgeax-extension/skill-ts',
       kind: 'skill',
       displayName: { zh: 'tx' },
       provides: {
@@ -217,7 +217,7 @@ describe('AgentLoader', () => {
         }],
       },
     });
-    await reloadPlugins({ roots: ROOTS() });
+    await reloadExtensions({ roots: ROOTS() });
 
     const composed = await composeSystemPrompt('iori');
     expect(composed!.skillSections.length).toBe(0);
@@ -225,7 +225,7 @@ describe('AgentLoader', () => {
   });
 
   it('returns null for unknown agent id', async () => {
-    await reloadPlugins({ roots: ROOTS() });
+    await reloadExtensions({ roots: ROOTS() });
     expect(await composeSystemPrompt('nope')).toBeNull();
   });
 });

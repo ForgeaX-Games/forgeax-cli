@@ -16,7 +16,7 @@ export { initPathManager } from './fs/path-manager';
 export { ensureUserDirDefaults } from './defaults/scaffold';
 export { initSessionManager, getSessionManager } from './core/session-manager';
 export { bootCliProviders } from './cli-providers';
-export { reloadPlugins } from './plugins/registry';
+export { reloadExtensions } from './extensions/registry';
 export { loadBrand, createBrandRouter } from './brand';
 export { getVersion } from '@forgeax/platform-io';
 export { listAllCommands } from './commands/runner';

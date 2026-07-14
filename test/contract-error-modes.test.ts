@@ -21,10 +21,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ManifestSchema } from '@forgeax/types';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
-import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/plugins/registry';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
+import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/extensions/registry';
 import { _resetToolHandlerCacheForTests, callTool } from '../src/tools/registry';
 import { runSkill } from '../src/skills/runner';
 import { exportPack } from '../src/packs/exporter';
@@ -55,7 +55,7 @@ function writePluginAt(layer: 'L0' | 'L1' | 'L2', dirName: string, body: Record<
   const dir = join(TMP, layer, dirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'forgeax-plugin.json'),
+    join(dir, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', ...body }),
     'utf-8',
   );
@@ -125,7 +125,7 @@ describe('03 · manifest schema rejection contract', () => {
   it('scanner surfaces malformed manifest as scanError, NOT a load crash', async () => {
     const bad = join(TMP, 'L1', 'bad');
     mkdirSync(bad, { recursive: true });
-    writeFileSync(join(bad, 'forgeax-plugin.json'), '{ not json', 'utf-8');
+    writeFileSync(join(bad, 'forgeax-extension.json'), '{ not json', 'utf-8');
     const scan = await scanAllLayers({ L0: join(TMP, 'L0'), L1: join(TMP, 'L1'), L2: join(TMP, 'L2') });
     expect(scan.errors.some((e) => e.originPath.includes('bad'))).toBe(true);
   });
@@ -281,7 +281,7 @@ describe('10 · .fxpack export reject modes', () => {
   function writePlugin(srcDir: string, id: string): void {
     mkdirSync(srcDir, { recursive: true });
     writeFileSync(
-      join(srcDir, 'forgeax-plugin.json'),
+      join(srcDir, 'forgeax-extension.json'),
       JSON.stringify({
         schemaVersion: 1,
         id,
@@ -374,7 +374,7 @@ describe('10 · .fxpack export reject modes', () => {
     writePlugin(src, '@me/perms');
     // Push a permissions entry into the manifest.
     writeFileSync(
-      join(src, 'forgeax-plugin.json'),
+      join(src, 'forgeax-extension.json'),
       JSON.stringify({
         schemaVersion: 1,
         id: '@me/perms',

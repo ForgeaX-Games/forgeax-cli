@@ -51,7 +51,7 @@ export type FileError =
   | { ok: false; code: 'bad_ext'; error: string }
   | { ok: false; code: 'io_error'; error: string };
 
-export interface PluginFileEntry {
+export interface ExtensionFileEntry {
   /** Path relative to plugin root, POSIX style. */
   path: string;
   kind: 'file' | 'dir';
@@ -60,7 +60,7 @@ export interface PluginFileEntry {
 }
 
 export type ListResult =
-  | { ok: true; pluginDir: string; entries: PluginFileEntry[] }
+  | { ok: true; pluginDir: string; entries: ExtensionFileEntry[] }
   | FileError;
 
 export type ReadResult =
@@ -97,13 +97,13 @@ function extOf(path: string): string {
 }
 
 /** List files under a plugin dir. Recurses but skips node_modules / .git. */
-export function listPluginFiles(projectRoot: string, slug: string): ListResult {
+export function listExtensionFiles(projectRoot: string, slug: string): ListResult {
   const slugCheck = checkSlug(slug);
   if (!slugCheck.ok) return slugCheck;
   const dir = pluginRoot(projectRoot, slug);
   if (!existsSync(dir)) return { ok: false, code: 'not_found', error: `plugin dir missing: ${dir}` };
 
-  const entries: PluginFileEntry[] = [];
+  const entries: ExtensionFileEntry[] = [];
   function walk(abs: string): void {
     let kids: string[] = [];
     try { kids = readdirSync(abs); } catch { return; }
@@ -127,7 +127,7 @@ export function listPluginFiles(projectRoot: string, slug: string): ListResult {
 }
 
 /** Read a single file under the plugin dir. */
-export function readPluginFile(projectRoot: string, slug: string, relPath: string): ReadResult {
+export function readExtensionFile(projectRoot: string, slug: string, relPath: string): ReadResult {
   const slugCheck = checkSlug(slug);
   if (!slugCheck.ok) return slugCheck;
   if (!relPath || relPath.includes('\\') || relPath.startsWith('/')) {
@@ -152,7 +152,7 @@ export function readPluginFile(projectRoot: string, slug: string, relPath: strin
 }
 
 /** Write a file under the plugin dir. Creates parent dirs. */
-export function writePluginFile(
+export function writeExtensionFile(
   projectRoot: string,
   slug: string,
   relPath: string,

@@ -20,11 +20,11 @@ import type { Driver } from '@forgeax/agent-runtime';
 import { getDriver } from '@forgeax/agent-runtime';
 import type { MergedManifest } from '../merger';
 import type { KindLoadIssue } from './types';
-import type { PluginLayer } from '../scanner';
+import type { ExtensionLayer } from '../scanner';
 
 export interface CliProviderEntry {
   pluginId: string;
-  layer: PluginLayer;
+  layer: ExtensionLayer;
   /** ProvidesCliProvider.id — the Driver.id consumers use to look up. */
   providerId: string;
   displayName: string;

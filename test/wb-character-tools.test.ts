@@ -12,7 +12,7 @@
  * to keep the snapshot deterministic and avoid pulling in scene-kit etc.,
  * but the manifest body is exactly the same JSON.
  *
- * SSOT = the pinned wb-character submodule's forgeax-plugin.json. It currently
+ * SSOT = the pinned wb-character submodule's forgeax-extension.json. It currently
  * declares 10 character: tools — 5 AI-facing (portrait/turnaround/list/get/
  * rename) and 5 internal P4-funnel stubs (exposedToAI:false). The earlier
  * 16-tool consolidation (generate-sprite-sheet/pixel/monster/vehicle +
@@ -23,10 +23,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
-import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/plugins/registry';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
+import { _setSnapshotForTests, _resetSnapshotForTests } from '../src/extensions/registry';
 import { callTool, listTools, _resetToolHandlerCacheForTests } from '../src/tools/registry';
 import { _resetEventBusForTests } from '../src/events/bus';
 
@@ -60,8 +60,8 @@ function mirrorPluginToTmp() {
   mkdirSync(join(PLUGIN_DIR, 'server'), { recursive: true });
   mkdirSync(join(PLUGIN_DIR, 'schemas'), { recursive: true });
   // Copy the live manifest (D3 already updated entry.backend in it).
-  const manifestSrc = resolve(REPO_ROOT, 'packages/marketplace/plugins/wb-character/forgeax-plugin.json');
-  copyFileSync(manifestSrc, join(PLUGIN_DIR, 'forgeax-plugin.json'));
+  const manifestSrc = resolve(REPO_ROOT, 'packages/marketplace/plugins/wb-character/forgeax-extension.json');
+  copyFileSync(manifestSrc, join(PLUGIN_DIR, 'forgeax-extension.json'));
   // Schema files don't need to exist for ToolRegistry dispatch (they're
   // referenced by argsSchema/returnsSchema as path strings only). Touch
   // them so the kind loader doesn't warn about missing refs.

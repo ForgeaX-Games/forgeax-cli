@@ -12,11 +12,11 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node
 import { join, resolve } from 'node:path';
 import { exportPack, closureFrom } from '../src/packs/exporter';
 import { inspectPack, installPack } from '../src/packs/importer';
-import { _setSnapshotForTests, _resetSnapshotForTests, type PluginSnapshot } from '../src/plugins/registry';
+import { _setSnapshotForTests, _resetSnapshotForTests, type ExtensionSnapshot } from '../src/extensions/registry';
 
 const TMP = `/tmp/forgeax-packs-${process.pid}`;
 
-function emptySnapshot(): PluginSnapshot {
+function emptySnapshot(): ExtensionSnapshot {
   return {
     generation: 0,
     loadedAt: 0,
@@ -41,7 +41,7 @@ function writeMinimalPlugin(srcDir: string, id: string, version = '0.1.0'): void
     entry: { backend: './handlers.ts' },
     compatibleWith: { 'forgeax-bus': '^1.0.0' },
   };
-  writeFileSync(join(srcDir, 'forgeax-plugin.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+  writeFileSync(join(srcDir, 'forgeax-extension.json'), JSON.stringify(manifest, null, 2), 'utf-8');
   writeFileSync(
     join(srcDir, 'handlers.ts'),
     'export const tools = { "${id}:hello": () => ({ greeting: "hi" }) };\n'.replace('${id}', id),
@@ -184,7 +184,7 @@ describe('packs importer', () => {
     });
 
     // Seed the snapshot with an older copy of the same id at L1.
-    const seeded: PluginSnapshot = {
+    const seeded: ExtensionSnapshot = {
       ...emptySnapshot(),
       manifests: [
         {
@@ -255,7 +255,7 @@ describe('packs importer', () => {
     expect(r.skipped).toEqual([]);
 
     const installedManifest = readFileSync(
-      join(destRoot, '.forgeax', 'plugins', 'installable', 'forgeax-plugin.json'),
+      join(destRoot, '.forgeax', 'plugins', 'installable', 'forgeax-extension.json'),
       'utf-8',
     );
     expect(JSON.parse(installedManifest).id).toBe('@me/installable');
@@ -322,7 +322,7 @@ describe('packs importer', () => {
     expect(r.installed).toEqual(['@me/overwriteable']);
     // STALE marker is gone, manifest is now present.
     expect(existsSync(join(destRoot, '.forgeax/plugins/overwriteable/STALE'))).toBe(false);
-    expect(existsSync(join(destRoot, '.forgeax/plugins/overwriteable/forgeax-plugin.json'))).toBe(true);
+    expect(existsSync(join(destRoot, '.forgeax/plugins/overwriteable/forgeax-extension.json'))).toBe(true);
   });
 
   it('installPack returns bad_input when zip path missing', async () => {
@@ -388,7 +388,7 @@ describe('packs bundle closure', () => {
     const hostDir = join(TMP, 'src', 'host');
     mkdirSync(hostDir, { recursive: true });
     writeFileSync(
-      join(hostDir, 'forgeax-plugin.json'),
+      join(hostDir, 'forgeax-extension.json'),
       JSON.stringify(
         {
           schemaVersion: 1,
@@ -413,14 +413,14 @@ describe('packs bundle closure', () => {
     writeMinimalPlugin(depDir, '@me/dep');
 
     // Seed snapshot so closure walker can find the dep at originPath/...
-    const seeded: PluginSnapshot = {
+    const seeded: ExtensionSnapshot = {
       ...emptySnapshot(),
       manifests: [
         {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          manifest: JSON.parse(readFileSync(join(depDir, 'forgeax-plugin.json'), 'utf-8')) as any,
+          manifest: JSON.parse(readFileSync(join(depDir, 'forgeax-extension.json'), 'utf-8')) as any,
           layer: 'L2',
-          originPath: join(depDir, 'forgeax-plugin.json'),
+          originPath: join(depDir, 'forgeax-extension.json'),
           shadowedBy: [],
         },
       ],
@@ -445,7 +445,7 @@ describe('packs bundle closure', () => {
     const hostDir = join(TMP, 'src', 'host');
     mkdirSync(hostDir, { recursive: true });
     writeFileSync(
-      join(hostDir, 'forgeax-plugin.json'),
+      join(hostDir, 'forgeax-extension.json'),
       JSON.stringify({
         schemaVersion: 1,
         id: '@me/host',
@@ -478,7 +478,7 @@ describe('packs bundle closure', () => {
     const hostDir = join(TMP, 'src', 'host');
     mkdirSync(hostDir, { recursive: true });
     writeFileSync(
-      join(hostDir, 'forgeax-plugin.json'),
+      join(hostDir, 'forgeax-extension.json'),
       JSON.stringify({
         schemaVersion: 1,
         id: '@me/host',
@@ -822,7 +822,7 @@ describe('packs closure helper', () => {
       const dir = join(TMP, 'closure-src', id.replace(/\//g, '_'));
       mkdirSync(dir, { recursive: true });
       writeFileSync(
-        join(dir, 'forgeax-plugin.json'),
+        join(dir, 'forgeax-extension.json'),
         JSON.stringify({
           schemaVersion: 1,
           id,
@@ -843,13 +843,13 @@ describe('packs closure helper', () => {
     seedManifest('@me/b', [{ id: '@me/c' }]);
     seedManifest('@me/c');
 
-    const seeded: PluginSnapshot = {
+    const seeded: ExtensionSnapshot = {
       ...emptySnapshot(),
       manifests: ['@me/a', '@me/b', '@me/c'].map((id) => ({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        manifest: JSON.parse(readFileSync(join(dirs[id], 'forgeax-plugin.json'), 'utf-8')) as any,
+        manifest: JSON.parse(readFileSync(join(dirs[id], 'forgeax-extension.json'), 'utf-8')) as any,
         layer: 'L2' as const,
-        originPath: join(dirs[id], 'forgeax-plugin.json'),
+        originPath: join(dirs[id], 'forgeax-extension.json'),
         shadowedBy: [],
       })),
     };
@@ -874,7 +874,7 @@ describe('packs closure helper', () => {
     const hostDir = join(TMP, 'src', 'sclosure-host');
     mkdirSync(hostDir, { recursive: true });
     writeFileSync(
-      join(hostDir, 'forgeax-plugin.json'),
+      join(hostDir, 'forgeax-extension.json'),
       JSON.stringify(
         {
           schemaVersion: 1,
@@ -898,14 +898,14 @@ describe('packs closure helper', () => {
     const depDir = join(TMP, 'src', 'sclosure-dep');
     writeMinimalPlugin(depDir, '@me/sclosure-dep');
 
-    const seeded: PluginSnapshot = {
+    const seeded: ExtensionSnapshot = {
       ...emptySnapshot(),
       manifests: [
         {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          manifest: JSON.parse(readFileSync(join(depDir, 'forgeax-plugin.json'), 'utf-8')) as any,
+          manifest: JSON.parse(readFileSync(join(depDir, 'forgeax-extension.json'), 'utf-8')) as any,
           layer: 'L2',
-          originPath: join(depDir, 'forgeax-plugin.json'),
+          originPath: join(depDir, 'forgeax-extension.json'),
           shadowedBy: [],
         },
       ],
@@ -937,7 +937,7 @@ describe('packs closure helper', () => {
     const hostDir = join(TMP, 'src', 'sclosure2-host');
     mkdirSync(hostDir, { recursive: true });
     writeFileSync(
-      join(hostDir, 'forgeax-plugin.json'),
+      join(hostDir, 'forgeax-extension.json'),
       JSON.stringify({
         schemaVersion: 1,
         id: '@me/sclosure2-host',
@@ -1032,10 +1032,10 @@ describe('packs round-trip', () => {
     expect(inst.ok).toBe(true);
 
     // The installed plugin dir matches the source byte-for-byte on
-    // forgeax-plugin.json (no transform during pack/unpack).
-    const original = readFileSync(join(src, 'forgeax-plugin.json'), 'utf-8');
+    // forgeax-extension.json (no transform during pack/unpack).
+    const original = readFileSync(join(src, 'forgeax-extension.json'), 'utf-8');
     const installed = readFileSync(
-      join(destRoot, '.forgeax/plugins/round-trip/forgeax-plugin.json'),
+      join(destRoot, '.forgeax/plugins/round-trip/forgeax-extension.json'),
       'utf-8',
     );
     expect(JSON.parse(installed)).toEqual(JSON.parse(original));

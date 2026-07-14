@@ -26,8 +26,8 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import type { SkillDefinition } from '@forgeax/types';
-import { getPluginSnapshot } from '../plugins/registry';
-import type { SkillEntry } from '../plugins/kinds/types';
+import { getExtensionSnapshot } from '../extensions/registry';
+import type { SkillEntry } from '../extensions/kinds/types';
 import { callTool } from '../tools/registry';
 import { getEventBus } from '../events/bus';
 import { compilePermissions } from '../permissions/engine';
@@ -129,11 +129,11 @@ export interface SkillRunCtx {
   /** Reads a file relative to the plugin's originDir. Permission gate is
    *  declared at the manifest layer; this PR does not enforce path scoping
    *  yet — that lands with D6's trust panel. */
-  readPluginFile(relPath: string): string;
+  readExtensionFile(relPath: string): string;
 }
 
 function resolveSkill(req: SkillRunRequest): SkillEntry | null {
-  const skills = getPluginSnapshot().kinds.skills;
+  const skills = getExtensionSnapshot().kinds.skills;
   if (req.pluginId) {
     return skills.find((s) => s.pluginId === req.pluginId && s.definition.id === req.skillId) ?? null;
   }
@@ -338,7 +338,7 @@ export async function runSkill(req: SkillRunRequest): Promise<SkillRunResult> {
     caller: req.caller,
     input: req.input,
     callTool: scopedCallTool,
-    readPluginFile(relPath) {
+    readExtensionFile(relPath) {
       const abs = entryAbsPath(entry.originDir, relPath);
       if (hasFsPerms) {
         const v = matcher.canFs({ mode: 'read', path: abs });
@@ -402,7 +402,7 @@ export interface SkillDescriptor {
 }
 
 export function listSkills(): SkillDescriptor[] {
-  return getPluginSnapshot().kinds.skills.map((s) => ({
+  return getExtensionSnapshot().kinds.skills.map((s) => ({
     id: s.definition.id,
     pluginId: s.pluginId,
     kind: s.definition.entry.kind,

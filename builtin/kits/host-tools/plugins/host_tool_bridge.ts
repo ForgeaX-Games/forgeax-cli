@@ -1,7 +1,7 @@
 /** host_tool_bridge — the missing `composeToolset` bridge.
  *
  *  设计意图（docs/v2-vision/.../03-AGENT-SKILL-PLUGIN-TRINITY.md）：
- *  插件在 forgeax-plugin.json 的 `provides.tools[]` 里声明的工具（带
+ *  插件在 forgeax-extension.json 的 `provides.tools[]` 里声明的工具（带
  *  `exposedToAI: true`）应当**自动**进入 agent 的 LLM 工具清单，由 LLM 通过
  *  对话自由调用 —— 无需每个 workbench 团队手写一份 builtin/kits/<x> 的 HTTP 桥。
  *

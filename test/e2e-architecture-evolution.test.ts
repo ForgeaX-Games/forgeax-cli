@@ -24,14 +24,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
 import {
   _resetSnapshotForTests,
   _setSnapshotForTests,
-  type PluginSnapshot,
-} from '../src/plugins/registry';
+  type ExtensionSnapshot,
+} from '../src/extensions/registry';
 import { callTool, _resetToolHandlerCacheForTests } from '../src/tools/registry';
 import { exportPack } from '../src/packs/exporter';
 import { inspectPack, installPack } from '../src/packs/importer';
@@ -47,7 +47,7 @@ function writePlugin(layer: 'L0' | 'L1' | 'L2', dirName: string, manifest: Recor
   const dir = join(TMP, layer, dirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'forgeax-plugin.json'),
+    join(dir, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', ...manifest }, null, 2),
     'utf-8',
   );
@@ -59,11 +59,11 @@ function writePlugin(layer: 'L0' | 'L1' | 'L2', dirName: string, manifest: Recor
   return dir;
 }
 
-async function reload(): Promise<PluginSnapshot> {
+async function reload(): Promise<ExtensionSnapshot> {
   const scan = await scanAllLayers(ROOTS());
   const merge = mergeManifests(scan.found);
   const kinds = buildKindRegistry(merge.manifests);
-  const snap: PluginSnapshot = {
+  const snap: ExtensionSnapshot = {
     generation: 1,
     loadedAt: Date.now(),
     manifests: merge.manifests,
@@ -229,7 +229,7 @@ describe('architecture-evolution · trinity lifecycle', () => {
     const srcDir = join(TMP, 'src', 'roundtrip');
     mkdirSync(srcDir, { recursive: true });
     writeFileSync(
-      join(srcDir, 'forgeax-plugin.json'),
+      join(srcDir, 'forgeax-extension.json'),
       JSON.stringify(
         {
           schemaVersion: 1,
@@ -281,7 +281,7 @@ describe('architecture-evolution · trinity lifecycle', () => {
     if (!inst.ok) return;
     expect(inst.installed).toEqual(['@me/roundtrip']);
     expect(
-      existsSync(join(userRoot, '.forgeax/plugins/roundtrip/forgeax-plugin.json')),
+      existsSync(join(userRoot, '.forgeax/plugins/roundtrip/forgeax-extension.json')),
     ).toBe(true);
 
     // Re-scan with the freshly-installed tree as a custom L2 root.
@@ -316,11 +316,11 @@ describe('architecture-evolution · trinity lifecycle', () => {
     // semantically (no transform during pack/install).
     const installedManifest = JSON.parse(
       readFileSync(
-        join(userRoot, '.forgeax/plugins/roundtrip/forgeax-plugin.json'),
+        join(userRoot, '.forgeax/plugins/roundtrip/forgeax-extension.json'),
         'utf-8',
       ),
     );
-    const originalManifest = JSON.parse(readFileSync(join(srcDir, 'forgeax-plugin.json'), 'utf-8'));
+    const originalManifest = JSON.parse(readFileSync(join(srcDir, 'forgeax-extension.json'), 'utf-8'));
     expect(installedManifest).toEqual(originalManifest);
   });
 });

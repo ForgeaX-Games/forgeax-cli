@@ -26,8 +26,8 @@ import { createCommandsApiRouter } from './api/commands';
 import { createCliRouter } from './api/cli/chat';
 import { createBrandRouter, loadBrand } from './brand';
 import { createBusRouter } from './api/bus';
-import { createPluginsRouter } from './api/plugins';
-import { reloadPlugins, onPluginsReloaded } from './plugins/registry';
+import { createExtensionsRouter } from './api/extensions';
+import { reloadExtensions, onExtensionsReloaded } from './extensions/registry';
 import { syncEventTriggerBindings } from './skills/event-bridge';
 import { createThreadsRouter } from './api/threads';
 import { createLlmTestRouter } from './api/llm-test';
@@ -158,8 +158,8 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
 
   // 组合根接线:把 skill 事件触发的 rewire 接到 plugins reload 后置钩子。
   // (registry 不直接 import event-bridge —— 断开 plugins→event-bridge→runner→plugins 环)
-  onPluginsReloaded(syncEventTriggerBindings);
-  await reloadPlugins();
+  onExtensionsReloaded(syncEventTriggerBindings);
+  await reloadExtensions();
   await bootCliProviders();
 
   const app = new Hono();
@@ -197,7 +197,7 @@ export async function createForgeaxApp(ctx: ProductContext): Promise<ForgeaxApp>
   app.route('/api/cli', createCliRouter());
   app.route('/api/brand', createBrandRouter());
   app.route('/api/bus', createBusRouter());
-  app.route('/api/plugins', createPluginsRouter());
+  app.route('/api/extensions', createExtensionsRouter());
   app.route('/api/threads', createThreadsRouter());
   app.route('/api/llm', createLlmTestRouter());
   app.route('/api/usage', createUsageRouter());

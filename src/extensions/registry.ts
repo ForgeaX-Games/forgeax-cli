@@ -13,10 +13,10 @@
 import { scanAllLayers, type ScanError } from './scanner';
 import { mergeManifests, type MergedManifest, type MergeIssue } from './merger';
 import { buildKindRegistry, type KindRegistry } from './kinds';
-import type { PluginLayer } from './scanner';
+import type { ExtensionLayer } from './scanner';
 import { getEventBus, type EventBus } from '../events/bus';
 
-export interface PluginSnapshot {
+export interface ExtensionSnapshot {
   /** Surrogate timestamp; bumps on every successful replaceFromManifests. */
   generation: number;
   loadedAt: number;
@@ -26,11 +26,11 @@ export interface PluginSnapshot {
   mergeIssues: MergeIssue[];
 }
 
-export interface PluginRegistryOpts {
-  roots?: Partial<Record<PluginLayer, string | null>>;
+export interface ExtensionRegistryOpts {
+  roots?: Partial<Record<ExtensionLayer, string | null>>;
 }
 
-const EMPTY: PluginSnapshot = {
+const EMPTY: ExtensionSnapshot = {
   generation: 0,
   loadedAt: 0,
   manifests: [],
@@ -47,14 +47,14 @@ const EMPTY: PluginSnapshot = {
   mergeIssues: [],
 };
 
-let _current: PluginSnapshot = EMPTY;
+let _current: ExtensionSnapshot = EMPTY;
 
-export function getPluginSnapshot(): PluginSnapshot {
+export function getExtensionSnapshot(): ExtensionSnapshot {
   return _current;
 }
 
 /**
- * Reload 后置钩子。由组合根(app boot)经 `onPluginsReloaded` 接上
+ * Reload 后置钩子。由组合根(app boot)经 `onExtensionsReloaded` 接上
  * `skills/event-bridge` 的 `syncEventTriggerBindings`。
  *
  * 为什么用钩子而非直接 import:plugins/registry 直接 import skills/event-bridge
@@ -62,20 +62,20 @@ export function getPluginSnapshot(): PluginSnapshot {
  * 暴露钩子、组合根接线」后,registry 对 skills/runner 子系统是 sink,环消除。
  * 未接钩子的入口(如 `forge pack` CLI)reload 时不 wire 事件触发——它本就不需要。
  */
-type PluginsReloadedHook = (snapshot: PluginSnapshot, bus: EventBus) => void;
+type PluginsReloadedHook = (snapshot: ExtensionSnapshot, bus: EventBus) => void;
 let _onReloaded: PluginsReloadedHook | null = null;
-export function onPluginsReloaded(fn: PluginsReloadedHook): void {
+export function onExtensionsReloaded(fn: PluginsReloadedHook): void {
   _onReloaded = fn;
 }
 
 /** Reload from disk. Returns the new snapshot. Failures during scan are
  *  not fatal — they're surfaced in `scanErrors` so the UI/CI can flag
  *  them while the rest of the snapshot still works. */
-export async function reloadPlugins(opts: PluginRegistryOpts = {}): Promise<PluginSnapshot> {
+export async function reloadExtensions(opts: ExtensionRegistryOpts = {}): Promise<ExtensionSnapshot> {
   const scan = await scanAllLayers(opts.roots);
   const merge = mergeManifests(scan.found);
   const kinds = buildKindRegistry(merge.manifests);
-  const next: PluginSnapshot = {
+  const next: ExtensionSnapshot = {
     generation: _current.generation + 1,
     loadedAt: Date.now(),
     manifests: merge.manifests,
@@ -92,7 +92,7 @@ export async function reloadPlugins(opts: PluginRegistryOpts = {}): Promise<Plug
 }
 
 /** Test helper — install a hand-built snapshot without reading disk. */
-export function _setSnapshotForTests(snap: PluginSnapshot): void {
+export function _setSnapshotForTests(snap: ExtensionSnapshot): void {
   _current = snap;
 }
 

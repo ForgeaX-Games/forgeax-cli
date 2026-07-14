@@ -1,6 +1,6 @@
 /** attach-audio —— 下载 BGM/音效到 <game>/audio/ 并写 manifest。
  *
- *  逻辑已迁出到 marketplace 插件 @forgeax-plugin/wb-bgm。这个 builtin kit 现在
+ *  逻辑已迁出到 marketplace 插件 @forgeax-extension/wb-bgm。这个 builtin kit 现在
  *  是无逻辑转发器(见 search-audio.ts 说明):execute 转调 Host ToolRegistry 里
  *  的插件 attach-audio(caller.kind='ai'),由插件 handler 复用同一份逻辑。 */
 

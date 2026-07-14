@@ -21,7 +21,7 @@ import { resolve } from 'node:path';
 import { exportPack } from '../packs/exporter';
 import { inspectPack, installPack } from '../packs/importer';
 import { readInstalled, readTrust } from '../packs/ledger';
-import { getPluginSnapshot, reloadPlugins } from '../plugins/registry';
+import { getExtensionSnapshot, reloadExtensions } from '../extensions/registry';
 
 interface ExportBody {
   pluginIds: string[];
@@ -62,7 +62,7 @@ export function createPacksRouter(): Hono {
         400,
       );
     }
-    const snap = getPluginSnapshot();
+    const snap = getExtensionSnapshot();
     const plugins: Array<{ id: string; srcDir: string }> = [];
     for (const id of body.pluginIds) {
       const m = snap.manifests.find((x) => x.manifest.id === id);
@@ -117,7 +117,7 @@ export function createPacksRouter(): Hono {
       userAcknowledgedUnsigned: body.userAcknowledgedUnsigned,
     });
     if (result.ok && body.reload !== false) {
-      await reloadPlugins();
+      await reloadExtensions();
     }
     return c.json(result, result.ok ? 200 : 400);
   });

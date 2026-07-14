@@ -15,9 +15,9 @@
 import { describe, it, expect } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { scanAllLayers } from '../src/plugins/scanner';
-import { mergeManifests } from '../src/plugins/merger';
-import { buildKindRegistry } from '../src/plugins/kinds';
+import { scanAllLayers } from '../src/extensions/scanner';
+import { mergeManifests } from '../src/extensions/merger';
+import { buildKindRegistry } from '../src/extensions/kinds';
 
 const TMP = `/tmp/forgeax-perf-${process.pid}`;
 
@@ -33,7 +33,7 @@ function seedFleet(root: string, count: number): void {
     const dir = join(root, `plugin-${i}`);
     mkdirSync(dir, { recursive: true });
     writeFileSync(
-      join(dir, 'forgeax-plugin.json'),
+      join(dir, 'forgeax-extension.json'),
       JSON.stringify({
         schemaVersion: 1,
         version: '0.1.0',

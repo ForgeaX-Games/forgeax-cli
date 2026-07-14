@@ -20,7 +20,7 @@ import type { ContextSlot } from "../../../../src/kits/slot/types";
 import { SlotPriority } from "../../../../src/kits/slot/types";
 import type { AgentContext } from "../../../../src/core/types";
 import { listAgents } from "../../../../src/agents/loader";
-import { getPluginSnapshot } from "../../../../src/plugins/registry";
+import { getExtensionSnapshot } from "../../../../src/extensions/registry";
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { readUninstalledAgentIds } from '@forgeax/platform-io';
 import { pickI18n } from "@forgeax/types";
@@ -96,7 +96,7 @@ export function buildRoster(ctx: AgentContext): RosterRow[] {
   // "what I am / when to delegate to me" (16-AGENT-PACK-SPEC §3.3), so it
   // belongs in the dispatch roster.
   const descByPluginId = new Map<string, string>();
-  for (const m of getPluginSnapshot().manifests) {
+  for (const m of getExtensionSnapshot().manifests) {
     const rawDesc = (m.manifest as { description?: unknown }).description;
     if (!rawDesc) continue;
     const d = pickI18n(rawDesc as Parameters<typeof pickI18n>[0], "zh");

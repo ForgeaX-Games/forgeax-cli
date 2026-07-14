@@ -1,8 +1,8 @@
 /**
  * Phase D1 — ToolRegistry: dispatcher for `host.tool.call(toolId, args)`.
  *
- * Sits next to PluginSnapshot (single direction: ToolRegistry reads the
- * snapshot's `kinds.tools[]` to discover handlers; PluginSnapshot does not
+ * Sits next to ExtensionSnapshot (single direction: ToolRegistry reads the
+ * snapshot's `kinds.tools[]` to discover handlers; ExtensionSnapshot does not
  * know about ToolRegistry). The split keeps reload semantics simple: any
  * POST /api/plugins/reload bumps the snapshot, ToolRegistry picks up the
  * new handler list on next call() — no eager re-import needed because
@@ -22,8 +22,8 @@
  * are allowed for any registered tool — finer-grained permission lands in
  * Phase D6 (trust-decision panel) when the trust model is wired.
  */
-import { getPluginSnapshot } from '../plugins/registry';
-import type { ToolEntry } from '../plugins/kinds';
+import { getExtensionSnapshot } from '../extensions/registry';
+import type { ToolEntry } from '../extensions/kinds';
 import type { ToolCall, ToolResult, ImageGen } from '@forgeax/types';
 import { getEventBus } from '../events/bus';
 import { isPaused } from '../runtime/pause';
@@ -42,7 +42,7 @@ export type ToolHandler = (
      *  Handlers MUST NOT touch `process.env` directly; this is the only
      *  channel for host secrets. */
     env: Record<string, string | undefined>;
-    /** Absolute path to the plugin's directory (where forgeax-plugin.json
+    /** Absolute path to the plugin's directory (where forgeax-extension.json
      *  lives). Use this instead of `process.cwd()` for sibling-file reads. */
     cwd: string;
     /** 用户数据根(`<projectRoot>/.forgeax/games/...` 所在);写用户工程数据的
@@ -70,7 +70,7 @@ const moduleCache = new Map<string, HandlerModule>();
 const _toolIndex = new WeakMap<object, Map<string, ToolEntry>>();
 
 function findEntry(toolId: string): ToolEntry | null {
-  const snap = getPluginSnapshot();
+  const snap = getExtensionSnapshot();
   let idx = _toolIndex.get(snap);
   if (!idx) {
     idx = new Map();
@@ -369,7 +369,7 @@ export interface ToolDescriptor {
 }
 
 export function listTools(): ToolDescriptor[] {
-  return getPluginSnapshot().kinds.tools.map((t) => ({
+  return getExtensionSnapshot().kinds.tools.map((t) => ({
     id: t.toolId,
     pluginId: t.pluginId,
     description: t.description,

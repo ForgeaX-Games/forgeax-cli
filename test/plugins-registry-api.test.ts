@@ -6,8 +6,8 @@ import { describe, it, expect, beforeEach } from 'bun:test';
 import { Hono } from 'hono';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createPluginsRouter } from '../src/api/plugins';
-import { reloadPlugins, _resetSnapshotForTests } from '../src/plugins/registry';
+import { createExtensionsRouter } from '../src/api/extensions';
+import { reloadExtensions, _resetSnapshotForTests } from '../src/extensions/registry';
 
 const TMP = `/tmp/forgeax-registry-${process.pid}`;
 
@@ -15,7 +15,7 @@ function mkmanifest(layer: string, dirName: string, body: Record<string, unknown
   const dir = join(TMP, layer, dirName);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    join(dir, 'forgeax-plugin.json'),
+    join(dir, 'forgeax-extension.json'),
     JSON.stringify({ schemaVersion: 1, version: '0.1.0', ...body }),
     'utf-8',
   );
@@ -31,22 +31,22 @@ beforeEach(() => {
 describe('/api/plugins', () => {
   it('GET /manifests reflects the last loaded snapshot', async () => {
     mkmanifest('L0', 'wb-x', {
-      id: '@forgeax-plugin/wb-x',
+      id: '@forgeax-extension/wb-x',
       kind: 'workbench',
       displayName: { zh: 'X' },
       provides: { workbench: { id: 'x', position: 110 } },
     });
-    await reloadPlugins({ roots: { L0: join(TMP, 'L0'), L1: join(TMP, 'L1'), L2: join(TMP, 'L2') } });
+    await reloadExtensions({ roots: { L0: join(TMP, 'L0'), L1: join(TMP, 'L1'), L2: join(TMP, 'L2') } });
 
     const app = new Hono();
-    app.route('/api/plugins', createPluginsRouter());
+    app.route('/api/plugins', createExtensionsRouter());
     const res = await app.request('/api/plugins/manifests');
     expect(res.status).toBe(200);
     const body = (await res.json()) as any;
     expect(body.counts.manifests).toBe(1);
     expect(body.counts.workbench).toBe(1);
     expect(body.manifests[0]).toMatchObject({
-      id: '@forgeax-plugin/wb-x',
+      id: '@forgeax-extension/wb-x',
       kind: 'workbench',
       layer: 'L0',
     });
@@ -55,11 +55,11 @@ describe('/api/plugins', () => {
 
   it('POST /reload bumps generation and picks up new on-disk manifests', async () => {
     const roots = { L0: join(TMP, 'L0'), L1: join(TMP, 'L1'), L2: join(TMP, 'L2') };
-    const before = await reloadPlugins({ roots });
+    const before = await reloadExtensions({ roots });
     expect(before.manifests.length).toBe(0);
 
     mkmanifest('L0', 'wb-late', {
-      id: '@forgeax-plugin/wb-late',
+      id: '@forgeax-extension/wb-late',
       kind: 'workbench',
       displayName: { zh: 'Late' },
       provides: { workbench: { id: 'late' } },
@@ -68,25 +68,25 @@ describe('/api/plugins', () => {
     // The router doesn't know about our test roots, so reload manually too —
     // we're testing the response-shape contract here, not the directory
     // walker (that's covered in plugins-scanner-merger.test.ts).
-    const after = await reloadPlugins({ roots });
+    const after = await reloadExtensions({ roots });
     expect(after.generation).toBe(before.generation + 1);
     expect(after.manifests.length).toBe(1);
 
     const app = new Hono();
-    app.route('/api/plugins', createPluginsRouter());
+    app.route('/api/plugins', createExtensionsRouter());
     const res = await app.request('/api/plugins/manifests');
     const body = (await res.json()) as any;
     expect(body.generation).toBe(after.generation);
-    expect(body.manifests[0].id).toBe('@forgeax-plugin/wb-late');
+    expect(body.manifests[0].id).toBe('@forgeax-extension/wb-late');
   });
 
   it('serializes scan errors as issues with phase=scan', async () => {
     mkdirSync(join(TMP, 'L0', 'broken'), { recursive: true });
-    writeFileSync(join(TMP, 'L0', 'broken', 'forgeax-plugin.json'), '{ malformed', 'utf-8');
-    await reloadPlugins({ roots: { L0: join(TMP, 'L0'), L1: join(TMP, 'L1'), L2: join(TMP, 'L2') } });
+    writeFileSync(join(TMP, 'L0', 'broken', 'forgeax-extension.json'), '{ malformed', 'utf-8');
+    await reloadExtensions({ roots: { L0: join(TMP, 'L0'), L1: join(TMP, 'L1'), L2: join(TMP, 'L2') } });
 
     const app = new Hono();
-    app.route('/api/plugins', createPluginsRouter());
+    app.route('/api/plugins', createExtensionsRouter());
     const res = await app.request('/api/plugins/manifests');
     const body = (await res.json()) as any;
     expect(body.issues.some((i: { phase: string }) => i.phase === 'scan')).toBe(true);
