@@ -44,6 +44,7 @@ import {
   createCursorMapperState,
   CURSOR_DRIVER_LABEL,
   CURSOR_FALLBACK_MODELS,
+  ensureCursorHooksConfig,
   flushCursorMapper,
   mapCursorEvent,
   probeCursorModels,
@@ -107,13 +108,25 @@ export class CursorKernel implements AgentKernel {
       const projectRoot = defaultProjectRoot();
       isoHome = buildCursorHomeWithoutUserMcp();
 
+      // settings.permissions 拦截面(046 楔子3 = task 2e):工作区静态 .cursor/hooks.json
+      // (beforeShellExecution/beforeMCPExecution → forgeax /:sid/hook-gate)。上下文经
+      // per-turn spawn env 注入;用户自跑 cursor 无 FORGEAX env → hook 零干预。
+      const hooksActive = ensureCursorHooksConfig(projectRoot);
+      const forgeaxHookEnv: Record<string, string> = hooksActive
+        ? {
+            FORGEAX_SERVER_URL: `http://127.0.0.1:${process.env.FORGEAX_SERVER_PORT ?? '18900'}`,
+            FORGEAX_SID: req.hostSessionId?.trim() || tid || '',
+            FORGEAX_AGENT: req.session.agentId?.trim() || 'forge',
+          }
+        : {};
+
       // cursor auth：CURSOR_API_KEY 透传(无则靠 `cursor-agent login`);imported pack 凭据地板：scrub。
-      let env: Record<string, string> = {};
+      let env: Record<string, string> = { ...forgeaxHookEnv };
       if (process.env.CURSOR_API_KEY) env.CURSOR_API_KEY = process.env.CURSOR_API_KEY;
       if (isoHome) env.HOME = isoHome;
       let envOverride: Record<string, string | undefined> | undefined;
       if (req.trustTier === 'imported') {
-        envOverride = scrubbedSecretEnv();
+        envOverride = { ...scrubbedSecretEnv(), ...forgeaxHookEnv };
         // scrub 后仍保留 cursor 自己的 key（非模型 key），否则无可用鉴权路径。
         if (process.env.CURSOR_API_KEY) envOverride = { ...envOverride, CURSOR_API_KEY: process.env.CURSOR_API_KEY };
         if (isoHome) envOverride = { ...envOverride, HOME: isoHome };

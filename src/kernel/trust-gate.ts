@@ -30,7 +30,9 @@
  */
 import { resolve, sep } from 'node:path';
 import type { TrustTier } from '@forgeax/agent-runtime';
+import { matchRule, type PermissionRuleSet } from '@forgeax/types';
 import { getUiAction } from '../api/lib/ui-manifest-registry';
+import { ruleLabel } from '../api/lib/permission-settings';
 
 /** 工具能力分类。`delete` 从 `write` 拆出(own 写直放、但删文件要确认)。 */
 export type Capability = 'read' | 'write' | 'delete' | 'exec' | 'network' | 'credential' | 'delegate' | 'other';
@@ -129,16 +131,31 @@ export interface TrustContext {
   /** 会话 id —— `ui_invoke` 的 per-action capability 查表键(manifest 缓存按 sid 存)。
    *  缺省 ⇒ 查不到声明 ⇒ fail-closed ask。 */
   sid?: string;
+  /** settings.permissions 规则集(046 楔子1-补:host 注入,来自
+   *  `api/lib/permission-settings.ts` 分层载出)。叠加在 tier 基线上,决策顺序:
+   *  settings deny > tier 硬 deny(imported credential)> R2-08 scoped(fail-closed
+   *  的 unresolvable-deny 不被 settings ask 盲批绕过)> settings ask > tier ask >
+   *  settings allow > tier 直放/兜底 ask。缺省 ⇒ 纯 tier 基线(零行为变化)。 */
+  rules?: PermissionRuleSet;
 }
 
-/** 闸口判定(三档):allowlist > 硬 deny > imported write/delete 作用域(路径能解析→ask、解析不出→deny)
- *  > tier ask 集 > per-tier 直放集(own 通配 / imported 仅 {read,delegate});其余(imported 未知能力)
- *  → ask 交人判断(不静默放行、也不静默拒,§8/§9)。 */
+/** 闸口判定(三档):settings deny(bypass-immune,先于一切)> allowlist > 硬 deny
+ *  > imported write/delete 作用域(路径能解析→ask、解析不出→deny)> settings ask
+ *  > tier ask 集 > settings allow > per-tier 直放集(own 通配 / imported 仅 {read,delegate});
+ *  其余(imported 未知能力)→ ask 交人判断(不静默放行、也不静默拒,§8/§9)。
+ *  settings 规则经 `ctx.rules` 注入(046 楔子1-补),缺省 = 纯 tier 基线。 */
 export function checkKernelTool(
   trustTier: TrustTier | undefined,
   toolName: string,
   ctx: TrustContext = {},
 ): TrustDecision {
+  // 0) settings deny —— 最强、bypass-immune(先于 ALWAYS_ALLOW/ui 特判:用户显式
+  //    deny 的工具连编排原语也不豁免,与 cc 的 deny 语义一致)。
+  const denyRule = ctx.rules ? matchRule(ctx.rules.deny, toolName, ctx.args) : undefined;
+  if (denyRule) {
+    return decide('deny', undefined, `denied by rule ${ruleLabel(denyRule)}`);
+  }
+
   if (ALWAYS_ALLOW.has(toolName)) return decide('allow');
   // 缺 trustTier → fail-closed 当 imported 处理(不信默认 own)。
   const tier: TrustTier = trustTier ?? 'imported';
@@ -166,6 +183,8 @@ export function checkKernelTool(
   // 2) imported 的 write/delete:R2-08 游戏目录作用域 —— 路径能解析(不论目录内/外)→ ask
   //    (弹卡显解析后的目标路径交人兜,§8/§9;037-A:目录外从 deny 改 ask,deny 无回退路径);
   //    路径/projectRoot 解析不出 → fail-closed deny(无法证明目标,不能交人盲批)。
+  //    注:此步在 settings ask **之前**——unresolvable 的 fail-closed deny 不能被
+  //    一条 settings ask 规则翻成「盲批卡」(046 楔子1-补:fail-closed 不变)。
   if (tier === 'imported' && SCOPED_CAPS.has(cap)) {
     const scope = classifyWriteScope(ctx);
     if (scope.kind === 'unresolvable') return decide('deny', cap, scope.reason);
@@ -173,9 +192,23 @@ export function checkKernelTool(
     return decide('ask', cap, `confirm ${cap} ${where}: ${toolName}`);
   }
 
+  // 2.5) settings ask —— 强制弹卡(即便 tier 基线会直放;cc 的 ask 语义)。
+  const askRule = ctx.rules ? matchRule(ctx.rules.ask, toolName, ctx.args) : undefined;
+  if (askRule) {
+    return decide('ask', cap, `confirm (rule ${ruleLabel(askRule)}): ${toolName}`);
+  }
+
   // 3) 弹卡确认集(own 危险 {exec,network,credential,delete};imported {exec,network})。
   if (TIER_ASK[tier].has(cap)) {
     return decide('ask', cap, `confirm ${cap}: ${toolName}`);
+  }
+
+  // 3.5) settings allow —— 显式 always-allow(在 tier 直放集之前命中只是提前同一结局;
+  //    真正的增量是 imported 的非 {read,delegate} 能力:有规则背书 → 直放免卡。
+  //    shell 复合命令的走私防护在 matchRule 内(allow 需全部子命令命中且 !unsafe)。
+  const allowRule = ctx.rules ? matchRule(ctx.rules.allow, toolName, ctx.args) : undefined;
+  if (allowRule) {
+    return decide('allow', cap, `allowed by rule ${ruleLabel(allowRule)}`);
   }
 
   // 4) per-tier 直放集:own=通配(null)直放;imported 只直放显式信任的 {read, delegate}。

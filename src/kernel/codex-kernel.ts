@@ -38,11 +38,13 @@ import {
   CODEX_DRIVER_LABEL,
   CODEX_FALLBACK_MODELS,
   createCodexMapperState,
+  ensureCodexHooksConfig,
   flushCodexMapper,
   mapCodexEvent,
   type CodexRawEvent,
 } from './codex-profile';
 import { defaultProjectRoot } from '@forgeax/platform-io';
+import { evaluateSettingsRules, loadSettingsPermissionRules } from '../api/lib/permission-settings';
 import { CodexAppServerClient, type ServerRequest } from './codex-appserver-client';
 import {
   AppServerUnavailable,
@@ -167,14 +169,27 @@ export class CodexKernel implements AgentKernel {
 
     const binary = await this.binary();
     const projectRoot = defaultProjectRoot();
+    // settings.permissions 拦截面(046 楔子3):工作区静态 hooks.json(PreToolUse 全量
+    // 拦截,补 approval 只覆盖「codex 主动问」的缺口)。app-server 是 per-turn 进程
+    // (finally shutdown)→ FORGEAX_* 上下文经 env 注入安全,hook 脚本据此回调
+    // /:sid/hook-gate。用户自跑 codex 无 FORGEAX env → hook 零干预。
+    const hooksActive = ensureCodexHooksConfig(projectRoot);
     const env: Record<string, string> = {};
     if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     if (process.env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = process.env.OPENAI_BASE_URL;
+    if (hooksActive) {
+      env.FORGEAX_SERVER_URL = `http://127.0.0.1:${process.env.FORGEAX_SERVER_PORT ?? '18900'}`;
+      env.FORGEAX_SID = req.hostSessionId?.trim() || req.session.threadId?.trim() || '';
+      env.FORGEAX_AGENT = req.session.agentId?.trim() || 'forge';
+      env.FORGEAX_KERNEL = 'codex';
+    }
 
     const queue = new KernelEventQueue();
     const notifState = createCodexNotifState();
 
-    // 审批 server-request → 中立 requestPermission(无则默认放行 = headless --force 类比)。
+    // 审批 server-request:settings.permissions 规则先行(046 楔子3:deny 即拒 /
+    // allow 即批 / ask 强制走卡),未命中 → 中立 requestPermission(= Studio 审批卡),
+    // 都没有 → 默认放行(headless --force 类比,原基线)。
     const handleServerRequest = async (rpc: ServerRequest): Promise<unknown> => {
       const cls = classifyApproval(rpc.method);
       if (!cls) throw new Error(`unhandled codex server-request: ${rpc.method}`);
@@ -182,10 +197,18 @@ export class CodexKernel implements AgentKernel {
       const command = cls.tool === 'Bash'
         ? (typeof p.command === 'string' ? p.command : Array.isArray(p.command) ? p.command.join(' ') : (p.reason ?? 'run command'))
         : (p.reason ?? 'apply file changes');
-      let allow = true; // 无 requestPermission 闸 → 放行(与 exec sandbox 基线一致)。
-      if (req.requestPermission) {
+      const verdict = evaluateSettingsRules(loadSettingsPermissionRules(projectRoot), cls.tool, { command });
+      let allow = true; // 无规则命中且无 requestPermission 闸 → 放行(与 exec sandbox 基线一致)。
+      if (verdict?.behavior === 'deny') {
+        allow = false;
+      } else if (verdict?.behavior === 'allow') {
+        allow = true;
+      } else if (req.requestPermission) {
         const decision = await req.requestPermission({ name: cls.tool, args: { command, ...p } });
         allow = decision.behavior === 'allow';
+      } else if (verdict?.behavior === 'ask') {
+        // 用户显式要求 ask,但编排层没给 requestPermission 闸 → 无人可问,fail-closed。
+        allow = false;
       }
       // v1 方法用 ReviewDecision(approved/denied);v2 用 accept/decline。
       return cls.v1 ? { decision: allow ? 'approved' : 'denied' } : { decision: allow ? 'accept' : 'decline' };
@@ -195,6 +218,9 @@ export class CodexKernel implements AgentKernel {
       binary,
       cwd: projectRoot,
       env,
+      // hooksActive → 附 --dangerously-bypass-hook-trust(headless 无人确认 hook 信任;
+      // hook 是我们刚写入/校验过归属的,信任由构造保证)。
+      ...(hooksActive ? { globalArgs: ['--dangerously-bypass-hook-trust'] } : {}),
       onNotification: (m, params) => mapCodexNotification(m, params, notifState, queue),
       onServerRequest: handleServerRequest,
       onExit: (code, tail) => {
@@ -299,7 +325,10 @@ export class CodexKernel implements AgentKernel {
     try {
       const binary = await this.binary();
       const projectRoot = defaultProjectRoot();
-      const args = this.buildArgs(req);
+      // settings.permissions 拦截面(046 楔子3):同 app-server 路径,工作区静态
+      // hooks.json + FORGEAX_* env(exec 是 per-turn 进程,env 注入安全)。
+      const hooksActive = ensureCodexHooksConfig(projectRoot);
+      const args = this.buildArgs(req, hooksActive);
 
       // 凭据地板:imported → scrub。sidecar 路径(FORGEAX_SIDECAR=on)凭据由 sidecar cred-vault
       // 发 scoped token,本进程不跑 in-process cred-proxy 且剔真 key;非 sidecar 用 server 进程内代理。
@@ -314,6 +343,15 @@ export class CodexKernel implements AgentKernel {
             envOverride = { ...envOverride, OPENAI_API_KEY: issued.token, OPENAI_BASE_URL: issued.baseUrl };
           }
         }
+      }
+      if (hooksActive) {
+        envOverride = {
+          ...envOverride,
+          FORGEAX_SERVER_URL: `http://127.0.0.1:${process.env.FORGEAX_SERVER_PORT ?? '18900'}`,
+          FORGEAX_SID: req.hostSessionId?.trim() || req.session.threadId?.trim() || '',
+          FORGEAX_AGENT: req.session.agentId?.trim() || 'forge',
+          FORGEAX_KERNEL: 'codex',
+        };
       }
       const sidecarBaseId = req.callId || req.hostSessionId || req.session.threadId || req.session.agentId || 'kernel';
       const { lines, exit } = useSidecar
@@ -375,10 +413,10 @@ export class CodexKernel implements AgentKernel {
 
   /** 从中立 TurnRequest 拼 `codex exec [--json] ...` argv —— 委托给 codex-profile
    *  (所有 Codex-isms 在那)。resume 的 codexThreadId 由首轮 thread.started 记下。 */
-  private buildArgs(req: TurnRequest): string[] {
+  private buildArgs(req: TurnRequest, hooksActive = false): string[] {
     const tid = req.session.threadId?.trim();
     const codexThreadId = tid ? this.threadIdMap.get(tid) : undefined;
-    return buildCodexArgs(req, codexThreadId);
+    return buildCodexArgs(req, codexThreadId, hooksActive);
   }
 
   openHandle(callId: string): TurnHandle {

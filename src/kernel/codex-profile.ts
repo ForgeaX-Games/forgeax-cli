@@ -25,6 +25,8 @@
  *  - 无 per-tool 权限回调(走 sandbox/approval 模式)→ requestPermission 不接。
  */
 import type { TurnRequest } from '@forgeax/agent-runtime';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 
 // ─── 模型目录(Codex-isms) ───────────────────────────────────────────
 // 真实通道 = `codex app-server` JSON-RPC `model/list`(TUI /model 同源),
@@ -54,12 +56,59 @@ export const CODEX_APPROVAL_POLICY = 'never' as const;
 /** headless sandbox:工作区可写(首轮 `-s`,resume 经 `-c sandbox_mode=`)。 */
 export const CODEX_SANDBOX_MODE = 'workspace-write' as const;
 
+// ─── settings.permissions 拦截面(046 楔子3) ─────────────────────────
+// codex 无 per-invocation hooks flag → 在 `<workspace>/.codex/hooks.json` 写**静态**
+// PreToolUse hook(kernel-permission-hook.mjs 同步回调 forgeax `/:sid/hook-gate`:
+// settings 规则求值,ask 弹 Studio 审批卡阻塞)。上下文(server/sid/agent)经 codex
+// 进程 env 继承(codex-kernel spawn 注入 FORGEAX_*);用户在同一工作区自己跑 codex
+// 时 hook 读不到 FORGEAX env → 零输出零干预。
+// 实测 2026-07-14(codex-cli 0.143.0):工作区 hooks.json + `--dangerously-bypass-hook-trust`
+// 在 headless `exec` 下 PreToolUse 真触发、deny 强制("Command blocked by PreToolUse hook")。
+// ⚠️ 已知缺口(诚实标注,上游 openai/codex#16732):PreToolUse 对 `apply_patch` 文件
+// 编辑 / 多数 MCP 调用触发不可靠 —— **文件编辑规则可能漏**;sandbox_mode=workspace-write
+// 仍是 codex 的写入基线闸,规则面对 Bash 类可靠。
+
+/** hooks.json 归属标记:命中才允许覆盖(不吃掉用户自己的 hooks.json)。 */
+const CODEX_HOOKS_MARKER = 'kernel-permission-hook.mjs';
+
+/**
+ * 确保 `<projectRoot>/.codex/hooks.json` 是 forgeax 权限 hook 配置(幂等覆盖)。
+ * 返回是否生效:已有**非 forgeax** 的 hooks.json → 不覆盖、返回 false(诚实降级:
+ * 该工作区无规则拦截面,调用方不加 bypass-trust flag);写失败同样 false。
+ */
+export function ensureCodexHooksConfig(projectRoot: string): boolean {
+  try {
+    const dir = resolvePath(projectRoot, '.codex');
+    const path = resolvePath(dir, 'hooks.json');
+    const script = resolvePath(import.meta.dirname, 'hooks/kernel-permission-hook.mjs');
+    const cmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`;
+    const next = JSON.stringify(
+      { hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd, timeout: 600 }] }] } },
+      null,
+      2,
+    );
+    if (existsSync(path)) {
+      const raw = readFileSync(path, 'utf8');
+      if (!raw.includes(CODEX_HOOKS_MARKER)) return false; // 用户自己的 hooks.json,不动
+      if (raw === next) return true; // 幂等:内容已是最新
+    } else {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(path, next);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 从中立 TurnRequest 拼 `codex exec [--json] ...` argv。
  * `codexThreadId` 非空 → resume 子命令(由薄脊梁从 thread.started 记下后回传)。
  * systemPrompt(charter/persona)+ dynamicSuffix 由编排层 composeTurnRequest 提供。
+ * `hooksActive` = ensureCodexHooksConfig 写入成功 → 附 `--dangerously-bypass-hook-trust`
+ * (只信任我们自己刚写的 hook;用户自带 hooks.json 时不加,交 codex 自己的 trust 流程)。
  */
-export function buildCodexArgs(req: TurnRequest, codexThreadId: string | undefined): string[] {
+export function buildCodexArgs(req: TurnRequest, codexThreadId: string | undefined, hooksActive = false): string[] {
   // 诚实标注(no-op):中立 `systemPrompt.mode` 与 `req.toolPolicy` 在 codex headless **无落点**——
   // codex 无 `--system-prompt(-file)` flag(指令只能前置进 prompt,见下),也无 per-tool 放行/
   // 拒绝闸(headless 固定 approval_policy=never + sandbox_mode)。故 mode/toolPolicy 在此被忽略,
@@ -79,10 +128,12 @@ export function buildCodexArgs(req: TurnRequest, codexThreadId: string | undefin
     ? `# Instructions\n\n${instructions.trim()}\n\n# Task\n\n${task}`
     : task;
 
-  // headless 放行:跳过 git 检查 + 不卡审批。
+  // headless 放行:跳过 git 检查 + 不卡审批。hooksActive 时附 bypass-hook-trust
+  // (headless 无人机交互确认 hook 信任;hook 是我们自己写的,信任由构造保证)。
   const common = [
     '--json',
     '--skip-git-repo-check',
+    ...(hooksActive ? ['--dangerously-bypass-hook-trust'] : []),
     '-c',
     `approval_policy="${CODEX_APPROVAL_POLICY}"`,
     ...(req.model ? ['-m', req.model] : []),

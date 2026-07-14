@@ -309,6 +309,39 @@ function buildHermeticArgs(trustTier: TurnRequest['trustTier']): string[] {
 }
 
 /**
+ * settings.permissions 拦截面 argv(046 楔子3):把一个只含 `hooks.PreToolUse` 的
+ * settings JSON 写临时文件,`--settings <path>` 注入 —— hook 命令同步回调 forgeax
+ * 决策端点(`/:sid/hook-gate`,settings 规则求值;ask 弹 Studio 审批卡阻塞)。
+ * 这补上 CC **内置**工具(Bash/Write/Edit…在 CC 子进程内自执行)的拦截缺口——
+ * 尤其 acceptEdits 基线下文件编辑不过 permission-prompt 的盲区(墙B)。
+ * 实测 2026-07-14:`--settings` 注入的 PreToolUse 在 headless `-p` 下真触发、deny 强制。
+ *
+ * 上下文全经 argv(port/sid/agent;跨平台,不依赖 shell env 前缀)。timeout 600s
+ * (>= 端点弹卡的 10min server 侧超时的大头;hook 脚本自留 9.5min fetch 上限先超)。
+ * 写失败 → 返回空(降级:无 hook 拦截面,tier 闸 + permission-prompt 基线仍在,不崩)。
+ *
+ * ⚠️ imported 的 `--setting-sources ''` 只裁 user/project/local 三源,`--settings`
+ * flag 是独立源 —— 但两者叠加行为未实测,imported 路径按 best-effort 标注。
+ */
+function buildHookSettingsArgs(realSid: string, agentId: string, key: string): string[] {
+  if (!realSid) return [];
+  try {
+    const script = resolvePath(import.meta.dirname, 'hooks/kernel-permission-hook.mjs');
+    const cmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(script)} ${SERVER_PORT} ${realSid} ${agentId} claude-code`;
+    const settings = {
+      hooks: {
+        PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd, timeout: 600 }] }],
+      },
+    };
+    const path = resolvePath(tmpdir(), `forgeax-kernel-hook-settings-${key}.json`);
+    writeFileSync(path, JSON.stringify(settings));
+    return ['--settings', path];
+  } catch {
+    return []; // 降级:无规则拦截面(诚实少一层,不假装有)。
+  }
+}
+
+/**
  * 从中立 TurnRequest 拼 `claude -p` argv(systemPrompt 来自编排层 composeTurnRequest)。
  * `permissionMode` 缺省时用 {@link DEFAULT_CC_PERMISSION_MODE};传入则覆盖
  * (经 {@link toCcPermissionMode} 由中立模式翻译而来)。
@@ -342,6 +375,10 @@ export function buildCcArgs(
   const spKey = req.hostSessionId?.trim() || tid || req.session.agentId?.trim() || 'x';
   const systemPromptArgs = buildSystemPromptArgs(systemPrompt, sp.mode ?? 'append', spKey);
 
+  // settings.permissions 拦截面(046 楔子3):PreToolUse hook 回调 forgeax 决策端点。
+  const realSid = req.hostSessionId?.trim() || tid || '';
+  const hookSettingsArgs = buildHookSettingsArgs(realSid, req.session.agentId?.trim() || 'forge', spKey);
+
   // 用户消息(dynamicSuffix 以 user 后缀注入,不进 system prompt)。
   const message = sp.dynamicSuffix?.trim()
     ? `${req.input.text}\n\n${sp.dynamicSuffix.trim()}`
@@ -354,6 +391,7 @@ export function buildCcArgs(
     '--verbose',
     '--permission-mode', permissionMode,
     ...hermeticArgs,
+    ...hookSettingsArgs,
     ...mcpArgs,
     ...toolPolicyArgs,
     ...budgetArgs,

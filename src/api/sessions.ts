@@ -36,6 +36,7 @@ import { getCheckpointManager, type RewindMode } from '../checkpoint/checkpoint-
 import { loadAgentRecord } from '../soul';
 import { appendToolAudit } from '../kernel/tool-audit';
 import { consultTurnGate } from '../kernel/cc-profile';
+import { evaluateSettingsRules, loadSettingsPermissionRules, ruleLabel } from './lib/permission-settings';
 
 function resolveAgentPath(session: Session, to: string): string {
   if (to.includes('#')) {
@@ -412,7 +413,14 @@ export function createSessionsRouter() {
     const projectRoot = defaultProjectRoot();
     const scopeGame = session.config?.defaultDir ?? getPathManager().resolveScope();
     // sid 供 ui_invoke 的 per-action capability 查表(manifest 缓存按 sid 存,见 trust-gate)。
-    const decision = checkKernelTool(trustTier, toolName, { args, projectRoot, activeGame: scopeGame, sid });
+    // rules = settings.permissions 分层载出(046 楔子1-补:settings deny/ask/allow 叠加 tier 基线)。
+    const decision = checkKernelTool(trustTier, toolName, {
+      args,
+      projectRoot,
+      activeGame: scopeGame,
+      sid,
+      rules: loadSettingsPermissionRules(projectRoot),
+    });
     if (decision.outcome === 'deny') {
       // 信任闸硬拒 —— 审计记录 allow=false
       appendToolAudit({ sid, agent: agentPath, tool: toolName, trustTier, allow: false, error: decision.reason ?? 'denied by trust tier', durationMs: Date.now() - start, ts: start });
@@ -479,27 +487,58 @@ export function createSessionsRouter() {
     const toolName = typeof body.toolName === 'string' ? body.toolName : 'tool';
     const command = typeof body.command === 'string' ? body.command : '';
     const agent = typeof body.agent === 'string' && body.agent ? body.agent : 'forge';
-    const reqId = randomUUID();
-    const session = getSessionManager().peek(sid);
+    let session: Session | undefined;
+    try {
+      // peek 返回 Session | null；收成 undefined 以匹配局部声明 + catch 兜底。
+      session = getSessionManager().peek(sid) ?? undefined;
+    } catch {
+      session = undefined; // 管理器未初始化 → 按无 session 走(fail-closed 回执,不 500)。
+    }
     if (!session) return c.json({ allow: false, reason: 'no-session' }, 200);
+    const input = body.input ?? (command ? { command } : null);
 
-    // A1#4 — 先咨询本轮中立权限闸(TurnRequest.requestPermission,经 cc-profile 的
+    // 046 楔子3 — settings.permissions 规则先行(deny/allow 免卡直断、ask 强制弹卡):
+    // 这让 CC 原生权限提示路由(--permission-prompt-tool)也吃到「配置里写一条 deny」。
+    // 未命中 → undefined → 走原有 turn-gate/弹卡流程,零行为变化。
+    const verdict = evaluateSettingsRules(loadSettingsPermissionRules(), toolName, input);
+    if (verdict?.behavior === 'deny' || verdict?.behavior === 'allow') {
+      const allow = verdict.behavior === 'allow';
+      appendToolAudit({ sid, agent, tool: toolName, trustTier: 'kernel-native', allow, ...(allow ? {} : { error: `denied by rule ${ruleLabel(verdict.rule)}` }), durationMs: 0, ts: Date.now() });
+      return c.json({ allow, ...(allow ? {} : { reason: `denied by rule ${ruleLabel(verdict.rule)}` }) });
+    }
+
+    // A1#4 — 咨询本轮中立权限闸(TurnRequest.requestPermission,经 cc-profile 的
     // per-turn registry 按真 sid 登记)。命中即直接回执,免去弹卡;这让「编排层的
     // checkTool/requestPermission 成为 CC 内核的唯一闸」真正闭合。未登记(无内核闸
     // 或非内核路径)→ undefined → 回落到下面既有的「弹卡 + 阻塞」流程,行为不变。
     // fail-closed:闸内部抛错时 consultTurnGate 已返回 deny(不静默放行)。
-    const gateDecision = await consultTurnGate(sid, {
-      name: toolName,
-      args: body.input ?? (command ? { command } : null),
-    });
-    if (gateDecision) {
-      const allowed = gateDecision.behavior === 'allow';
-      return c.json({
-        allow: allowed,
-        ...(allowed ? {} : { reason: gateDecision.message || 'denied by turn gate' }),
-      });
+    // settings ask(verdict.behavior==='ask')**跳过** turn-gate 直落弹卡——用户显式
+    // 要求「这类工具问我」,不许任何自动闸代答(cc 的 ask 语义)。
+    if (verdict?.behavior !== 'ask') {
+      const gateDecision = await consultTurnGate(sid, { name: toolName, args: input });
+      if (gateDecision) {
+        const allowed = gateDecision.behavior === 'allow';
+        return c.json({
+          allow: allowed,
+          ...(allowed ? {} : { reason: gateDecision.message || 'denied by turn gate' }),
+        });
+      }
     }
 
+    const { allow, answers } = await askViaPermissionCard(session, { sid, agent, toolName, command, input });
+    return c.json({ allow, ...(answers ? { answers } : {}) });
+  });
+
+  /** 弹权限卡 + 阻塞等用户(permission-request 与 hook-gate 共用)。
+   *  经 EventBus 发 `permission:request` 卡,registerPermission hold 到
+   *  /permission-reply 解开或超时(fail-closed deny);无论如何结算都补发
+   *  `permission:resolved` 撤卡。answers = AskUserQuestion 的选择答案侧信道。 */
+  async function askViaPermissionCard(
+    session: Session,
+    req: { sid: string; agent: string; toolName: string; command: string; input: unknown },
+  ): Promise<{ allow: boolean; answers?: Record<string, string> }> {
+    const { sid, agent, toolName, command, input } = req;
+    const reqId = randomUUID();
     // Pop the approval card in the Studio UI. Reuses the per-session WS fan-out
     // (same channel as file-activity:*); the client's permission-stream handler
     // renders a modal keyed by reqId.
@@ -508,7 +547,7 @@ export function createSessionsRouter() {
         type: 'permission:request',
         ts: Date.now(),
         source: `agent:${agent}`,
-        payload: { reqId, toolName, command, input: body.input ?? null, agent },
+        payload: { reqId, toolName, command, input: input ?? null, agent },
       },
       agent,
     );
@@ -538,7 +577,63 @@ export function createSessionsRouter() {
     // inject updatedInput.answers (without these, CC gets "did not answer").
     const answers = permissionAnswers.get(reqId);
     permissionAnswers.delete(reqId);
-    return c.json({ allow, ...(answers ? { answers } : {}) });
+    return { allow, ...(answers ? { answers } : {}) };
+  }
+
+  // POST /:sid/hook-gate —— 外部内核 hook 的统一决策端点(046 楔子3)。
+  // cc(--settings 注入 PreToolUse)/ codex(<workspace>/.codex/hooks.json PreToolUse)/
+  // cursor(<workspace>/.cursor/hooks.json beforeShellExecution|beforeMCPExecution)的
+  // 薄 hook 脚本(kernel/hooks/*.mjs)在内核**自己进程内的内置工具**执行前同步 HTTP
+  // 回调到这里 —— 这是墙B(外部内核内置工具自执行,forgeax 旁观 stream-json 只能事后
+  // 观察)的唯一拦截面。host-routed 工具(mcp__fxt__*)不经此(hook 脚本跳过),它们
+  // 在 /:sid/kernel-tool 的 trust-gate 把闸,不双卡。
+  //
+  // 决策 = settings.permissions 规则(不含 tier 基线——内核内置工具跑在子进程,tier
+  // 政策管不到,规则是唯一声明面):deny → 即拒;ask → 弹卡阻塞交人;allow → 直放;
+  // 未命中 → 'none'(hook 脚本零输出,内核走自己的默认权限流,零行为变化)。
+  // fail-safe:session 不在 → 'none'(不因编排面缺位把内核整轮卡死;deny 规则仍由
+  // 各内核 sandbox/approval 基线兜,§9)。
+  r.post('/:sid/hook-gate', async (c) => {
+    const sid = c.req.param('sid');
+    const start = Date.now();
+    const body = await c.req.json().catch(() => ({}));
+    const toolName = typeof body.toolName === 'string' && body.toolName ? body.toolName : '';
+    const kernel = typeof body.kernel === 'string' ? body.kernel : 'unknown';
+    const agent = typeof body.agent === 'string' && body.agent ? body.agent : 'forge';
+    const input = body.input && typeof body.input === 'object' ? body.input : {};
+    if (!toolName) return c.json({ decision: 'none', reason: 'toolName required' });
+
+    const verdict = evaluateSettingsRules(loadSettingsPermissionRules(), toolName, input);
+    if (!verdict) return c.json({ decision: 'none' });
+
+    const label = ruleLabel(verdict.rule);
+    if (verdict.behavior === 'deny' || verdict.behavior === 'allow') {
+      const allow = verdict.behavior === 'allow';
+      appendToolAudit({ sid, agent, tool: toolName, trustTier: `kernel:${kernel}`, allow, ...(allow ? {} : { error: `denied by rule ${label}` }), durationMs: Date.now() - start, ts: start });
+      return c.json({ decision: verdict.behavior, reason: `${verdict.behavior} by rule ${label}` });
+    }
+
+    // ask:弹卡阻塞交人(与 permission-request 同一张卡/同一 WS 通道)。session 不在
+    // (headless / 会话已收 / session-manager 未起)→ 无处弹卡,fail-closed deny(用户
+    // 显式要求 ask 的操作,不能因没人可问而静默放行)。peek 包 try:管理器未初始化时
+    // 不 500,按无 session 走 fail-closed。
+    let session: Session | undefined;
+    try {
+      // peek 返回 Session | null；收成 undefined 以匹配局部声明 + catch 兜底。
+      session = getSessionManager().peek(sid) ?? undefined;
+    } catch {
+      session = undefined;
+    }
+    if (!session) {
+      appendToolAudit({ sid, agent, tool: toolName, trustTier: `kernel:${kernel}`, allow: false, error: `ask rule ${label} with no live session (fail-closed)`, durationMs: Date.now() - start, ts: start });
+      return c.json({ decision: 'deny', reason: `ask by rule ${label}, but no live session to ask (fail-closed)` });
+    }
+    const command = typeof (input as Record<string, unknown>).command === 'string'
+      ? ((input as Record<string, unknown>).command as string)
+      : '';
+    const { allow } = await askViaPermissionCard(session, { sid, agent, toolName, command, input });
+    appendToolAudit({ sid, agent, tool: toolName, trustTier: `kernel:${kernel}`, allow, ...(allow ? {} : { error: 'denied by user' }), durationMs: Date.now() - start, ts: start });
+    return c.json({ decision: allow ? 'allow' : 'deny', reason: allow ? `user approved (rule ${label})` : `denied by user (rule ${label})` });
   });
 
   // POST /:sid/permission-reply —— 前端审批卡上点「允许/拒绝」后调用,解开上面

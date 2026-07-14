@@ -23,6 +23,8 @@
  *  - 无 per-tool 权限回调(走 --force / hooks)→ requestPermission 不接。
  */
 import type { KernelModelInfo, TurnRequest } from '@forgeax/agent-runtime';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 import { resolveBinary } from '../cli-providers/shared/resolve-binary';
 import { runCapture } from '../lib/node-spawn';
 
@@ -89,6 +91,59 @@ export {
   type CursorMapperState,
   type CursorRawEvent,
 } from './cursor-mapper';
+
+// ─── settings.permissions 拦截面(046 楔子3 = 曾标注的 task 2e) ──────────
+// cursor headless 只有两个内置模式:default(自动**拒**一切需审批操作,agent 废了)
+// 或 `--force`(全放行 fail-open)。唯一 per-command 审批注入点 = Hooks:
+// `<workspace>/.cursor/hooks.json` 的 `beforeShellExecution`/`beforeMCPExecution`
+// 阻塞 hook,stdout `{permission:"allow"|"deny"}` 被尊重(实测 2026-06-16 于
+// cursor-agent 2026.06.15,复测 2026-07-14 于 2026.07.09:deny 强制生效)。
+// 所以维持 `--force` 平滑基线 + 叠加本 hook:cursor-permission-hook.mjs 同步回调
+// forgeax `/:sid/hook-gate`(settings 规则求值;ask 弹 Studio 审批卡;none→allow
+// 维持 --force 原语义)。cursor 无 `--hooks <path>` flag → 文件静态,上下文
+// (FORGEAX_SERVER_URL/FORGEAX_SID/FORGEAX_AGENT)经 cursor-agent 进程 env 继承
+// (per-turn spawn,注入安全);用户自跑 cursor 无 FORGEAX env → hook 零干预。
+// ⚠️ cursor 无 shell 直 exec hook 命令:`VAR=` 前缀与含 `://` 参数都会打断解析
+// (2026-06-16 实测)→ 命令串只含双引号路径,不带 env 前缀/URL 参数。
+
+/** hooks.json 归属标记:命中才允许覆盖(不吃掉用户自己的 hooks.json)。 */
+const CURSOR_HOOKS_MARKER = 'cursor-permission-hook.mjs';
+
+/**
+ * 确保 `<projectRoot>/.cursor/hooks.json` 是 forgeax 权限 hook 配置(幂等覆盖)。
+ * 返回是否生效:已有**非 forgeax** 的 hooks.json → 不覆盖、返回 false(诚实降级:
+ * 该工作区维持纯 --force 基线,无规则拦截面);写失败同样 false。
+ */
+export function ensureCursorHooksConfig(projectRoot: string): boolean {
+  try {
+    const dir = resolvePath(projectRoot, '.cursor');
+    const path = resolvePath(dir, 'hooks.json');
+    const script = resolvePath(import.meta.dirname, 'hooks/cursor-permission-hook.mjs');
+    const cmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`;
+    const next = JSON.stringify(
+      {
+        version: 1,
+        hooks: {
+          beforeShellExecution: [{ command: cmd }],
+          beforeMCPExecution: [{ command: cmd }],
+        },
+      },
+      null,
+      2,
+    );
+    if (existsSync(path)) {
+      const raw = readFileSync(path, 'utf8');
+      if (!raw.includes(CURSOR_HOOKS_MARKER)) return false; // 用户自己的 hooks.json,不动
+      if (raw === next) return true; // 幂等:内容已是最新
+    } else {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(path, next);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 从中立 TurnRequest 拼 `cursor-agent -p ...` 的调用面。
