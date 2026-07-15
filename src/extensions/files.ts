@@ -60,7 +60,7 @@ export interface ExtensionFileEntry {
 }
 
 export type ListResult =
-  | { ok: true; pluginDir: string; entries: ExtensionFileEntry[] }
+  | { ok: true; extensionDir: string; entries: ExtensionFileEntry[] }
   | FileError;
 
 export type ReadResult =
@@ -71,7 +71,7 @@ export type WriteResult =
   | { ok: true; path: string; size: number }
   | FileError;
 
-function pluginRoot(projectRoot: string, slug: string): string {
+function extensionRoot(projectRoot: string, slug: string): string {
   return join(projectRoot, '.forgeax', 'extensions', slug);
 }
 
@@ -100,7 +100,7 @@ function extOf(path: string): string {
 export function listExtensionFiles(projectRoot: string, slug: string): ListResult {
   const slugCheck = checkSlug(slug);
   if (!slugCheck.ok) return slugCheck;
-  const dir = pluginRoot(projectRoot, slug);
+  const dir = extensionRoot(projectRoot, slug);
   if (!existsSync(dir)) return { ok: false, code: 'not_found', error: `plugin dir missing: ${dir}` };
 
   const entries: ExtensionFileEntry[] = [];
@@ -123,7 +123,7 @@ export function listExtensionFiles(projectRoot: string, slug: string): ListResul
   }
   walk(dir);
   entries.sort((a, b) => a.path.localeCompare(b.path));
-  return { ok: true, pluginDir: dir, entries };
+  return { ok: true, extensionDir: dir, entries };
 }
 
 /** Read a single file under the plugin dir. */
@@ -133,7 +133,7 @@ export function readExtensionFile(projectRoot: string, slug: string, relPath: st
   if (!relPath || relPath.includes('\\') || relPath.startsWith('/')) {
     return { ok: false, code: 'forbidden', error: `relPath must be a relative POSIX path` };
   }
-  const dir = pluginRoot(projectRoot, slug);
+  const dir = extensionRoot(projectRoot, slug);
   const abs = resolve(dir, relPath);
   const inside = checkInside(dir, abs);
   if (!inside.ok) return inside;
@@ -174,7 +174,7 @@ export function writeExtensionFile(
   if (bytes > MAX_BYTES) {
     return { ok: false, code: 'too_large', error: `content > ${MAX_BYTES} bytes` };
   }
-  const dir = pluginRoot(projectRoot, slug);
+  const dir = extensionRoot(projectRoot, slug);
   if (!existsSync(dir)) {
     return { ok: false, code: 'not_found', error: `plugin dir missing: ${dir}` };
   }

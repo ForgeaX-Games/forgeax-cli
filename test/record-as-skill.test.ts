@@ -33,7 +33,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
   it('writes a complete plugin dir whose manifest scans cleanly', async () => {
     const r = recordAsSkill({
       projectRoot: TMP,
-      pluginId: '@me/replay-greet',
+      extensionId: '@me/replay-greet',
       skillId: 's.replay',
       displayName: { zh: '回放问候', en: 'Replay Greet' },
       recorded: [
@@ -66,7 +66,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
   it('rejects empty recorded[]', () => {
     const r = recordAsSkill({
       projectRoot: TMP,
-      pluginId: '@me/empty',
+      extensionId: '@me/empty',
       skillId: 's.x',
       displayName: { zh: 'x', en: 'x' },
       recorded: [],
@@ -83,7 +83,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
       const r = await distillRecordedSkill(
         {
           projectRoot: TMP,
-          pluginId: '@me/replay-distilled',
+          extensionId: '@me/replay-distilled',
           skillId: 's.distilled',
           displayName: { zh: '蒸馏回放', en: 'Distilled Replay' },
           recorded: [
@@ -114,7 +114,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
       const r = await distillRecordedSkill(
         {
           projectRoot: TMP,
-          pluginId: '@me/replay-llm-down',
+          extensionId: '@me/replay-llm-down',
           skillId: 's.fail',
           displayName: { zh: 'x', en: 'x' },
           recorded: [{ toolId: 'demo.echo', args: {} }],
@@ -142,7 +142,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
       const r = await distillRecordedSkill(
         {
           projectRoot: TMP,
-          pluginId: '@me/replay-param',
+          extensionId: '@me/replay-param',
           skillId: 's.param',
           displayName: { zh: 'p', en: 'p' },
           recorded: [{ toolId: 'demo.echo', args: { msg: 'hi' } }],
@@ -184,7 +184,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
       const r = await distillRecordedSkill(
         {
           projectRoot: TMP,
-          pluginId: '@me/replay-deep',
+          extensionId: '@me/replay-deep',
           skillId: 's.deep',
           displayName: { zh: 'd', en: 'd' },
           recorded: [{ toolId: 'demo.echo', args: { target: { name: 'hero' } } }],
@@ -215,7 +215,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
       const r = await distillRecordedSkill(
         {
           projectRoot: TMP,
-          pluginId: '@me/replay-invalid',
+          extensionId: '@me/replay-invalid',
           skillId: 's.invalid',
           displayName: { zh: 'i', en: 'i' },
           recorded: [{ toolId: 'demo.echo', args: { msg: 'hi' } }],
@@ -244,7 +244,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
       const r = await distillRecordedSkill(
         {
           projectRoot: TMP,
-          pluginId: '@me/replay-runtime',
+          extensionId: '@me/replay-runtime',
           skillId: 's.runtime',
           displayName: { zh: 'r', en: 'r' },
           recorded: [{ toolId: 'demo.echo', args: { text: 'hello' } }],
@@ -276,7 +276,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
       const r = await distillRecordedSkill(
         {
           projectRoot: TMP,
-          pluginId: '@me/replay-llm-garbage',
+          extensionId: '@me/replay-llm-garbage',
           skillId: 's.bad',
           displayName: { zh: 'x', en: 'x' },
           recorded: [{ toolId: 'demo.echo', args: {} }],
@@ -295,7 +295,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
   it('refuses to overwrite an existing plugin dir', () => {
     const a = recordAsSkill({
       projectRoot: TMP,
-      pluginId: '@me/dup',
+      extensionId: '@me/dup',
       skillId: 's.x',
       displayName: { zh: 'x', en: 'x' },
       recorded: [{ toolId: 'demo.echo', args: {} }],
@@ -303,7 +303,7 @@ describe('Doc 09 §2.3 — record-as-skill', () => {
     expect(a.ok).toBe(true);
     const b = recordAsSkill({
       projectRoot: TMP,
-      pluginId: '@me/dup',
+      extensionId: '@me/dup',
       skillId: 's.x',
       displayName: { zh: 'x', en: 'x' },
       recorded: [{ toolId: 'demo.echo', args: {} }],

@@ -38,7 +38,8 @@ export const EXCLUDE_SEGMENTS: readonly string[] = [
 export const EXCLUDE_BASENAMES: readonly string[] = [
   ".DS_Store",
   "dev-stack.env",
-  "plugin-dev-ports.json",
+  "extension-dev-ports.json",
+  "plugin-dev-ports.json", // legacy name (pre ADR 0025 词汇清尾)
   "browser-localStorage.json", // regenerable UI state; a localStorage dump can hold auth tokens
   "keys.yaml",                 // cli-provider key registry (<projectRoot>/.forgeax/keys.yaml) — raw API keys
   "upload.json",

@@ -17,7 +17,7 @@ import { scanAllLayers } from '../src/extensions/scanner';
 import { callTool, _resetConfirmsForTests, _resetToolHandlerCacheForTests } from '../src/tools/registry';
 
 let root: string;
-let pluginRoot: string;
+let extensionRoot: string;
 let sid: string;
 let app: Hono;
 let outerCards: number;
@@ -43,7 +43,7 @@ function bridgedTool(name: string, hostToolId: string): ToolDefinition {
 }
 
 async function loadTools(): Promise<void> {
-  const dir = join(pluginRoot, 'L1', 'host-tools');
+  const dir = join(extensionRoot, 'L1', 'host-tools');
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     join(dir, 'forgeax-extension.json'),
@@ -79,9 +79,9 @@ async function loadTools(): Promise<void> {
     };\n`,
   );
   const roots = {
-    L0: join(pluginRoot, 'L0'),
-    L1: join(pluginRoot, 'L1'),
-    L2: join(pluginRoot, 'L2'),
+    L0: join(extensionRoot, 'L0'),
+    L1: join(extensionRoot, 'L1'),
+    L2: join(extensionRoot, 'L2'),
   };
   for (const dirPath of Object.values(roots)) mkdirSync(dirPath, { recursive: true });
   const scan = await scanAllLayers(roots);
@@ -108,7 +108,7 @@ async function postTool(toolName: string): Promise<any> {
 
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'forgeax-kernel-confirm-'));
-  pluginRoot = mkdtempSync(join(tmpdir(), 'forgeax-kernel-confirm-plugins-'));
+  extensionRoot = mkdtempSync(join(tmpdir(), 'forgeax-kernel-confirm-plugins-'));
   executionMarker = join(root, 'import-executions.log');
   savedProjectRoot = process.env.FORGEAX_PROJECT_ROOT;
   process.env.FORGEAX_PROJECT_ROOT = root;
@@ -172,7 +172,7 @@ afterEach(async () => {
   if (savedProjectRoot === undefined) delete process.env.FORGEAX_PROJECT_ROOT;
   else process.env.FORGEAX_PROJECT_ROOT = savedProjectRoot;
   rmSync(root, { recursive: true, force: true });
-  rmSync(pluginRoot, { recursive: true, force: true });
+  rmSync(extensionRoot, { recursive: true, force: true });
 });
 
 describe('POST /:sid/kernel-tool Host confirmation delegation', () => {

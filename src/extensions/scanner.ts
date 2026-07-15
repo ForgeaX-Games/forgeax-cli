@@ -129,9 +129,9 @@ async function scanLayer(layer: ExtensionLayer, root: string): Promise<ScanResul
   for (const dirent of entries) {
     const name = dirent.name;
     if (name.startsWith('.')) continue;
-    const pluginDir = join(root, name);
-    if (!dirent.isDirectory() && !(dirent.isSymbolicLink() && safeIsDir(pluginDir))) continue;
-    const manifestPath = join(pluginDir, 'forgeax-extension.json');
+    const extensionDir = join(root, name);
+    if (!dirent.isDirectory() && !(dirent.isSymbolicLink() && safeIsDir(extensionDir))) continue;
+    const manifestPath = join(extensionDir, 'forgeax-extension.json');
     let raw: string;
     try {
       raw = await readFile(manifestPath, 'utf-8');

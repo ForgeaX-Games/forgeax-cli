@@ -87,7 +87,7 @@ describe('skill event-trigger bridge', () => {
     writeFileSync(join(dir, 'e.mjs'), `export default () => 1;\n`, 'utf-8');
     const snap = await buildSnap();
     const stats = syncEventTriggerBindings(snap, getEventBus());
-    expect(stats.bindings).toEqual([{ topic: 'tool.completed', skillId: 's.on-completed', pluginId: '@x/ev' }]);
+    expect(stats.bindings).toEqual([{ topic: 'tool.completed', skillId: 's.on-completed', extensionId: '@x/ev' }]);
   });
 
   it('runs the skill when a matching event fires; input.event carries the envelope', async () => {

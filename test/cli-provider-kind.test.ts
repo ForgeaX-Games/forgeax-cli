@@ -82,7 +82,7 @@ describe('cli-provider kind loader', () => {
     const reg = buildKindRegistry(merged.manifests);
     expect(reg.cliProviders.length).toBe(1);
     expect(reg.cliProviders[0]).toMatchObject({
-      pluginId: '@forgeax-extension/cp-x',
+      extensionId: '@forgeax-extension/cp-x',
       providerId: 'some-cli',
       displayName: 'Some CLI Display',
       models: ['m1', 'm2'],

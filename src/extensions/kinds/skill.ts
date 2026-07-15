@@ -59,8 +59,8 @@ export function loadSkills(
   for (const s of skills) {
     const { entry, warning: ew } = normalizeEntry(s.entry, s.id);
     const { triggers, warning: tw } = normalizeTriggers(s);
-    if (ew) out.issues.push({ kind: 'skill', pluginId: m.id, reason: ew });
-    if (tw) out.issues.push({ kind: 'skill', pluginId: m.id, reason: tw });
+    if (ew) out.issues.push({ kind: 'skill', extensionId: m.id, reason: ew });
+    if (tw) out.issues.push({ kind: 'skill', extensionId: m.id, reason: tw });
 
     const def: SkillDefinition = {
       id: s.id,
@@ -74,7 +74,7 @@ export function loadSkills(
       description: s.description ?? { zh: '', en: '' },
     };
     out.entries.push({
-      pluginId: m.id,
+      extensionId: m.id,
       layer: merged.layer,
       definition: def,
       originDir: dirname(merged.originPath),

@@ -21,7 +21,7 @@ export interface MergedManifest {
 
 export interface MergeIssue {
   kind: 'unknown-dependency' | 'cycle';
-  pluginId: string;
+  extensionId: string;
   detail: string;
 }
 
@@ -79,7 +79,7 @@ function topoSort(items: MergedManifest[]): MergeResult {
       if (!known.has(d.id)) {
         issues.push({
           kind: 'unknown-dependency',
-          pluginId: m.manifest.id,
+          extensionId: m.manifest.id,
           detail: `requires ${d.id}${d.versionRange ? `@${d.versionRange}` : ''} but it is not installed`,
         });
         continue;
@@ -116,7 +116,7 @@ function topoSort(items: MergedManifest[]): MergeResult {
       if (placed.has(m.manifest.id)) continue;
       issues.push({
         kind: 'cycle',
-        pluginId: m.manifest.id,
+        extensionId: m.manifest.id,
         detail: 'dependency cycle — plugin will not be loaded',
       });
       sorted.push(m);

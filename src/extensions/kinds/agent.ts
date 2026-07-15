@@ -47,13 +47,13 @@ function resolveAgent(
   a: ProvidesAgent,
 ): { entry: AgentEntry; issues: KindLoadIssue[] } {
   const m = merged.manifest;
-  const pluginDir = dirname(merged.originPath);
-  const personaPath = resolve(pluginDir, a.personaFile);
+  const extensionDir = dirname(merged.originPath);
+  const personaPath = resolve(extensionDir, a.personaFile);
   const issues: KindLoadIssue[] = [];
   if (!existsSync(personaPath)) {
     issues.push({
       kind: 'agent',
-      pluginId: m.id,
+      extensionId: m.id,
       reason: `personaFile not found: ${personaPath}`,
     });
   }
@@ -61,9 +61,9 @@ function resolveAgent(
   // ADR-0019: 解析 avatar 状态机. avatarSet 字段显式指 rulesFile 优先;
   // 不显式声明也尝试默认 ./avatar/AVATAR.md (大多数 agent 都被
   // seed-agent-avatars.sh 自动 seed 过, 这条路径走得通就够了).
-  const avatarParsed = loadAvatarRulesCached(pluginDir, a.card.avatarSet?.rulesFile);
+  const avatarParsed = loadAvatarRulesCached(extensionDir, a.card.avatarSet?.rulesFile);
   for (const reason of avatarParsed.issues) {
-    issues.push({ kind: 'agent', pluginId: m.id, reason: `avatar: ${reason}` });
+    issues.push({ kind: 'agent', extensionId: m.id, reason: `avatar: ${reason}` });
   }
 
   const definition: ResolvedAgentDefinition = {
@@ -81,7 +81,7 @@ function resolveAgent(
     ...(avatarParsed.rules ? { avatarRules: avatarParsed.rules } : {}),
   };
   return {
-    entry: { pluginId: m.id, layer: merged.layer, definition, personaPath },
+    entry: { extensionId: m.id, layer: merged.layer, definition, personaPath },
     issues,
   };
 }

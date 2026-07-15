@@ -239,7 +239,7 @@ function readPackSkills(dir: string, agentId: string, warnings: string[]): Skill
     } catch (e) {
       warnings.push(`skill ${name} unreadable: ${(e as Error).message}`);
     }
-    out.push({ skillId: name, pluginId: `soul:${agentId}`, kind: 'prompt', description });
+    out.push({ skillId: name, extensionId: `soul:${agentId}`, kind: 'prompt', description });
   }
   return out;
 }
@@ -311,7 +311,7 @@ async function synthFromLegacy(agentId: string, memory: LayeredMemoryRef): Promi
       if (composed) {
         persona = composed.text.trim();
         for (const s of composed.skillIndex) {
-          skills.push({ skillId: s.skillId, pluginId: s.pluginId, kind: s.kind, description: s.description });
+          skills.push({ skillId: s.skillId, extensionId: s.extensionId, kind: s.kind, description: s.description });
         }
         warnings.push(...composed.warnings);
       }

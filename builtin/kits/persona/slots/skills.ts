@@ -49,7 +49,7 @@ export default function skillsSlot(_ctx: AgentContext): ContextSlot | null {
       const lang = entry.definition.defaultLang ?? "zh";
       const lines: string[] = [];
       for (const r of refs) {
-        const sk = resolveSkill(r, entry.pluginId);
+        const sk = resolveSkill(r, entry.extensionId);
         if (!sk) continue;
         const sd = sk.definition;
         const desc =

@@ -28,7 +28,7 @@ import { runSkill } from './runner';
 interface Binding {
   topic: string;
   skillId: string;
-  pluginId: string;
+  extensionId: string;
   unsubscribe: Unsubscribe;
 }
 
@@ -43,7 +43,7 @@ export function _resetEventBridgeForTests(): void {
 }
 
 export interface EventBridgeStats {
-  bindings: Array<{ topic: string; skillId: string; pluginId: string }>;
+  bindings: Array<{ topic: string; skillId: string; extensionId: string }>;
   generation: number;
 }
 
@@ -64,7 +64,7 @@ export function syncEventTriggerBindings(
       if (trig.kind !== 'event') continue;
       const topic = trig.topic;
       const skillId = skill.definition.id;
-      const pluginId = skill.pluginId;
+      const extensionId = skill.extensionId;
       const unsub = bus.subscribe(topic, (env: EventEnvelope) => {
         // Fire-and-forget; the runner emits skill.* events that interested
         // observers can subscribe to. Errors caught and ignored — we don't
@@ -75,11 +75,11 @@ export function syncEventTriggerBindings(
           caller: { kind: 'event', threadId: env.threadId ?? undefined },
         }).catch(() => undefined);
       });
-      _bindings.push({ topic, skillId, pluginId, unsubscribe: unsub });
+      _bindings.push({ topic, skillId, extensionId, unsubscribe: unsub });
     }
   }
   return {
-    bindings: _bindings.map(({ topic, skillId, pluginId }) => ({ topic, skillId, pluginId })),
+    bindings: _bindings.map(({ topic, skillId, extensionId }) => ({ topic, skillId, extensionId })),
     generation: snapshot.generation,
   };
 }
@@ -87,7 +87,7 @@ export function syncEventTriggerBindings(
 /** Read-only view of currently active bindings. */
 export function listEventBridgeBindings(): EventBridgeStats {
   return {
-    bindings: _bindings.map(({ topic, skillId, pluginId }) => ({ topic, skillId, pluginId })),
+    bindings: _bindings.map(({ topic, skillId, extensionId }) => ({ topic, skillId, extensionId })),
     generation: -1,
   };
 }

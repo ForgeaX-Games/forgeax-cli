@@ -42,7 +42,7 @@ export function buildKindRegistry(manifests: MergedManifest[]): KindRegistry {
 
     // Phase D stub: model-binding still untouched until the gateway needs it.
     if (m.manifest.kind === 'model-binding') {
-      reg.modelBindings.push({ pluginId: m.manifest.id, manifest: m.manifest });
+      reg.modelBindings.push({ extensionId: m.manifest.id, manifest: m.manifest });
     }
   }
   // Stable sort workbench tabs by position-then-id for a deterministic UI.

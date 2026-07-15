@@ -31,15 +31,15 @@ import {
 
 export interface ComposedSystemPrompt {
   agentId: string;
-  pluginId: string;
+  extensionId: string;
   persona: string;
   /** Concatenated `## Skill: <id>\n<body>` blocks for prompt-kind skills only. */
-  skillSections: Array<{ skillId: string; pluginId: string; body: string }>;
+  skillSections: Array<{ skillId: string; extensionId: string; body: string }>;
   /** Per-agent skill index — every defaultSkills entry surfaced as `name —
    *  description`, regardless of entry kind. Prompt-kind skills additionally
    *  show up inline in `skillSections` (full body); ts/py-kind skills only
    *  appear here so the agent knows the tool exists. */
-  skillIndex: Array<{ skillId: string; pluginId: string; kind: string; description: string }>;
+  skillIndex: Array<{ skillId: string; extensionId: string; kind: string; description: string }>;
   /** Concatenated memory file contents (every *.md under AgentDefinition.memoryDir),
    *  keyed by file basename so the LLM can cite which file it's quoting from. */
   memorySections: Array<{ file: string; body: string }>;
@@ -68,13 +68,13 @@ export function resolveSkill(
   const snap = getExtensionSnapshot();
   if (ref.source === 'plugin') {
     return snap.kinds.skills.find(
-      (s) => s.pluginId === ref.pluginId && (!ref.skillId || s.definition.id === ref.skillId),
+      (s) => s.extensionId === ref.pluginId && (!ref.skillId || s.definition.id === ref.skillId),
     ) ?? null;
   }
   // inline: same plugin as caller
   if (!contextPluginId) return null;
   return snap.kinds.skills.find(
-    (s) => s.pluginId === contextPluginId && s.definition.id === ref.skillId,
+    (s) => s.extensionId === contextPluginId && s.definition.id === ref.skillId,
   ) ?? null;
 }
 
@@ -104,7 +104,7 @@ export async function composeSystemPrompt(agentId: string): Promise<ComposedSyst
   const skillIndex: ComposedSystemPrompt['skillIndex'] = [];
   const refs = entry.definition.defaultSkills ?? [];
   for (const r of refs as SkillRef[]) {
-    const skill = resolveSkill(r, entry.pluginId);
+    const skill = resolveSkill(r, entry.extensionId);
     if (!skill) {
       warnings.push(`defaultSkill ref unresolved: ${JSON.stringify(r)}`);
       continue;
@@ -118,11 +118,11 @@ export async function composeSystemPrompt(agentId: string): Promise<ComposedSyst
     // index-only — the agent still knows they exist via the skill listing
     // above and invokes them through the `skill` tool at runtime.
     if (sd.entry.kind === 'prompt') {
-      const pluginDir = pluginDirOf(skill.pluginId);
-      if (!pluginDir) {
+      const extensionDir = extensionDirOf(skill.extensionId);
+      if (!extensionDir) {
         warnings.push(`cannot resolve plugin dir for skill ${sd.id}`);
       } else {
-        const absolute = resolveSkillFile(pluginDir, sd.entry.file);
+        const absolute = resolveSkillFile(extensionDir, sd.entry.file);
         try {
           const raw = await readFile(absolute, 'utf-8');
           // agentskills.io: SKILL.md has YAML frontmatter (name+description).
@@ -130,7 +130,7 @@ export async function composeSystemPrompt(agentId: string): Promise<ComposedSyst
           // prefer frontmatter description when manifest didn't supply one.
           const fm = parseSkillFrontmatter(raw);
           if (!description && fm.description) description = fm.description;
-          sections.push({ skillId: sd.id, pluginId: skill.pluginId, body: fm.body });
+          sections.push({ skillId: sd.id, extensionId: skill.extensionId, body: fm.body });
         } catch (e) {
           warnings.push(`skill file unreadable (${absolute}): ${(e as Error).message}`);
         }
@@ -138,7 +138,7 @@ export async function composeSystemPrompt(agentId: string): Promise<ComposedSyst
     }
     skillIndex.push({
       skillId: sd.id,
-      pluginId: skill.pluginId,
+      extensionId: skill.extensionId,
       kind: sd.entry.kind,
       description,
     });
@@ -151,14 +151,14 @@ export async function composeSystemPrompt(agentId: string): Promise<ComposedSyst
   // by file (lessons.md / conventions.md / …).
   const memorySections: ComposedSystemPrompt['memorySections'] = [];
   if (entry.definition.memoryDir) {
-    const pluginDir = pluginDirOf(entry.pluginId);
-    if (pluginDir) {
-      const memDirAbs = resolveMemoryDir(pluginDir, entry.definition.memoryDir);
+    const extensionDir = extensionDirOf(entry.extensionId);
+    if (extensionDir) {
+      const memDirAbs = resolveMemoryDir(extensionDir, entry.definition.memoryDir);
       const memLang = memLangFromPersonaFile(entry.personaPath);
       const loaded = await loadMemoryDir(memDirAbs, memLang, warnings);
       memorySections.push(...loaded);
     } else {
-      warnings.push(`cannot resolve plugin dir for memoryDir of ${entry.pluginId}`);
+      warnings.push(`cannot resolve plugin dir for memoryDir of ${entry.extensionId}`);
     }
   }
 
@@ -181,7 +181,7 @@ export async function composeSystemPrompt(agentId: string): Promise<ComposedSyst
 
   return {
     agentId,
-    pluginId: entry.pluginId,
+    extensionId: entry.extensionId,
     persona,
     skillSections: sections,
     skillIndex,
@@ -223,9 +223,9 @@ export function parseSkillFrontmatter(raw: string): {
   return { body, name, description };
 }
 
-function resolveMemoryDir(pluginDir: string, raw: string): string {
+function resolveMemoryDir(extensionDir: string, raw: string): string {
   if (raw.startsWith('/')) return raw;
-  return resolve(pluginDir, raw);
+  return resolve(extensionDir, raw);
 }
 
 async function loadMemoryDir(
@@ -337,7 +337,7 @@ async function composeFromMarketplaceManifest(agentId: string): Promise<Composed
   }
   return {
     agentId,
-    pluginId: 'marketplace:legacy',
+    extensionId: 'marketplace:legacy',
     persona,
     skillSections: [],
     skillIndex: [],
@@ -374,9 +374,9 @@ export async function resolvePersonaForAgent(agentId: string): Promise<{
   if (plugin && plugin.personaPath && existsSync(plugin.personaPath)) {
     let memoryDir: string | undefined;
     if (plugin.definition.memoryDir) {
-      const pluginDir = pluginDirOf(plugin.pluginId);
-      if (pluginDir) {
-        const abs = resolveMemoryDir(pluginDir, plugin.definition.memoryDir);
+      const extensionDir = extensionDirOf(plugin.extensionId);
+      if (extensionDir) {
+        const abs = resolveMemoryDir(extensionDir, plugin.definition.memoryDir);
         if (existsSync(abs)) memoryDir = abs;
       }
     }
@@ -405,13 +405,13 @@ export async function resolvePersonaForAgent(agentId: string): Promise<{
   return { personaPath: abs, tools: a.tools, source: 'marketplace' };
 }
 
-function pluginDirOf(pluginId: string): string | null {
-  const m = getExtensionSnapshot().manifests.find((mm) => mm.manifest.id === pluginId);
+function extensionDirOf(extensionId: string): string | null {
+  const m = getExtensionSnapshot().manifests.find((mm) => mm.manifest.id === extensionId);
   if (!m) return null;
   return dirname(m.originPath);
 }
 
-function resolveSkillFile(pluginDir: string, file: string): string {
+function resolveSkillFile(extensionDir: string, file: string): string {
   if (file.startsWith('/')) return file;
-  return join(pluginDir, file);
+  return join(extensionDir, file);
 }

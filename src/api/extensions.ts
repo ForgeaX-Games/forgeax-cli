@@ -111,7 +111,7 @@ export function createExtensionsRouter(): Hono {
 
   /** D6 — Record-as-skill (deterministic recorder + optional LLM distillation).
    *
-   *  Body: { projectRoot?, pluginId, skillId, displayName, description?,
+   *  Body: { projectRoot?, extensionId, skillId, displayName, description?,
    *          recorded: [{ toolId, args }], requiresTools?,
    *          distill?: { model: string } }
    *
@@ -126,7 +126,7 @@ export function createExtensionsRouter(): Hono {
     const body = (await c.req.json().catch(() => null)) as
       | {
           projectRoot?: string;
-          pluginId?: string;
+          extensionId?: string;
           skillId?: string;
           displayName?: { zh: string; en: string };
           description?: { zh: string; en: string };
@@ -135,19 +135,19 @@ export function createExtensionsRouter(): Hono {
           distill?: { model?: string };
         }
       | null;
-    if (!body?.pluginId || !body.skillId || !body.displayName || !Array.isArray(body.recorded)) {
+    if (!body?.extensionId || !body.skillId || !body.displayName || !Array.isArray(body.recorded)) {
       return c.json(
         {
           ok: false,
           code: 'bad_input',
-          error: 'expected { pluginId, skillId, displayName:{zh,en}, recorded:[{toolId,args}], description?, requiresTools?, projectRoot?, distill? }',
+          error: 'expected { extensionId, skillId, displayName:{zh,en}, recorded:[{toolId,args}], description?, requiresTools?, projectRoot?, distill? }',
         },
         400,
       );
     }
     const baseInput = {
       projectRoot: body.projectRoot ?? process.cwd(),
-      pluginId: body.pluginId,
+      extensionId: body.extensionId,
       skillId: body.skillId,
       displayName: body.displayName,
       description: body.description,
@@ -243,13 +243,13 @@ function serialize(snap: ReturnType<typeof getExtensionSnapshot>) {
     })),
     workbench: snap.kinds.workbench,
     agents: snap.kinds.agents.map((a) => ({
-      pluginId: a.pluginId,
+      extensionId: a.extensionId,
       layer: a.layer,
       personaPath: a.personaPath,
       definition: a.definition,
     })),
     skills: snap.kinds.skills.map((s) => ({
-      pluginId: s.pluginId,
+      extensionId: s.extensionId,
       layer: s.layer,
       id: s.definition.id,
       triggers: s.definition.triggers,

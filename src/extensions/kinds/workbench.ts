@@ -13,7 +13,7 @@ export function loadWorkbench(merged: MergedManifest): WorkbenchEntry | null {
   if (m.kind !== 'workbench') return null;
   const wb = m.provides.workbench;
   return {
-    pluginId: m.id,
+    extensionId: m.id,
     layer: merged.layer,
     workbenchId: wb.id,
     position: wb.position ?? 999,

@@ -21,7 +21,7 @@ import type { CliProviderEntry } from './cli-provider';
 import type { ToolEntry } from './tool';
 
 export interface WorkbenchEntry {
-  pluginId: string;
+  extensionId: string;
   layer: ExtensionLayer;
   workbenchId: string;
   position: number;
@@ -32,7 +32,7 @@ export interface WorkbenchEntry {
 }
 
 export interface AgentEntry {
-  pluginId: string;
+  extensionId: string;
   layer: ExtensionLayer;
   /** Resolved 包含 avatarRules 等运行时附加字段; 大部分 callsite 只读 AgentDefinition 字段. */
   definition: ResolvedAgentDefinition;
@@ -44,7 +44,7 @@ export interface AgentEntry {
 export type { AgentDefinition };
 
 export interface SkillEntry {
-  pluginId: string;
+  extensionId: string;
   layer: ExtensionLayer;
   definition: SkillDefinition;
   /** Absolute path to the plugin dir holding this skill — runner resolves
@@ -54,7 +54,7 @@ export interface SkillEntry {
 
 export interface KindLoadIssue {
   kind: 'workbench' | 'agent' | 'skill' | 'cli-provider' | 'model-binding' | 'tool';
-  pluginId: string;
+  extensionId: string;
   reason: string;
 }
 
@@ -65,7 +65,7 @@ export interface KindRegistry {
   /** Phase C3 — cli-provider entries (real loader). */
   cliProviders: CliProviderEntry[];
   /** Stub registry reserved for Phase D (model-binding still kind-stub). */
-  modelBindings: Array<{ pluginId: string; manifest: ExtensionManifest }>;
+  modelBindings: Array<{ extensionId: string; manifest: ExtensionManifest }>;
   /** Phase D1 — flat list of every tool from every kind's `provides.tools[]`. */
   tools: ToolEntry[];
   issues: KindLoadIssue[];

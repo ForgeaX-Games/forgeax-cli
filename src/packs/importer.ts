@@ -207,7 +207,7 @@ export async function inspectPack(
       return { ok: false, code: 'manifest_invalid', error: '`plugins/` directory missing from pack' };
     }
     const containedIds = manifest.contains.map((c) => c.id);
-    const pluginVersions: Array<{ id: string; version: string }> = [];
+    const extensionVersions: Array<{ id: string; version: string }> = [];
 
     for (const entry of containedIds) {
       const dir = join(pluginsDir, entry);
@@ -221,7 +221,7 @@ export async function inspectPack(
         return { ok: false, code: 'manifest_invalid', error: (e as Error).message };
       }
       trust.permissions[entry] = pm.permissions ?? [];
-      pluginVersions.push({ id: entry, version: pm.version });
+      extensionVersions.push({ id: entry, version: pm.version });
 
       // Walk the plugin tree for native binaries — even imported they're
       // useless on a foreign platform; per 10 §7 reject.
@@ -232,7 +232,7 @@ export async function inspectPack(
       }
     }
 
-    trust.conflicts = detectConflicts(pluginVersions);
+    trust.conflicts = detectConflicts(extensionVersions);
     return { ok: true, manifest, trust };
   } finally {
     rmSync(staging, { recursive: true, force: true });
@@ -273,8 +273,8 @@ export async function installPack(input: FxpackInstallInput): Promise<FxpackInst
   }
 
   try {
-    const pluginsRoot = join(input.destRoot, '.forgeax', 'extensions');
-    mkdirSync(pluginsRoot, { recursive: true });
+    const extensionsRoot = join(input.destRoot, '.forgeax', 'extensions');
+    mkdirSync(extensionsRoot, { recursive: true });
     const installed: string[] = [];
     const skipped: string[] = [];
     const renamed: Record<string, string> = {};
@@ -290,7 +290,7 @@ export async function installPack(input: FxpackInstallInput): Promise<FxpackInst
       // fork.ts already uses the same convention.
       const slash = entry.id.indexOf('/');
       const slug = slash >= 0 ? entry.id.slice(slash + 1) : entry.id;
-      const destDir = join(pluginsRoot, slug);
+      const destDir = join(extensionsRoot, slug);
       if (existsSync(destDir)) {
         if (policy === 'skip') {
           skipped.push(entry.id);

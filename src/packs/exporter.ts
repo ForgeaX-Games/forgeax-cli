@@ -66,7 +66,7 @@ function isRegexLiteralAfter(text: string, endIdx: number): boolean {
 }
 
 interface LintFinding {
-  pluginId: string;
+  extensionId: string;
   file: string;
   rule: 'native_binary' | 'absolute_path' | 'secret';
   detail: string;
@@ -95,12 +95,12 @@ function isText(file: string, sample: Buffer): boolean {
   return true;
 }
 
-function lintPlugin(pluginId: string, srcDir: string): LintFinding[] {
+function lintPlugin(extensionId: string, srcDir: string): LintFinding[] {
   const findings: LintFinding[] = [];
   const files = walk(srcDir);
   for (const f of files) {
     if (NATIVE_BINARY_EXT.test(f)) {
-      findings.push({ pluginId, file: f, rule: 'native_binary', detail: 'rejected by 10 §7 (跨平台跑不动)' });
+      findings.push({ extensionId, file: f, rule: 'native_binary', detail: 'rejected by 10 §7 (跨平台跑不动)' });
       continue;
     }
     const abs = join(srcDir, f);
@@ -114,7 +114,7 @@ function lintPlugin(pluginId: string, srcDir: string): LintFinding[] {
     const text = buf.toString('utf-8');
     for (const { name, rx } of SECRET_PATTERNS) {
       if (rx.test(text)) {
-        findings.push({ pluginId, file: f, rule: 'secret', detail: `matched ${name}` });
+        findings.push({ extensionId, file: f, rule: 'secret', detail: `matched ${name}` });
       }
     }
     const baseName = f.split('/').pop() ?? f;
@@ -127,7 +127,7 @@ function lintPlugin(pluginId: string, srcDir: string): LintFinding[] {
         // or `D:\Program Files` aren't leaks worth blocking on.
         const winHit = /\b[A-Z]:[\\/]Users[\\/]/i.exec(line);
         if (winHit) {
-          findings.push({ pluginId, file: f, rule: 'absolute_path', detail: `line ${i + 1}: ${line.trim().slice(0, 120)}` });
+          findings.push({ extensionId, file: f, rule: 'absolute_path', detail: `line ${i + 1}: ${line.trim().slice(0, 120)}` });
           break;
         }
         // POSIX user-identifying paths: `/Users/`, `/home/`, `/root/`. Drop
@@ -141,7 +141,7 @@ function lintPlugin(pluginId: string, srcDir: string): LintFinding[] {
           // Position of the trailing slash that closes `/(word)/`.
           const closeSlash = m.index + m[0].length - 1;
           if (isRegexLiteralAfter(line, closeSlash)) continue;
-          findings.push({ pluginId, file: f, rule: 'absolute_path', detail: `line ${i + 1}: ${line.trim().slice(0, 120)}` });
+          findings.push({ extensionId, file: f, rule: 'absolute_path', detail: `line ${i + 1}: ${line.trim().slice(0, 120)}` });
           hit = true;
           break;
         }
@@ -215,7 +215,7 @@ function computeBundleClosure(
           'source' in ref &&
           (ref as { source: string }).source === 'plugin'
         ) {
-          const pid = (ref as { pluginId?: string }).pluginId;
+          const pid = (ref as { extensionId?: string }).extensionId;
           if (pid) refs.add(pid);
         }
       }
@@ -256,7 +256,7 @@ function computeBundleClosure(
           'source' in ref &&
           (ref as { source: string }).source === 'plugin'
         ) {
-          const pid = (ref as { pluginId?: string }).pluginId;
+          const pid = (ref as { extensionId?: string }).extensionId;
           if (pid && !visited.has(pid)) queue.push(pid);
         }
       }
@@ -306,7 +306,7 @@ export function closureFrom(rootId: string): ClosureResult {
           'source' in ref &&
           (ref as { source: string }).source === 'plugin'
         ) {
-          const pid = (ref as { pluginId?: string }).pluginId;
+          const pid = (ref as { extensionId?: string }).extensionId;
           if (pid && !visited.has(pid)) queue.push(pid);
         }
       }

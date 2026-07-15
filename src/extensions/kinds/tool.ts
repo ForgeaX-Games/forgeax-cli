@@ -28,7 +28,7 @@ import type { ExtensionLayer } from '../scanner';
 import type { KindLoadIssue } from './types';
 
 export interface ToolEntry {
-  pluginId: string;
+  extensionId: string;
   layer: ExtensionLayer;
   toolId: string;
   /** Absolute path to args JSONSchema file, or the inline object. */
@@ -50,7 +50,7 @@ export interface ToolEntry {
   requestedEnv: string[];
   /** Plugin dir; the registry passes it to handlers as ctx.cwd so they can
    *  read sibling resources without `process.cwd()`. */
-  pluginDir: string;
+  extensionDir: string;
 }
 
 function normalizeSchemaRef(
@@ -87,14 +87,14 @@ export function loadTools(
     if (seen.has(t.id)) {
       issues.push({
         kind: 'tool',
-        pluginId: m.id,
+        extensionId: m.id,
         reason: `duplicate tool id "${t.id}" in plugin ${m.id}`,
       });
       continue;
     }
     seen.add(t.id);
     entries.push({
-      pluginId: m.id,
+      extensionId: m.id,
       layer: merged.layer,
       toolId: t.id,
       argsSchema: normalizeSchemaRef(t.args, dir),
@@ -105,7 +105,7 @@ export function loadTools(
       description: pickDescription(t.description),
       backendPath,
       requestedEnv,
-      pluginDir: dir,
+      extensionDir: dir,
     });
   }
   return { entries, issues };

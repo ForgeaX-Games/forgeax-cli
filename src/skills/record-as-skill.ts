@@ -40,7 +40,7 @@ export interface RecordSkillInput {
   /** Project root that owns L2; defaults to cwd. */
   projectRoot: string;
   /** New plugin id, e.g. `@me/replay-foo`. The slug after `/` becomes the dir. */
-  pluginId: string;
+  extensionId: string;
   /** Skill id inside the plugin, e.g. `s.replay`. */
   skillId: string;
   displayName: { zh: string; en: string };
@@ -58,17 +58,17 @@ export interface RecordSkillInput {
 }
 
 export type RecordSkillResult =
-  | { ok: true; pluginDir: string; manifestPath: string; skillPath: string }
+  | { ok: true; extensionDir: string; manifestPath: string; skillPath: string }
   | { ok: false; code: 'bad_input' | 'exists'; error: string };
 
-function slugFor(pluginId: string): string {
-  const slash = pluginId.indexOf('/');
-  return slash >= 0 ? pluginId.slice(slash + 1) : pluginId;
+function slugFor(extensionId: string): string {
+  const slash = extensionId.indexOf('/');
+  return slash >= 0 ? extensionId.slice(slash + 1) : extensionId;
 }
 
 export function recordAsSkill(input: RecordSkillInput): RecordSkillResult {
-  if (!input.pluginId || !input.skillId) {
-    return { ok: false, code: 'bad_input', error: 'pluginId + skillId required' };
+  if (!input.extensionId || !input.skillId) {
+    return { ok: false, code: 'bad_input', error: 'extensionId + skillId required' };
   }
   if (!Array.isArray(input.recorded) || input.recorded.length === 0) {
     return { ok: false, code: 'bad_input', error: 'recorded[] must be non-empty' };
@@ -79,12 +79,12 @@ export function recordAsSkill(input: RecordSkillInput): RecordSkillResult {
     }
   }
 
-  const slug = slugFor(input.pluginId);
-  const pluginDir = join(input.projectRoot, '.forgeax', 'extensions', slug);
-  if (existsSync(pluginDir)) {
-    return { ok: false, code: 'exists', error: `${pluginDir} already exists; pick a new pluginId` };
+  const slug = slugFor(input.extensionId);
+  const extensionDir = join(input.projectRoot, '.forgeax', 'extensions', slug);
+  if (existsSync(extensionDir)) {
+    return { ok: false, code: 'exists', error: `${extensionDir} already exists; pick a new extensionId` };
   }
-  mkdirSync(pluginDir, { recursive: true });
+  mkdirSync(extensionDir, { recursive: true });
 
   const requires = Array.from(
     new Set(input.requiresTools ?? input.recorded.map((r) => r.toolId)),
@@ -103,7 +103,7 @@ export function recordAsSkill(input: RecordSkillInput): RecordSkillResult {
   const manifest = {
     schemaVersion: 1,
     version: '0.1.0',
-    id: input.pluginId,
+    id: input.extensionId,
     kind: 'skill',
     displayName: input.displayName,
     description: input.description ?? {
@@ -112,13 +112,13 @@ export function recordAsSkill(input: RecordSkillInput): RecordSkillResult {
     },
     provides: { skills: [skillEntry] },
   };
-  const manifestPath = join(pluginDir, 'forgeax-extension.json');
+  const manifestPath = join(extensionDir, 'forgeax-extension.json');
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
 
-  const skillPath = join(pluginDir, 'skill.mjs');
+  const skillPath = join(extensionDir, 'skill.mjs');
   writeFileSync(skillPath, synthesizeSkillSource(input.recorded, validParams), 'utf-8');
 
-  return { ok: true, pluginDir, manifestPath, skillPath };
+  return { ok: true, extensionDir, manifestPath, skillPath };
 }
 
 /** Mini JSONSchema for the skill's `io.input`, enumerating each proposed
@@ -281,7 +281,7 @@ function buildDistillUserPrompt(input: DistillSkillInput): string {
     .join('\n');
   const initial = input.description ?? { zh: '', en: '' };
   return [
-    `Plugin id: ${input.pluginId}`,
+    `Plugin id: ${input.extensionId}`,
     `Skill id:  ${input.skillId}`,
     `Display:   ${input.displayName.zh} / ${input.displayName.en}`,
     initial.zh || initial.en
@@ -465,7 +465,7 @@ export async function distillRecordedSkill(
   // Sidecar prose only when the LLM actually wrote one.
   let proseMdPath: string | undefined;
   if (distilled.llmApplied && distilled.proseMd.length > 0) {
-    proseMdPath = join(baseResult.pluginDir, 'skill.md');
+    proseMdPath = join(baseResult.extensionDir, 'skill.md');
     writeFileSync(proseMdPath, distilled.proseMd + '\n', 'utf-8');
   }
 

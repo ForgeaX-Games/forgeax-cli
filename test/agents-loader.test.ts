@@ -69,7 +69,7 @@ describe('AgentLoader', () => {
     expect(listAgents().length).toBe(1);
     const e = lookupAgent('iori');
     expect(e?.definition.id).toBe('iori');
-    expect(e?.pluginId).toBe('@forgeax-extension/agent-iori');
+    expect(e?.extensionId).toBe('@forgeax-extension/agent-iori');
     expect(lookupAgent('does-not-exist')).toBeNull();
   });
 

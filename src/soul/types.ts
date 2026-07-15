@@ -31,7 +31,7 @@ export interface LayeredMemoryRef {
 /** 技能引用(轻量)——不耦合 SkillRunner,只够编排层经 MCP 下发 + agent 自知。 */
 export interface SkillRefLite {
   skillId: string;
-  pluginId: string;
+  extensionId: string;
   kind: string;
   description: string;
 }

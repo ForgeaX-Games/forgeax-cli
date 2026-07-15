@@ -62,9 +62,9 @@ export function getExtensionSnapshot(): ExtensionSnapshot {
  * 暴露钩子、组合根接线」后,registry 对 skills/runner 子系统是 sink,环消除。
  * 未接钩子的入口(如 `forge pack` CLI)reload 时不 wire 事件触发——它本就不需要。
  */
-type PluginsReloadedHook = (snapshot: ExtensionSnapshot, bus: EventBus) => void;
-let _onReloaded: PluginsReloadedHook | null = null;
-export function onExtensionsReloaded(fn: PluginsReloadedHook): void {
+type ExtensionsReloadedHook = (snapshot: ExtensionSnapshot, bus: EventBus) => void;
+let _onReloaded: ExtensionsReloadedHook | null = null;
+export function onExtensionsReloaded(fn: ExtensionsReloadedHook): void {
   _onReloaded = fn;
 }
 

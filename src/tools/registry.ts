@@ -330,7 +330,7 @@ export async function callTool(req: ToolCall): Promise<ToolResult> {
       caller: req.caller,
       toolId: req.toolId,
       env: filteredEnv,
-      cwd: entry.pluginDir,
+      cwd: entry.extensionDir,
       projectRoot: defaultProjectRoot(),
       ...(sessionGame ? { game: sessionGame } : {}),
       imageGen: createImageGen(filteredEnv),
@@ -363,7 +363,7 @@ export async function callTool(req: ToolCall): Promise<ToolResult> {
  *  to know in advance which tools will block for human ack (charter P1). */
 export interface ToolDescriptor {
   id: string;
-  pluginId: string;
+  extensionId: string;
   description?: string;
   exposedToAI: boolean;
   /** Three-value enum: 'always' | 'destructive' | 'never' | undefined.
@@ -382,7 +382,7 @@ export function hostToolWireName(toolId: string): string {
 function describeTool(t: ToolEntry): ToolDescriptor {
   return {
     id: t.toolId,
-    pluginId: t.pluginId,
+    extensionId: t.extensionId,
     description: t.description,
     exposedToAI: t.exposedToAI,
     requireConfirm: t.requireConfirm,

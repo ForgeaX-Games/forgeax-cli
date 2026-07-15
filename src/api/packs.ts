@@ -24,7 +24,7 @@ import { readInstalled, readTrust } from '../packs/ledger';
 import { getExtensionSnapshot, reloadExtensions } from '../extensions/registry';
 
 interface ExportBody {
-  pluginIds: string[];
+  extensionIds: string[];
   type: 'single' | 'bundle';
   outPath: string;
   bundleMeta?: {
@@ -56,15 +56,15 @@ export function createPacksRouter(): Hono {
 
   r.post('/export', async (c) => {
     const body = (await c.req.json().catch(() => null)) as ExportBody | null;
-    if (!body || !Array.isArray(body.pluginIds) || !body.pluginIds.length || !body.outPath || !body.type) {
+    if (!body || !Array.isArray(body.extensionIds) || !body.extensionIds.length || !body.outPath || !body.type) {
       return c.json(
-        { ok: false, error: 'expected { pluginIds[], type, outPath, bundleMeta? }', code: 'bad_request' },
+        { ok: false, error: 'expected { extensionIds[], type, outPath, bundleMeta? }', code: 'bad_request' },
         400,
       );
     }
     const snap = getExtensionSnapshot();
     const plugins: Array<{ id: string; srcDir: string }> = [];
-    for (const id of body.pluginIds) {
+    for (const id of body.extensionIds) {
       const m = snap.manifests.find((x) => x.manifest.id === id);
       if (!m) {
         return c.json({ ok: false, error: `plugin not found in snapshot: ${id}`, code: 'not_found' }, 404);
@@ -80,9 +80,9 @@ export function createPacksRouter(): Hono {
       plugins,
       outPath: body.outPath,
       bundleMeta: {
-        id: meta.id ?? (body.type === 'single' ? body.pluginIds[0] : 'bundle'),
+        id: meta.id ?? (body.type === 'single' ? body.extensionIds[0] : 'bundle'),
         version: meta.version ?? '0.1.0',
-        title: meta.title ?? { en: meta.id ?? body.pluginIds.join(', ') },
+        title: meta.title ?? { en: meta.id ?? body.extensionIds.join(', ') },
         description: meta.description,
         primary: meta.primary,
         requires: meta.requires,

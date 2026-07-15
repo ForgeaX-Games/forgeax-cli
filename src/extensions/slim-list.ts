@@ -162,8 +162,16 @@ interface ExtensionDevPortOverrides {
 }
 
 function extensionDevPortOverridesPath(): string {
-  return process.env.FORGEAX_PLUGIN_DEV_PORTS_FILE
-    ?? join(defaultProjectRoot(), '.forgeax', 'plugin-dev-ports.json');
+  // New env/file names first (ADR 0025 词汇清尾, run.ts writes these);
+  // legacy names accepted so an old running stack keeps working across the
+  // rename (file is regenerated on every `bun fx start`).
+  return process.env.FORGEAX_EXTENSION_DEV_PORTS_FILE
+    ?? process.env.FORGEAX_PLUGIN_DEV_PORTS_FILE
+    ?? [
+      join(defaultProjectRoot(), '.forgeax', 'extension-dev-ports.json'),
+      join(defaultProjectRoot(), '.forgeax', 'plugin-dev-ports.json'),
+    ].find(existsSync)
+    ?? join(defaultProjectRoot(), '.forgeax', 'extension-dev-ports.json');
 }
 
 function loadExtensionDevPortOverrides(): ExtensionDevPortOverrides | null {

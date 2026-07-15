@@ -1,7 +1,7 @@
 /**
  * Phase C3 — cli-provider kind loader.
  *
- * Promotes the B2-era stub (a bare `{pluginId, manifest}` pointer) to a
+ * Promotes the B2-era stub (a bare `{extensionId, manifest}` pointer) to a
  * structured CliProviderEntry that the Driver registry + SettingsPanel ·
  * CLI Providers (C7) consume directly. The real Driver instance is *not*
  * imported eagerly — `entry.backend` is recorded as a path and the loader
@@ -23,7 +23,7 @@ import type { KindLoadIssue } from './types';
 import type { ExtensionLayer } from '../scanner';
 
 export interface CliProviderEntry {
-  pluginId: string;
+  extensionId: string;
   layer: ExtensionLayer;
   /** ProvidesCliProvider.id — the Driver.id consumers use to look up. */
   providerId: string;
@@ -65,7 +65,7 @@ export function loadCliProvider(
 
   return {
     entry: {
-      pluginId: m.id,
+      extensionId: m.id,
       layer: merged.layer,
       providerId: cp.id,
       displayName: dn,

@@ -53,7 +53,7 @@ export interface AgentPackSpec {
 }
 
 export type CreateAgentPackResult =
-  | { ok: true; id: string; pluginId: string; dir: string; scope: AgentPackScope }
+  | { ok: true; id: string; extensionId: string; dir: string; scope: AgentPackScope }
   | {
       ok: false;
       code: 'bad_input' | 'exists' | 'invalid_manifest' | 'fs_error';
@@ -143,11 +143,11 @@ function collectRoster(): RosterEntry[] {
 /** 组装标准 agent-pack manifest 对象(kind:agent)。 */
 function buildAgentManifest(id: string, spec: AgentPackSpec): {
   manifest: unknown;
-  pluginId: string;
+  extensionId: string;
   slug: string;
 } {
   const slug = `agent-${id}`;
-  const pluginId = `@user/${slug}`;
+  const extensionId = `@user/${slug}`;
   const displayName: I18nString =
     spec.displayName && (typeof spec.displayName === 'string'
       ? spec.displayName.trim()
@@ -160,7 +160,7 @@ function buildAgentManifest(id: string, spec: AgentPackSpec): {
   const color = (spec.color && spec.color.trim()) || DEFAULT_COLOR;
   const manifest = {
     schemaVersion: 1,
-    id: pluginId,
+    id: extensionId,
     version: '0.1.0',
     kind: 'agent',
     displayName,
@@ -180,7 +180,7 @@ function buildAgentManifest(id: string, spec: AgentPackSpec): {
     },
     experimental: true,
   };
-  return { manifest, pluginId, slug };
+  return { manifest, extensionId, slug };
 }
 
 /** 组装 host-authoring 能力实例(ToolRegistry 注入进 ctx.host)。 */
@@ -213,7 +213,7 @@ export function createHostAuthoring(): HostAuthoring {
       if (existing.has(id)) {
         return { ok: false, code: 'exists', error: `role id already exists: ${id}` };
       }
-      const { manifest, pluginId, slug } = buildAgentManifest(id, spec);
+      const { manifest, extensionId, slug } = buildAgentManifest(id, spec);
       // Fail fast:落盘前 zod 自验(Schema as Contract)。
       const parsed = parseManifest(manifest);
       if (!parsed.ok) {
@@ -231,7 +231,7 @@ export function createHostAuthoring(): HostAuthoring {
         { scope, projectRoot: defaultProjectRoot() },
       );
       if (!res.ok) return res;
-      return { ok: true, id, pluginId, dir: res.dir, scope: res.scope };
+      return { ok: true, id, extensionId, dir: res.dir, scope: res.scope };
     },
   };
 }

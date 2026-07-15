@@ -19,7 +19,7 @@ function parseRunBody(body: any): SkillRunRequest | null {
   if (!callerKind || !['user', 'ai', 'cli', 'workbench'].includes(callerKind)) return null;
   return {
     skillId: body.skillId,
-    pluginId: typeof body.pluginId === 'string' ? body.pluginId : undefined,
+    extensionId: typeof body.extensionId === 'string' ? body.extensionId : undefined,
     input: body.input,
     caller: {
       kind: callerKind,

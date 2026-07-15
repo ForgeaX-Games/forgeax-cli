@@ -36,7 +36,7 @@ import { isPaused } from '../runtime/pause';
 export interface SkillRunRequest {
   skillId: string;
   /** Optional plugin id to disambiguate when multiple plugins ship the same skill id. */
-  pluginId?: string;
+  extensionId?: string;
   input?: unknown;
   caller: {
     kind: 'user' | 'ai' | 'cli' | 'workbench' | 'event';
@@ -134,8 +134,8 @@ export interface SkillRunCtx {
 
 function resolveSkill(req: SkillRunRequest): SkillEntry | null {
   const skills = getExtensionSnapshot().kinds.skills;
-  if (req.pluginId) {
-    return skills.find((s) => s.pluginId === req.pluginId && s.definition.id === req.skillId) ?? null;
+  if (req.extensionId) {
+    return skills.find((s) => s.extensionId === req.extensionId && s.definition.id === req.skillId) ?? null;
   }
   return skills.find((s) => s.definition.id === req.skillId) ?? null;
 }
@@ -229,7 +229,7 @@ export async function runSkill(req: SkillRunRequest): Promise<SkillRunResult> {
   const def: SkillDefinition = entry.definition;
   bus.emit(
     'skill.starting',
-    { skillId: def.id, pluginId: entry.pluginId, kind: def.entry.kind, caller: req.caller },
+    { skillId: def.id, extensionId: entry.extensionId, kind: def.entry.kind, caller: req.caller },
     { threadId },
   );
   const startedAt = Date.now();
@@ -393,7 +393,7 @@ export async function runSkill(req: SkillRunRequest): Promise<SkillRunResult> {
 /** Public listing — surfaces skill catalog with display metadata. */
 export interface SkillDescriptor {
   id: string;
-  pluginId: string;
+  extensionId: string;
   kind: SkillDefinition['entry']['kind'];
   triggers: SkillDefinition['triggers'];
   requiresTools: string[];
@@ -404,7 +404,7 @@ export interface SkillDescriptor {
 export function listSkills(): SkillDescriptor[] {
   return getExtensionSnapshot().kinds.skills.map((s) => ({
     id: s.definition.id,
-    pluginId: s.pluginId,
+    extensionId: s.extensionId,
     kind: s.definition.entry.kind,
     triggers: s.definition.triggers,
     requiresTools: s.definition.requiresTools ?? [],

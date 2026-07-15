@@ -64,11 +64,11 @@ export interface ParsedAvatarRules {
 /** 给定 agent 的 manifest 所在目录 + 可选 rulesFile 字段, 返回 resolved rules.
  *  rulesFile 默认 "./avatar/AVATAR.md"; 自动找不到也不算错, 静默返回 null. */
 export function loadAvatarRules(
-  pluginDir: string,
+  extensionDir: string,
   rulesFile: string | undefined,
 ): ParsedAvatarRules {
   const rel = rulesFile ?? './avatar/AVATAR.md';
-  const abs = resolve(pluginDir, rel);
+  const abs = resolve(extensionDir, rel);
   if (!existsSync(abs)) {
     // 显式声明了 avatarSet 但文件不在 → 报告; 否则静默 (绝大多数 agent 不带 webm).
     if (rulesFile) {
@@ -196,10 +196,10 @@ export function loadAvatarRules(
 const cache = new Map<string, { mtime: number; parsed: ParsedAvatarRules }>();
 
 export function loadAvatarRulesCached(
-  pluginDir: string,
+  extensionDir: string,
   rulesFile: string | undefined,
 ): ParsedAvatarRules {
-  const abs = resolve(pluginDir, rulesFile ?? './avatar/AVATAR.md');
+  const abs = resolve(extensionDir, rulesFile ?? './avatar/AVATAR.md');
   let mtime = 0;
   try {
     mtime = statSync(abs).mtimeMs;
@@ -208,7 +208,7 @@ export function loadAvatarRulesCached(
   }
   const hit = cache.get(abs);
   if (hit && hit.mtime === mtime) return hit.parsed;
-  const parsed = loadAvatarRules(pluginDir, rulesFile);
+  const parsed = loadAvatarRules(extensionDir, rulesFile);
   cache.set(abs, { mtime, parsed });
   return parsed;
 }

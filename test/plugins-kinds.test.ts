@@ -119,7 +119,7 @@ describe('kind dispatcher', () => {
     expect(reg.workbench.length).toBe(1);
     expect(reg.agents.map((a) => a.definition.id).sort()).toEqual(['lead', 'sub']);
     // both entries carry the SAME extension id but their own definition ids
-    expect(new Set(reg.agents.map((a) => a.pluginId))).toEqual(new Set(['@forgeax-extension/wb-bundle']));
+    expect(new Set(reg.agents.map((a) => a.extensionId))).toEqual(new Set(['@forgeax-extension/wb-bundle']));
     expect(reg.agents.find((a) => a.definition.id === 'lead')!.personaPath).toBe(
       join(dir, 'agents', 'lead', 'persona', 'zh.md'),
     );
@@ -138,7 +138,7 @@ describe('kind dispatcher', () => {
     const reg = buildKindRegistry(merged.manifests);
     expect(reg.workbench.length).toBe(1);
     expect(reg.workbench[0]).toMatchObject({
-      pluginId: '@forgeax-extension/wb-test',
+      extensionId: '@forgeax-extension/wb-test',
       workbenchId: 'test',
       position: 110,
       panelSize: 'lg',

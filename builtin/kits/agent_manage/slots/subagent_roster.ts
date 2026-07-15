@@ -113,7 +113,7 @@ export function buildRoster(ctx: AgentContext): RosterRow[] {
       id,
       displayName: pickI18n(entry.definition.card.name, "zh") || id,
       role: entry.definition.role,
-      description: descByPluginId.get(entry.pluginId) ?? "",
+      description: descByPluginId.get(entry.extensionId) ?? "",
       active: activeIds.has(id),
     });
   }

@@ -1,7 +1,7 @@
 /**
  * forgeax-pack — author/distribute CLI for the .fxpack format.
  *
- *   forgeax-pack pack <pluginDir> [-o out.fxpack] [--closure]
+ *   forgeax-pack pack <extensionDir> [-o out.fxpack] [--closure]
  *   forgeax-pack inspect <pack.fxpack>
  *   forgeax-pack install <pack.fxpack> [--layer L1|L2] [--policy skip|overwrite|rename] [--ack-unsigned]
  *   forgeax-pack list [--layer L1|L2]
@@ -66,7 +66,7 @@ function readExtensionManifestSync(srcDir: string): { id: string; version: strin
 async function cmdPack(args: ParsedArgs): Promise<void> {
   const dir = args.positional[0];
   if (!dir) {
-    process.stderr.write('Usage: forgeax-pack pack <pluginDir> [-o out.fxpack] [--closure]\n');
+    process.stderr.write('Usage: forgeax-pack pack <extensionDir> [-o out.fxpack] [--closure]\n');
     process.exit(2);
   }
   const srcDir = resolve(dir);
@@ -223,7 +223,7 @@ function help(): void {
   process.stdout.write(`forgeax-pack — agent pack author/distribute CLI
 
 Usage:
-  forgeax-pack pack <pluginDir> [-o out.fxpack] [--closure]
+  forgeax-pack pack <extensionDir> [-o out.fxpack] [--closure]
                               build a .fxpack from a plugin directory
   forgeax-pack inspect <pack.fxpack>
                               show manifest, trust state, and conflicts
