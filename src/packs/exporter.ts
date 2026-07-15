@@ -20,7 +20,7 @@ import { mkdirSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, 
 import { runCapture } from '../lib/node-spawn';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ManifestSchema, type PluginManifest } from '@forgeax/types';
+import { ManifestSchema, type ExtensionManifest } from '@forgeax/types';
 import { getExtensionSnapshot } from '../extensions/registry';
 import {
   type FxpackExportInput,
@@ -167,7 +167,7 @@ function copyTree(src: string, dest: string): void {
   }
 }
 
-function loadPluginManifest(srcDir: string): PluginManifest {
+function loadExtensionManifest(srcDir: string): ExtensionManifest {
   const path = join(srcDir, 'forgeax-extension.json');
   const raw = JSON.parse(readFileSync(path, 'utf-8'));
   const parsed = ManifestSchema.safeParse(raw);
@@ -194,7 +194,7 @@ function loadPluginManifest(srcDir: string): PluginManifest {
  */
 function computeBundleClosure(
   inputPlugins: Array<{ id: string; srcDir: string }>,
-  manifests: Record<string, PluginManifest>,
+  manifests: Record<string, ExtensionManifest>,
 ): { add: Array<{ id: string; srcDir: string }>; missing: string[] } {
   const haveIds = new Set(inputPlugins.map((p) => p.id));
   const refs = new Set<string>();
@@ -292,7 +292,7 @@ export function closureFrom(rootId: string): ClosureResult {
   const missing: string[] = [];
   const queue: string[] = [];
 
-  const enqueueDeps = (m: PluginManifest): void => {
+  const enqueueDeps = (m: ExtensionManifest): void => {
     for (const dep of m.dependencies ?? []) {
       if (dep.optional) continue;
       if (!visited.has(dep.id)) queue.push(dep.id);
@@ -358,12 +358,12 @@ export async function exportPack(input: FxpackExportInput): Promise<FxpackExport
   }
 
   const allFindings: LintFinding[] = [];
-  const manifests: Record<string, PluginManifest> = {};
+  const manifests: Record<string, ExtensionManifest> = {};
   const plugins: Array<{ id: string; srcDir: string }> = [...input.plugins];
   for (const p of plugins) {
-    let m: PluginManifest;
+    let m: ExtensionManifest;
     try {
-      m = loadPluginManifest(p.srcDir);
+      m = loadExtensionManifest(p.srcDir);
     } catch (e) {
       return {
         ok: false,
@@ -499,7 +499,7 @@ function pickName(v: unknown): string | undefined {
   return undefined;
 }
 
-function buildReadme(m: FxpackManifest, plugins: PluginManifest[]): string {
+function buildReadme(m: FxpackManifest, plugins: ExtensionManifest[]): string {
   const title = m.title.en ?? m.title.zh ?? m.id;
   const lines: string[] = [
     `# ${title}`,

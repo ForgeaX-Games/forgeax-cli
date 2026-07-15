@@ -23,7 +23,7 @@ export { listAllCommands } from './commands/runner';
 
 // WS + watcher primitives the shell wires into Bun.serve.
 export { WsHub, createWsHandler, type WsClientData } from './ws';
-export { FsWatcher } from './api/lib/watcher';
+export { FsWatcher, type AssetDiskChangedEvent, type FileChangeEvent, type FsWatcherEvent } from './api/lib/watcher';
 
 // Path helpers.
 export { defaultProjectRoot } from '@forgeax/platform-io';

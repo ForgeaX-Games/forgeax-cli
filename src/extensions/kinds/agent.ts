@@ -1,9 +1,16 @@
 /**
  * Phase B2 — agent kind loader.
  *
- * Resolves a kind=agent manifest into an AgentEntry, primarily so B5's
+ * Resolves agent definitions into AgentEntry[], primarily so B5's
  * AgentLoader.composeSystemPrompt() can lookup `personaPath` without
  * re-walking the marketplace tree.
+ *
+ * ADR 0025 M4: two sources fan into the same registry —
+ *   - kind=agent manifests carry a single `provides.agent`;
+ *   - kind=workbench manifests may carry `provides.agents[]` (a UI extension
+ *     shipping its own persona family, e.g. wb-reel's reia + 4 subs).
+ * Every entry resolves persona/avatar paths against the extension root, so a
+ * bundled agent just writes `./agents/<id>/persona/zh.md` in the manifest.
  */
 import { dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -12,12 +19,34 @@ import type { MergedManifest } from '../merger';
 import type { AgentEntry, KindLoadIssue } from './types';
 import { loadAvatarRulesCached } from './avatar-rules';
 
+type ProvidesAgent = Extract<
+  MergedManifest['manifest'],
+  { kind: 'agent' }
+>['provides']['agent'];
+
 export function loadAgent(
   merged: MergedManifest,
-): { entry: AgentEntry | null; issues: KindLoadIssue[] } {
+): { entries: AgentEntry[]; issues: KindLoadIssue[] } {
   const m = merged.manifest;
-  if (m.kind !== 'agent') return { entry: null, issues: [] };
-  const a = m.provides.agent;
+  const sources: ProvidesAgent[] =
+    m.kind === 'agent' ? [m.provides.agent]
+    : m.kind === 'workbench' ? (m.provides.agents ?? [])
+    : [];
+  const entries: AgentEntry[] = [];
+  const issues: KindLoadIssue[] = [];
+  for (const a of sources) {
+    const r = resolveAgent(merged, a);
+    entries.push(r.entry);
+    issues.push(...r.issues);
+  }
+  return { entries, issues };
+}
+
+function resolveAgent(
+  merged: MergedManifest,
+  a: ProvidesAgent,
+): { entry: AgentEntry; issues: KindLoadIssue[] } {
+  const m = merged.manifest;
   const pluginDir = dirname(merged.originPath);
   const personaPath = resolve(pluginDir, a.personaFile);
   const issues: KindLoadIssue[] = [];

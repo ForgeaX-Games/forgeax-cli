@@ -12,7 +12,7 @@ import { mergeManifests } from './merger';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { computeAgentNaming, pickPersonName } from '../api/lib/agent-naming';
 
-interface PluginManifest {
+interface ExtensionManifest {
   schemaVersion?: number;
   id?: string;
   version?: string;
@@ -40,6 +40,9 @@ interface PluginManifest {
       models?: string[];
       roles?: string[];
     };
+    /** M4 — workbench extension's bundled persona family (same shape as
+     *  the singular `agent` entries; slim projection only needs id/role). */
+    agents?: Array<{ id?: string; role?: string }>;
     skills?: Array<{ id: string; trigger?: string }>;
     tools?: Array<{ id: string; exposedToAI?: boolean }>;
     events?: Array<{ name: string }>;
@@ -93,16 +96,18 @@ export interface ExtensionInfo {
   description?: { zh?: string; en?: string; ja?: string } | string;
   icon?: string;
   experimental?: boolean;
-  workbench?: PluginManifest['provides'] extends infer P
+  workbench?: ExtensionManifest['provides'] extends infer P
     ? P extends { workbench?: infer W }
       ? W
       : never
     : never;
-  modelBinding?: PluginManifest['provides'] extends infer P
+  modelBinding?: ExtensionManifest['provides'] extends infer P
     ? P extends { modelBinding?: infer M }
       ? M
       : never
     : never;
+  /** M4 — bundled persona family of a workbench extension (id/role only). */
+  agents?: Array<{ id: string; role: string }>;
   skills?: Array<{ id: string; trigger: string }>;
   tools?: Array<{ id: string; exposedToAI?: boolean }>;
   events?: Array<{ name: string }>;
@@ -201,7 +206,7 @@ export async function loadExtensionList(): Promise<ExtensionInfo[]> {
   const merged = mergeManifests(scan.found);
   const items: ExtensionInfo[] = [];
   for (const mergedManifest of merged.manifests) {
-    const m = mergedManifest.manifest as PluginManifest;
+    const m = mergedManifest.manifest as ExtensionManifest;
     if (!m.id || !m.version || !m.kind || !m.displayName) continue;
       const slim: ExtensionInfo = {
         id: m.id,
@@ -252,6 +257,14 @@ export async function loadExtensionList(): Promise<ExtensionInfo[]> {
       }
       if (m.provides?.events?.length) {
         slim.events = m.provides.events.map((e) => ({ name: e.name }));
+      }
+      // M4: workbench extension carrying its own persona family — surface a
+      // slim id/role list (counts + Settings display; full defs live in the
+      // agents kind registry).
+      if (m.provides?.agents?.length) {
+        slim.agents = m.provides.agents
+          .filter((a): a is { id: string; role?: string } => Boolean(a.id))
+          .map((a) => ({ id: a.id, role: a.role ?? 'unknown' }));
       }
       if (m.provides?.agent) {
         const a = m.provides.agent;

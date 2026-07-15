@@ -87,6 +87,45 @@ describe('kind dispatcher', () => {
     expect(scan.found.map((f) => f.manifest.id)).toEqual(['@forgeax-extension/wb-legacy']);
   });
 
+  it('fans out workbench provides.agents[] into the agents registry (ADR 0025 M4)', async () => {
+    const dir = mkmanifest('L0', 'wb-bundle', {
+      id: '@forgeax-extension/wb-bundle',
+      kind: 'workbench',
+      displayName: { zh: 'bundle' },
+      provides: {
+        workbench: { id: 'bundle', position: 120, preferredAgent: 'lead' },
+        agents: [
+          {
+            id: 'lead',
+            role: 'director',
+            card: { name: { zh: 'Lead' }, color: '#f5a', avatar: './agents/lead/a.webm' },
+            personaFile: './agents/lead/persona/zh.md',
+          },
+          {
+            id: 'sub',
+            role: 'editor',
+            card: { name: { zh: 'Sub' }, color: '#5af', avatar: './agents/sub/a.webm' },
+            personaFile: './agents/sub/persona/zh.md',
+          },
+        ],
+      },
+    });
+    // persona files exist → no issues; paths must resolve against the extension root.
+    for (const aid of ['lead', 'sub']) {
+      mkdirSync(join(dir, 'agents', aid, 'persona'), { recursive: true });
+      writeFileSync(join(dir, 'agents', aid, 'persona', 'zh.md'), '# persona', 'utf-8');
+    }
+    const reg = await reloadFromTmp();
+    expect(reg.workbench.length).toBe(1);
+    expect(reg.agents.map((a) => a.definition.id).sort()).toEqual(['lead', 'sub']);
+    // both entries carry the SAME extension id but their own definition ids
+    expect(new Set(reg.agents.map((a) => a.pluginId))).toEqual(new Set(['@forgeax-extension/wb-bundle']));
+    expect(reg.agents.find((a) => a.definition.id === 'lead')!.personaPath).toBe(
+      join(dir, 'agents', 'lead', 'persona', 'zh.md'),
+    );
+    expect(reg.issues.filter((i) => i.kind === 'agent')).toEqual([]);
+  });
+
   it('extracts workbench entry with position/standalone/panelSize', async () => {
     mkmanifest('L0', 'wb-test', {
       id: '@forgeax-extension/wb-test',

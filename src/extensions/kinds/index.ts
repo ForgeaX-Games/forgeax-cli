@@ -23,8 +23,9 @@ export function buildKindRegistry(manifests: MergedManifest[]): KindRegistry {
     const wb = loadWorkbench(m);
     if (wb) reg.workbench.push(wb);
 
+    // kind=agent 单数 + kind=workbench 的 provides.agents[](M4)同注册表。
     const ag = loadAgent(m);
-    if (ag.entry) reg.agents.push(ag.entry);
+    reg.agents.push(...ag.entries);
     reg.issues.push(...ag.issues);
 
     const sk = loadSkills(m);

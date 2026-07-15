@@ -2,7 +2,7 @@
  * Phase B1 — ManifestScanner.
  *
  * Walks the three plugin layers (L0 builtin / L1 user / L2 project) and
- * returns parsed PluginManifest[] tagged by origin. Zod-validation goes
+ * returns parsed ExtensionManifest[] tagged by origin. Zod-validation goes
  * through `@forgeax/types`, so any divergence between scanner and
  * marketplace manifest grammar surfaces here as a typed error.
  *
@@ -15,7 +15,7 @@ import { renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { parseManifest } from '@forgeax/types';
-import type { PluginManifest } from '@forgeax/types';
+import type { ExtensionManifest } from '@forgeax/types';
 import { defaultProjectRoot } from '@forgeax/platform-io';
 import { assetRoot } from '@forgeax/platform-io';
 
@@ -24,7 +24,7 @@ export type ExtensionLayer = 'L0' | 'L1' | 'L2';
 export interface ScannedManifest {
   layer: ExtensionLayer;
   originPath: string;
-  manifest: PluginManifest;
+  manifest: ExtensionManifest;
 }
 
 export interface ScanError {

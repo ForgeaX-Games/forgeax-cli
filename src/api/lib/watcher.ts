@@ -1,4 +1,6 @@
 import chokidar, { type FSWatcher } from 'chokidar';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 export interface FileChangeEvent {
   type: 'file-event';
@@ -6,7 +8,26 @@ export interface FileChangeEvent {
   change: 'add' | 'update' | 'unlink';
 }
 
-type Listener = (ev: FileChangeEvent) => void;
+export interface AssetDiskChangedEvent {
+  type: 'asset-disk-changed';
+  path: string;
+  change: FileChangeEvent['change'];
+  gameSlug: string;
+  /** Path relative to the game root, e.g. assets/scenes/main.pack.json. */
+  gamePath: string;
+  /** File category aligned with vite-plugin-pack's watched asset classes. */
+  assetFileKind: 'pack' | 'meta' | 'source';
+  /** Primary asset kind in the changed pack. Scene wins when present. */
+  assetKind?: string;
+  /** All top-level asset kinds declared by the pack, deduped in file order. */
+  assetKinds?: string[];
+  sceneGuid?: string;
+  parseOk: boolean;
+}
+
+export type FsWatcherEvent = FileChangeEvent | AssetDiskChangedEvent;
+
+type Listener = (ev: FsWatcherEvent) => void;
 
 // Skip standard cache/vcs dirs everywhere. Inside .forgeax/ we specifically
 // skip the high-churn runtime subtrees (agenteam-state has thousands of small
@@ -63,6 +84,61 @@ export class FsWatcher {
   private emit(change: FileChangeEvent['change'], rawPath: string) {
     const norm = rawPath.split('\\').join('/');
     const ev: FileChangeEvent = { type: 'file-event', path: norm, change };
+    this.broadcast(ev);
+    void this.emitAssetDiskChanged(change, norm);
+  }
+
+  private async emitAssetDiskChanged(change: FileChangeEvent['change'], normPath: string): Promise<void> {
+    const assetFileKind = this.assetFileKind(normPath);
+    if (assetFileKind === null) return;
+    const m = normPath.match(/^(?:\.forgeax\/games|games)\/([^/]+)\/(.+)$/);
+    if (!m) return;
+    const [, gameSlug, gamePath] = m;
+    const ev: AssetDiskChangedEvent = {
+      type: 'asset-disk-changed',
+      path: normPath,
+      change,
+      gameSlug,
+      gamePath,
+      assetFileKind,
+      parseOk: false,
+    };
+    if (change !== 'unlink' && (assetFileKind === 'pack' || assetFileKind === 'meta')) {
+      try {
+        const raw = await readFile(resolve(this.rootDir, normPath), 'utf8');
+        const parsed = JSON.parse(raw) as { assets?: Array<{ kind?: unknown; guid?: unknown }> };
+        const kinds: string[] = [];
+        if (Array.isArray(parsed.assets)) {
+          for (const asset of parsed.assets) {
+            if (typeof asset?.kind !== 'string' || kinds.includes(asset.kind)) continue;
+            kinds.push(asset.kind);
+          }
+          const scene = parsed.assets.find((asset) => asset?.kind === 'scene');
+          ev.sceneGuid = typeof scene?.guid === 'string' ? scene.guid : undefined;
+        }
+        ev.assetKinds = kinds;
+        ev.assetKind = kinds.includes('scene') ? 'scene' : kinds[0];
+        ev.parseOk = true;
+      } catch {
+        ev.assetKind = 'unknown';
+      }
+    }
+    this.broadcast(ev);
+  }
+
+  private assetFileKind(path: string): AssetDiskChangedEvent['assetFileKind'] | null {
+    if (path.endsWith('.pack.json')) return 'pack';
+    if (path.endsWith('.meta.json')) return 'meta';
+    if (
+      path.endsWith('.jpg') ||
+      path.endsWith('.jpeg') ||
+      path.endsWith('.png') ||
+      path.endsWith('.gltf')
+    ) return 'source';
+    return null;
+  }
+
+  private broadcast(ev: FsWatcherEvent): void {
     for (const l of this.listeners) {
       try {
         l(ev);

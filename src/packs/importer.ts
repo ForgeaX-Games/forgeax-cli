@@ -24,7 +24,7 @@ import { runCapture } from '../lib/node-spawn';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { ManifestSchema, type PluginManifest } from '@forgeax/types';
+import { ManifestSchema, type ExtensionManifest } from '@forgeax/types';
 import { getExtensionSnapshot } from '../extensions/registry';
 import {
   FxpackManifestSchema,
@@ -82,7 +82,7 @@ function walk(root: string, out: string[] = [], rel = ''): string[] {
   return out;
 }
 
-function loadPluginManifest(srcDir: string): PluginManifest {
+function loadExtensionManifest(srcDir: string): ExtensionManifest {
   const raw = JSON.parse(readFileSync(join(srcDir, 'forgeax-extension.json'), 'utf-8'));
   const parsed = ManifestSchema.safeParse(raw);
   if (!parsed.success) {
@@ -214,9 +214,9 @@ export async function inspectPack(
       if (!existsSync(dir)) {
         return { ok: false, code: 'manifest_invalid', error: `plugin ${entry} declared in contains[] but missing from plugins/` };
       }
-      let pm: PluginManifest;
+      let pm: ExtensionManifest;
       try {
-        pm = loadPluginManifest(dir);
+        pm = loadExtensionManifest(dir);
       } catch (e) {
         return { ok: false, code: 'manifest_invalid', error: (e as Error).message };
       }

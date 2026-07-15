@@ -14,7 +14,7 @@ import type {
   AgentDefinition,
   ResolvedAgentDefinition,
   SkillDefinition,
-  PluginManifest,
+  ExtensionManifest,
 } from '@forgeax/types';
 import type { ExtensionLayer } from '../scanner';
 import type { CliProviderEntry } from './cli-provider';
@@ -65,7 +65,7 @@ export interface KindRegistry {
   /** Phase C3 — cli-provider entries (real loader). */
   cliProviders: CliProviderEntry[];
   /** Stub registry reserved for Phase D (model-binding still kind-stub). */
-  modelBindings: Array<{ pluginId: string; manifest: PluginManifest }>;
+  modelBindings: Array<{ pluginId: string; manifest: ExtensionManifest }>;
   /** Phase D1 — flat list of every tool from every kind's `provides.tools[]`. */
   tools: ToolEntry[];
   issues: KindLoadIssue[];

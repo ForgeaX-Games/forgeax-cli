@@ -58,7 +58,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { cmd, positional, flags };
 }
 
-function readPluginManifestSync(srcDir: string): { id: string; version: string; kind: string } {
+function readExtensionManifestSync(srcDir: string): { id: string; version: string; kind: string } {
   const raw = JSON.parse(readFileSync(join(srcDir, 'forgeax-extension.json'), 'utf-8'));
   return { id: String(raw.id), version: String(raw.version ?? '0.1.0'), kind: String(raw.kind ?? 'agent') };
 }
@@ -74,7 +74,7 @@ async function cmdPack(args: ParsedArgs): Promise<void> {
     process.stderr.write(`error: ${srcDir}/forgeax-extension.json not found\n`);
     process.exit(1);
   }
-  const m = readPluginManifestSync(srcDir);
+  const m = readExtensionManifestSync(srcDir);
   const outPath = args.flags.out
     ? resolve(String(args.flags.out))
     : resolve(process.cwd(), `${basename(srcDir)}-${m.version}.fxpack`);

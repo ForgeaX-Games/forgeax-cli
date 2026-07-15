@@ -22,7 +22,7 @@
  * lands.
  */
 import { dirname, isAbsolute, resolve } from 'node:path';
-import type { ManifestToolEntry, PluginManifest } from '@forgeax/types';
+import type { ManifestToolEntry, ExtensionManifest } from '@forgeax/types';
 import type { MergedManifest } from '../merger';
 import type { ExtensionLayer } from '../scanner';
 import type { KindLoadIssue } from './types';
@@ -71,14 +71,14 @@ function pickDescription(d: ManifestToolEntry['description']): string | undefine
 export function loadTools(
   merged: MergedManifest,
 ): { entries: ToolEntry[]; issues: KindLoadIssue[] } {
-  const m = merged.manifest as PluginManifest & { provides?: { tools?: ManifestToolEntry[] } };
+  const m = merged.manifest as ExtensionManifest & { provides?: { tools?: ManifestToolEntry[] } };
   const tools = m.provides?.tools;
   if (!tools || tools.length === 0) return { entries: [], issues: [] };
 
   const dir = dirname(merged.originPath);
   const backend = m.entry?.backend?.trim();
   const backendPath = backend ? (isAbsolute(backend) ? backend : resolve(dir, backend)) : null;
-  const requestedEnv = (m as PluginManifest & { requestedEnv?: string[] }).requestedEnv ?? [];
+  const requestedEnv = (m as ExtensionManifest & { requestedEnv?: string[] }).requestedEnv ?? [];
 
   const entries: ToolEntry[] = [];
   const issues: KindLoadIssue[] = [];

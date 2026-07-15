@@ -8,11 +8,11 @@
  *
  * See docs/v2-vision/architecture-evolution/03-AGENT-SKILL-PLUGIN-TRINITY.md §2.1.
  */
-import type { PluginManifest } from '@forgeax/types';
+import type { ExtensionManifest } from '@forgeax/types';
 import type { ExtensionLayer, ScannedManifest } from './scanner';
 
 export interface MergedManifest {
-  manifest: PluginManifest;
+  manifest: ExtensionManifest;
   layer: ExtensionLayer;
   originPath: string;
   /** Lower-precedence copies of the same id, ordered most→least specific. */
