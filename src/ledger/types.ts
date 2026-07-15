@@ -17,5 +17,9 @@ export interface StoredEvent {
   payload?: Record<string, unknown>;
   priority?: number;
   handoff?: string;
+  /** Per-session monotonic sequence (multi-tab sync, additive since 2026-07). */
+  seq?: number;
+  /** Session generation id — seq is only comparable within the same sgen. */
+  sgen?: string;
   [key: string]: unknown;
 }

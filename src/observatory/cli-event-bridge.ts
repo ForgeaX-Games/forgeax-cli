@@ -87,6 +87,18 @@ export class CliEventBridge {
     switch (ev.type) {
       case 'token':
         this.tokenBuffer += ev.text;
+        // R1-b(多 tab 同步方案 §9):token 同时转发为 stream:llm text chunk,
+        // 旁观 tab 才能逐字直播(stream:* 不落 WAL,_bindLedgerPersistence 跳过)。
+        // 发送 tab 的 SSE 已渲染同一份文本,由前端 cli-SSE-active 标志去重。
+        this.session.eventBus.publish(
+          {
+            type: 'stream:llm',
+            ts: Date.now(),
+            source: `agent:${this.agentPath}`,
+            payload: { chunk: { type: 'text', text: ev.text }, turn: this.turnIndex },
+          },
+          this.agentPath,
+        );
         return;
 
       case 'thinking':

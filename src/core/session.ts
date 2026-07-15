@@ -22,6 +22,7 @@
 
 import { Blackboard } from "./blackboard";
 import { EventBus } from "./event-bus";
+import { LiveTurnTracker } from "./live-turn-tracker";
 import { AgentTree } from "./agent-tree";
 import { Scheduler, type AgentFactory } from "./scheduler";
 import { EventLedger } from "../ledger/event-ledger";
@@ -91,6 +92,8 @@ export class Session {
 
   readonly blackboard: Blackboard;
   readonly eventBus: EventBus;
+  /** 在途 turn 累积 —— WsHub 给新连接发 turn-snapshot 用(多 tab 同步 §4.3)。 */
+  readonly liveTurns: LiveTurnTracker;
   readonly tree: AgentTree;
   readonly scheduler: Scheduler;
 
@@ -163,6 +166,7 @@ export class Session {
     });
 
     this.eventBus = new EventBus();
+    this.liveTurns = new LiveTurnTracker(this.eventBus);
     this.tree = new AgentTree(init.sid, init.paths);
     this.tree.init();
 
@@ -221,6 +225,7 @@ export class Session {
       this._bindDelegationCallback(),
       this._bindAutoExtract(),
       bindSystemEventLog(this.paths.globalEventsLog(), this.eventBus),
+      () => this.liveTurns.dispose(),
     ];
   }
 

@@ -26,6 +26,15 @@ export class EventBus {
   private observers = new Set<ObserverHandler>();
   private agentQueueMap = new Map<string, EventQueueAPI>();
 
+  /** Session generation —— 一次性 id;seq 只在本 generation 内可比(多 tab 同步 §3.1)。
+   *  server 重启/session 重开 = 换代,客户端 cursor 按 (sgen, seq) 对齐,换代即走全量恢复,
+   *  因此不需要任何计数器持久化/恢复。 */
+  readonly sgen = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  private _seq = 0;
+
+  /** 当前 seq 水位 —— WsHub 的 hello / turn-snapshot 帧用。 */
+  get seq(): number { return this._seq; }
+
   // ─── Observer registration ────────────────────────────────────────────
 
   observe(handler: ObserverHandler): () => void {
@@ -53,6 +62,8 @@ export class EventBus {
   // ─── publish — observers only, no queue routing ───────────────────────
 
   publish(event: Event, emitterId?: string): void {
+    event.seq = ++this._seq;
+    event.sgen = this.sgen;
     let blocked = false;
     event.block = (reason?: string) => { blocked = true; event.blockReason = reason; };
     event.isBlocked = () => blocked;

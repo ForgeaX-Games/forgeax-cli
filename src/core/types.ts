@@ -178,6 +178,10 @@ export interface EventBase {
   ts: number;
   /** 0 = immediate, 1 = normal (default), 2 = low. */
   priority?: number;
+  /** Per-session monotonic sequence — stamped by EventBus.publish (multi-tab sync). */
+  seq?: number;
+  /** Session generation id — seq is only comparable within the same sgen. */
+  sgen?: string;
   /** Attached by EventBus.publish before observers run. */
   block?: (reason?: string) => void;
   isBlocked?: () => boolean;

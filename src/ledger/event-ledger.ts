@@ -94,6 +94,7 @@ export class EventLedger {
       emitterId,
       priority: event.priority,
       handoff: event.handoff,
+      ...(typeof event.seq === "number" ? { seq: event.seq, sgen: event.sgen } : {}),
       payload: event.payload && typeof event.payload === "object"
         ? structuredClone(event.payload as Record<string, unknown>)
         : event.payload,
