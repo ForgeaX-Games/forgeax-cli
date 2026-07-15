@@ -27,7 +27,13 @@
 import { readFileSync } from "node:fs";
 import type { AgentContext, ToolDefinition } from "../../../../src/core/types";
 import type { PluginSource } from "../../../../src/kits/types";
-import { listTools, callTool, type ToolDescriptor } from "../../../../src/tools/registry";
+import {
+  listTools,
+  callTool,
+  hostToolWireName,
+  type ToolDescriptor,
+} from "../../../../src/tools/registry";
+import { markHostToolDefinition } from "../../../../src/kernel/host-tool-confirmation";
 
 /** 迁移护栏：这些前缀的 Host 工具仍由各自的 legacy builtin kit 提供（bare 名），
  *  默认 deny 以免“桥接版 + kit 版”双份列给 LLM 造成混淆。等对应 kit 退役后，
@@ -88,11 +94,11 @@ function sessionIdFromDir(agentDir: string): string | undefined {
 /** 把单个 Host 工具描述符桥接成标准 ToolDefinition。 */
 function bridgeTool(d: ToolDescriptor, ctx: AgentContext): ToolDefinition {
   const sessionId = sessionIdFromDir(ctx.agentDir);
-  return {
+  return markHostToolDefinition({
     // LLM tool-name 受 Anthropic/OpenAI 约束 `^[a-zA-Z0-9_-]{1,128}$`：':' 和 '.'
     // 都非法（toolId 如 "lowpoly:pipeline.applyBatch" 含两者）。把非法字符映射成
     // '_' 喂给 LLM；execute 闭包里仍用原始 d.id 调 callTool，无需反查映射。
-    name: d.id.replace(/[^a-zA-Z0-9_-]/g, "_"),
+    name: hostToolWireName(d.id),
     description: d.description ?? d.id,
     input_schema: toInputSchema(d.argsSchema),
     async execute(args) {
@@ -108,7 +114,7 @@ function bridgeTool(d: ToolDescriptor, ctx: AgentContext): ToolDefinition {
       }
       return JSON.stringify({ error: res.error, code: res.code });
     },
-  };
+  }, d.id);
 }
 
 export default function hostToolBridge(ctx: AgentContext): PluginSource {

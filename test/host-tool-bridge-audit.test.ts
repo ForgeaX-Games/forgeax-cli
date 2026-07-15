@@ -22,6 +22,9 @@ let decision: { allow: boolean; outcome: 'allow' | 'ask' | 'deny'; capability?: 
 let approvalResult: boolean;
 let execImpl: (..._a: unknown[]) => Promise<unknown>;
 let agentLive: boolean;
+let delegateHostConfirmation: boolean;
+let approvalCalls: number;
+let execCalls: number;
 
 const fakeAgent = { agentContext: { tools: { list: () => [] } } };
 const fakeSession = {
@@ -35,8 +38,15 @@ function makeBridge() {
     getSessionManager: (() => ({ peek: () => fakeSession, open: async () => fakeSession })) as unknown as HostToolBridgeDeps['getSessionManager'],
     loadAgentRecord: (async () => ({ trustTier })) as unknown as HostToolBridgeDeps['loadAgentRecord'],
     checkKernelTool: (() => decision) as unknown as HostToolBridgeDeps['checkKernelTool'],
-    requestToolApproval: (async () => approvalResult) as unknown as HostToolBridgeDeps['requestToolApproval'],
-    executeTool: ((...a: unknown[]) => execImpl(...a)) as unknown as HostToolBridgeDeps['executeTool'],
+    shouldDelegateHostToolConfirmation: (() => delegateHostConfirmation) as unknown as HostToolBridgeDeps['shouldDelegateHostToolConfirmation'],
+    requestToolApproval: (async () => {
+      approvalCalls += 1;
+      return approvalResult;
+    }) as unknown as HostToolBridgeDeps['requestToolApproval'],
+    executeTool: ((...a: unknown[]) => {
+      execCalls += 1;
+      return execImpl(...a);
+    }) as unknown as HostToolBridgeDeps['executeTool'],
   };
   return makeInProcessExecuteTool('forge', deps);
 }
@@ -59,6 +69,9 @@ beforeEach(() => {
   decision = { allow: true, outcome: 'allow' };
   approvalResult = true;
   execImpl = async () => ({ result: 'ok' });
+  delegateHostConfirmation = false;
+  approvalCalls = 0;
+  execCalls = 0;
 });
 
 afterEach(() => {
@@ -113,6 +126,31 @@ describe('host-tool-bridge appendToolAudit', () => {
     const rows = readAudit();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ allow: true, ok: true, tool: 'run_cmd' });
+    expect(approvalCalls).toBe(1);
+    expect(execCalls).toBe(1);
+  });
+
+  test('ask + 下游 Host ToolRegistry 自带确认 → 跳过外层卡并只执行一次', async () => {
+    decision = { allow: false, outcome: 'ask', capability: 'other' };
+    delegateHostConfirmation = true;
+    const bridge = makeBridge();
+    await bridge('aiasset_import-to-engine', {}, SID, 'forge');
+
+    expect(approvalCalls).toBe(0);
+    expect(execCalls).toBe(1);
+    const rows = readAudit();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ allow: true, ok: true, tool: 'aiasset_import-to-engine' });
+  });
+
+  test('deny 不会被下游确认声明绕过', async () => {
+    decision = { allow: false, outcome: 'deny', capability: 'credential', reason: 'hard deny' };
+    delegateHostConfirmation = true;
+    const bridge = makeBridge();
+    await expect(bridge('get_secret', {}, SID, 'forge')).rejects.toThrow('hard deny');
+
+    expect(approvalCalls).toBe(0);
+    expect(execCalls).toBe(0);
   });
 
   test('allow + executeTool 抛 → rethrow + 恰一行 {allow:true, ok:false, error}', async () => {

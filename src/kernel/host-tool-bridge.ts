@@ -24,6 +24,7 @@ import { defaultProjectRoot } from '@forgeax/platform-io';
 import { getPathManager } from '../fs/path-manager';
 import { tt } from '../lib/turn-trace';
 import { appendToolAudit } from './tool-audit';
+import { shouldDelegateHostToolConfirmation } from './host-tool-confirmation';
 
 /** 与原生内核约定的 host 工具执行签名(结构化,不 import 内核包的类型)。
  *  `agentId` = 本轮真实发起工具的 agent(委派轮里即被委派方,如 mochi);缺省回落 defaultAgentPath。
@@ -38,6 +39,7 @@ export interface HostToolBridgeDeps {
   getSessionManager: typeof getSessionManager;
   loadAgentRecord: typeof loadAgentRecord;
   checkKernelTool: typeof checkKernelTool;
+  shouldDelegateHostToolConfirmation: typeof shouldDelegateHostToolConfirmation;
   requestToolApproval: typeof requestToolApproval;
   executeTool: typeof executeTool;
 }
@@ -50,6 +52,8 @@ export function makeInProcessExecuteTool(
   const _getSessionManager = deps.getSessionManager ?? getSessionManager;
   const _loadAgentRecord = deps.loadAgentRecord ?? loadAgentRecord;
   const _checkKernelTool = deps.checkKernelTool ?? checkKernelTool;
+  const _shouldDelegateHostToolConfirmation =
+    deps.shouldDelegateHostToolConfirmation ?? shouldDelegateHostToolConfirmation;
   const _requestToolApproval = deps.requestToolApproval ?? requestToolApproval;
   const _executeTool = deps.executeTool ?? executeTool;
   return async (name: string, args: unknown, sid?: string, agentId?: string): Promise<unknown> => {
@@ -97,7 +101,12 @@ export function makeInProcessExecuteTool(
       throw new Error(decision.reason ?? `denied by trust tier: ${name}`);
     }
     // ask:弹权限卡阻塞等用户(命中本会话 remember 直放);拒绝/超时 → 抛(fail-closed)。
-    if (decision.outcome === 'ask') {
+    const delegateConfirmation =
+      decision.outcome === 'ask' &&
+      !isForgeaxBuiltinTool(name) &&
+      !getHostTool(name)?.run &&
+      _shouldDelegateHostToolConfirmation(name, agent.agentContext.tools.list());
+    if (decision.outcome === 'ask' && !delegateConfirmation) {
       tt('htb.approval-wait', { name, agent: agentPath, sid, cap: decision.capability });
       const approved = await _requestToolApproval({
         eventBus: session.eventBus,

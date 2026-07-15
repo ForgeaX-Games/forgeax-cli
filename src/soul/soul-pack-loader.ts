@@ -295,7 +295,11 @@ async function synthFromLegacy(agentId: string, memory: LayeredMemoryRef): Promi
   let source: SoulSource = 'forge';
   if (!OWN_BUILTIN_IDS.has(id)) {
     const resolved = await resolvePersonaForAgent(id).catch(() => null);
-    source = resolved?.source === 'marketplace' ? 'marketplace' : 'builtin';
+    source = resolved?.source === 'plugin' && resolved.layer === 'L0'
+      ? 'builtin'
+      : resolved
+        ? 'marketplace'
+        : 'builtin';
   }
 
   // persona:复用今天注入的同款 bundle(persona + skill index + 平铺 memory)→ 零回归。

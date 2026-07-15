@@ -37,6 +37,7 @@ import { loadAgentRecord } from '../soul';
 import { appendToolAudit } from '../kernel/tool-audit';
 import { consultTurnGate } from '../kernel/cc-profile';
 import { evaluateSettingsRules, loadSettingsPermissionRules, ruleLabel } from './lib/permission-settings';
+import { shouldDelegateHostToolConfirmation } from '../kernel/host-tool-confirmation';
 
 function resolveAgentPath(session: Session, to: string): string {
   if (to.includes('#')) {
@@ -427,7 +428,12 @@ export function createSessionsRouter() {
       return c.json({ ok: false, error: decision.reason ?? 'denied by trust tier' });
     }
     // ask:弹权限卡阻塞等用户(命中本会话 remember 直放);拒绝/超时 → 审计 + 拒。
-    if (decision.outcome === 'ask') {
+    const delegateConfirmation =
+      decision.outcome === 'ask' &&
+      !isForgeaxBuiltinTool(toolName) &&
+      !getHostTool(toolName)?.run &&
+      shouldDelegateHostToolConfirmation(toolName, agent.agentContext.tools.list());
+    if (decision.outcome === 'ask' && !delegateConfirmation) {
       const approved = await requestToolApproval({
         eventBus: session.eventBus,
         sid,

@@ -15,6 +15,7 @@ import {
   lookupAgent,
   resolveSkill,
 } from '../src/agents/loader';
+import { loadAgentRecord } from '../src/soul';
 
 const TMP = `/tmp/forgeax-agent-loader-${process.pid}`;
 
@@ -70,6 +71,50 @@ describe('AgentLoader', () => {
     expect(e?.definition.id).toBe('iori');
     expect(e?.pluginId).toBe('@forgeax-extension/agent-iori');
     expect(lookupAgent('does-not-exist')).toBeNull();
+  });
+
+  it('treats extension-provided agents as imported souls', async () => {
+    const dir = mkmanifest('L1', 'agent-poly', {
+      id: '@forgeax-extension/agent-poly',
+      kind: 'agent',
+      displayName: { zh: 'poly' },
+      provides: {
+        agent: {
+          id: 'poly',
+          role: 'modeling',
+          card: { name: { zh: 'Poly' }, color: '#56B6C2', avatar: 'P' },
+          personaFile: './PERSONA.md',
+        },
+      },
+    });
+    writeFileSync(join(dir, 'PERSONA.md'), '# Poly persona\n', 'utf-8');
+    await reloadExtensions({ roots: ROOTS() });
+
+    const record = await loadAgentRecord('poly', { projectRoot: TMP });
+    expect(record.source).toBe('marketplace');
+    expect(record.trustTier).toBe('imported');
+  });
+
+  it('treats host-bundled L0 extension agents as own souls', async () => {
+    const dir = mkmanifest('L0', 'agent-bundled-poly', {
+      id: '@forgeax-extension/agent-bundled-poly',
+      kind: 'agent',
+      displayName: { zh: 'bundled-poly' },
+      provides: {
+        agent: {
+          id: 'bundled-poly',
+          role: 'modeling',
+          card: { name: { zh: 'Bundled Poly' }, color: '#56B6C2', avatar: 'P' },
+          personaFile: './PERSONA.md',
+        },
+      },
+    });
+    writeFileSync(join(dir, 'PERSONA.md'), '# Bundled Poly persona\n', 'utf-8');
+    await reloadExtensions({ roots: ROOTS() });
+
+    const record = await loadAgentRecord('bundled-poly', { projectRoot: TMP });
+    expect(record.source).toBe('builtin');
+    expect(record.trustTier).toBe('own');
   });
 
   it('composeSystemPrompt concatenates persona + prompt-skill body', async () => {

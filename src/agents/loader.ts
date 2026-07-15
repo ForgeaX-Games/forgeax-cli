@@ -364,6 +364,10 @@ export async function resolvePersonaForAgent(agentId: string): Promise<{
    *  决定把哪些 exposedToAI 宿主工具注入此 agent 的对话工具清单。 */
   tools?: string[];
   source: 'plugin' | 'marketplace';
+  /** Extension layer is authoritative for trust: bundled L0 is host-owned;
+   *  user/project L1/L2 remain imported. Legacy marketplace personas have no
+   *  extension layer and therefore stay imported. */
+  layer?: AgentEntry['layer'];
 } | null> {
   // 1) Plugin agents — entry.personaPath is already absolute.
   const plugin = lookupAgent(agentId);
@@ -376,7 +380,13 @@ export async function resolvePersonaForAgent(agentId: string): Promise<{
         if (existsSync(abs)) memoryDir = abs;
       }
     }
-    return { personaPath: plugin.personaPath, memoryDir, tools: plugin.definition.tools, source: 'plugin' };
+    return {
+      personaPath: plugin.personaPath,
+      memoryDir,
+      tools: plugin.definition.tools,
+      source: 'plugin',
+      layer: plugin.layer,
+    };
   }
   // 2) Legacy peers in marketplace/manifest.json.
   const mpRoot = findMarketplaceRoot();

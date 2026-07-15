@@ -48,6 +48,9 @@ export type ToolHandler = (
     /** 用户数据根(`<projectRoot>/.forgeax/games/...` 所在);写用户工程数据的
      *  插件 handler 用此,而非 cwd(=插件安装目录)。宿主从 path-manager 注入。 */
     projectRoot: string;
+    /** 当前调用会话永久绑定的 game slug。仅来自 session path/config；没有会话
+     *  绑定时省略，不回落全局 active game，避免写类工具跨项目漂移。 */
+    game?: string;
     /** 宿主下注的图像生成能力(中立 @forgeax/types ImageGen 缝)。图像类插件
      *  handler 经此生图,不必反向 import 编排层的 vendor 实现。懒构造,非图像
      *  工具 0 成本。 */
@@ -223,21 +226,23 @@ export function _resetConfirmsForTests(): void {
  * slug wins; the workspace active game is the fallback. Only fills when args is
  * a plain object whose `slug` is absent/empty, so an explicit caller slug wins.
  */
-function injectScopeSlugIfMissing(req: ToolCall): void {
+function resolveSessionGame(req: ToolCall): string | undefined {
+  const sid = req.caller.sessionId ?? req.caller.threadId;
+  if (!sid) return undefined;
+  try {
+    const game = getSessionManager().peek(sid)?.config.defaultDir;
+    return game && game !== 'default' ? game : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function injectScopeSlugIfMissing(req: ToolCall, sessionGame?: string): void {
   if (typeof req.args !== 'object' || !req.args || Array.isArray(req.args)) return;
   if (!/^(gen3d|aiasset):/.test(req.toolId)) return;
   const args = req.args as Record<string, unknown>;
   if (args.slug !== undefined && args.slug !== '') return;
-  let slug: string | undefined;
-  const sid = req.caller.sessionId ?? req.caller.threadId;
-  if (sid) {
-    try {
-      const s = getSessionManager().peek(sid)?.config.defaultDir;
-      slug = s && s !== 'default' ? s : undefined;
-    } catch {
-      /* SessionManager not initialised (e.g. standalone /api/tools/call smoke) */
-    }
-  }
+  let slug = sessionGame;
   if (!slug) {
     try {
       slug = getPathManager().resolveScope();
@@ -316,7 +321,8 @@ export async function callTool(req: ToolCall): Promise<ToolResult> {
     bus.emit('tool.failed', { toolId: req.toolId, error: r.error, caller: req.caller }, { threadId });
     return r;
   }
-  injectScopeSlugIfMissing(req);
+  const sessionGame = resolveSessionGame(req);
+  injectScopeSlugIfMissing(req, sessionGame);
   try {
     const filteredEnv: Record<string, string | undefined> = {};
     for (const k of entry.requestedEnv) filteredEnv[k] = process.env[k];
@@ -326,6 +332,7 @@ export async function callTool(req: ToolCall): Promise<ToolResult> {
       env: filteredEnv,
       cwd: entry.pluginDir,
       projectRoot: defaultProjectRoot(),
+      ...(sessionGame ? { game: sessionGame } : {}),
       imageGen: createImageGen(filteredEnv),
       host: getHostAuthoring(),
     });
@@ -368,8 +375,12 @@ export interface ToolDescriptor {
   returnsSchema?: unknown;
 }
 
-export function listTools(): ToolDescriptor[] {
-  return getExtensionSnapshot().kinds.tools.map((t) => ({
+export function hostToolWireName(toolId: string): string {
+  return toolId.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function describeTool(t: ToolEntry): ToolDescriptor {
+  return {
     id: t.toolId,
     pluginId: t.pluginId,
     description: t.description,
@@ -379,7 +390,21 @@ export function listTools(): ToolDescriptor[] {
     hasHandler: !!t.backendPath,
     argsSchema: t.argsSchema,
     returnsSchema: t.returnsSchema,
-  }));
+  };
+}
+
+export function listTools(): ToolDescriptor[] {
+  return getExtensionSnapshot().kinds.tools.map(describeTool);
+}
+
+export function resolveToolDescriptorByWireName(wireName: string): ToolDescriptor | null {
+  let match: ToolEntry | null = null;
+  for (const entry of getExtensionSnapshot().kinds.tools) {
+    if (hostToolWireName(entry.toolId) !== wireName) continue;
+    if (match) return null;
+    match = entry;
+  }
+  return match ? describeTool(match) : null;
 }
 
 /** Test helper — drop the per-backend module cache. */
