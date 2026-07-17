@@ -33,8 +33,16 @@ import {
   GitUploadError,
   type GitErrorKind,
 } from "./git-uploader";
+import { buildUploadArchive, UploadArchiveError } from "./archive";
 
-export type UploadErrorKind = "no-token" | "no-repo" | "secret-detected" | "bad-nonce" | GitErrorKind;
+export type UploadErrorKind =
+  | "no-token"
+  | "no-repo"
+  | "secret-detected"
+  | "bad-nonce"
+  | "archive-too-large"
+  | "archive-failed"
+  | GitErrorKind;
 
 export interface UploadPlan {
   ok: true;
@@ -62,7 +70,12 @@ export interface UploadResult {
   /** repo-relative snapshot path the content lives in, e.g. `<ns>/data/<ts>`. */
   path: string;
   commit: string;
+  /** Git files changed (workspace.tar.gz + manifest.json for a new snapshot). */
   filesChanged: number;
+  sourceFileCount: number;
+  sourceBytes: number;
+  archiveBytes: number;
+  /** @deprecated alias for sourceBytes retained only inside the current UI contract. */
   bytes: number;
   skipped: boolean;
   summary: string;
@@ -215,21 +228,11 @@ export async function uploadWorkspace(nonce: string, opts: UploadOpts = {}): Pro
   }
 
   return withNamespaceLock(cfg.namespace, async () => {
-    // Re-walk + re-scan at execute time (the tree may have changed since the plan).
+    // Re-walk at execute time (the tree may have changed since the plan). Archive
+    // construction below reads every file once and performs the execute-time secret
+    // scan on those exact bytes before anything reaches Git.
     const walk = walkUploadTree(cfg.sourceRoot);
     const literals = sensitiveEnvLiterals(opts.env ?? process.env);
-    const secretHits = scanFilesForSecrets(walk.files, literals);
-    if (secretHits.length > 0) {
-      appendLog(cfg.projectRoot, { namespace: cfg.namespace, outcome: "secret-detected", hits: secretHits.length });
-      return {
-        ok: false as const,
-        kind: "secret-detected" as const,
-        error: `upload blocked — ${secretHits.length} secret(s) detected in: ${secretHits
-          .slice(0, 3)
-          .map((h) => h.rel)
-          .join(", ")}`,
-      };
-    }
     if (walk.files.length === 0) {
       return { ok: false as const, kind: "empty-set" as const, error: "nothing to upload" };
     }
@@ -248,28 +251,44 @@ export async function uploadWorkspace(nonce: string, opts: UploadOpts = {}): Pro
       bytes: walk.totalBytes,
     });
 
+    let archive;
     try {
+      archive = await buildUploadArchive(walk.files, { literals });
+      if (archive.secretHits.length > 0) {
+        appendLog(cfg.projectRoot, { namespace: cfg.namespace, outcome: "secret-detected", hits: archive.secretHits.length });
+        return {
+          ok: false as const,
+          kind: "secret-detected" as const,
+          error: `upload blocked — ${archive.secretHits.length} secret(s) detected in: ${archive.secretHits
+            .slice(0, 3)
+            .map((h) => h.rel)
+            .join(", ")}`,
+        };
+      }
+
       const res = await pushSubset({
         remoteUrl,
         authHeader,
         branch: cfg.branch,
         namespace: cfg.namespace,
         snapshotDir,
-        files: walk.files,
-        sourceRoot: cfg.sourceRoot,
+        archive,
         commitMessage,
         sleep: opts.sleep,
       });
       const repoUrl = `https://github.com/${cfg.repo}`;
       const summary = res.skipped
         ? `Nothing changed since the last snapshot (${res.path}) — no new version created.`
-        : `Uploaded ${res.filesChanged} files (${fmtBytes(res.bytes)}) to ${repoUrl}/tree/${cfg.branch}/${res.path} @ ${res.commit.slice(0, 7)}`;
+        : `Uploaded ${res.sourceFileCount} files as ${fmtBytes(res.archiveBytes)} archive (${fmtBytes(res.sourceBytes)} raw) to ${repoUrl}/tree/${cfg.branch}/${res.path} @ ${res.commit.slice(0, 7)}`;
       appendLog(cfg.projectRoot, {
         namespace: cfg.namespace,
         outcome: res.skipped ? "skipped" : "completed",
         commit: res.commit,
         path: res.path,
-        files: res.filesChanged,
+        sourceFiles: res.sourceFileCount,
+        sourceBytes: res.sourceBytes,
+        archiveBytes: res.archiveBytes,
+        gitFiles: res.filesChanged,
       });
       return {
         ok: true as const,
@@ -280,14 +299,21 @@ export async function uploadWorkspace(nonce: string, opts: UploadOpts = {}): Pro
         path: res.path,
         commit: res.commit,
         filesChanged: res.filesChanged,
-        bytes: res.bytes,
+        sourceFileCount: res.sourceFileCount,
+        sourceBytes: res.sourceBytes,
+        archiveBytes: res.archiveBytes,
+        bytes: res.sourceBytes,
         skipped: res.skipped,
         summary,
       };
     } catch (e) {
-      const err = e instanceof GitUploadError ? e : new GitUploadError("git-failed", String((e as Error)?.message ?? e));
+      const err = e instanceof GitUploadError || e instanceof UploadArchiveError
+        ? e
+        : new GitUploadError("git-failed", String((e as Error)?.message ?? e));
       appendLog(cfg.projectRoot, { namespace: cfg.namespace, outcome: "failed", kind: err.kind, error: err.message });
       return { ok: false as const, kind: err.kind, error: err.message };
+    } finally {
+      archive?.cleanup();
     }
   });
 }

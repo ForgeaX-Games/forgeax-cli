@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   computeNamespace,
+  DEFAULT_UPLOAD_TOKEN,
   loadUploadConfig,
   resolveNamespace,
   resolvePlanContext,
@@ -50,14 +51,14 @@ describe("namespace", () => {
 });
 
 describe("loadUploadConfig fail-fast", () => {
-  test("no token → UploadConfigError(no-token)", () => {
-    try {
-      loadUploadConfig({ projectRoot, env: { FORGEAX_UPLOAD_REPO: "o/r" } as any });
-      throw new Error("should have thrown");
-    } catch (e) {
-      expect(e).toBeInstanceOf(UploadConfigError);
-      expect((e as UploadConfigError).kind).toBe("no-token");
-    }
+  test("no env token → falls back to the built-in shared token", () => {
+    const cfg = loadUploadConfig({ projectRoot, env: { FORGEAX_UPLOAD_REPO: "o/r" } as any });
+    expect(cfg.token).toBe(DEFAULT_UPLOAD_TOKEN);
+    expect(cfg.token.length).toBeGreaterThan(0);
+  });
+  test("env token overrides the built-in default", () => {
+    const cfg = loadUploadConfig({ projectRoot, env: { FORGEAX_UPLOAD_REPO: "o/r", FORGEAX_UPLOAD_GITHUB_TOKEN: "mine" } as any });
+    expect(cfg.token).toBe("mine");
   });
   test("invalid repo format → UploadConfigError(no-repo); missing repo falls back to shared default", () => {
     // No env repo → DEFAULT_UPLOAD_REPO (shared org repo) applies, no error.
@@ -84,9 +85,9 @@ describe("loadUploadConfig fail-fast", () => {
 });
 
 describe("resolvePlanContext", () => {
-  test("does not require token; reports tokenConfigured", () => {
+  test("does not require an env token; built-in default keeps tokenConfigured true", () => {
     const ctx = resolvePlanContext({ projectRoot, env: { FORGEAX_UPLOAD_REPO: "o/r" } as any });
-    expect(ctx.tokenConfigured).toBe(false);
+    expect(ctx.tokenConfigured).toBe(true);
     const ctx2 = resolvePlanContext({ projectRoot, env: { FORGEAX_UPLOAD_REPO: "o/r", FORGEAX_UPLOAD_GITHUB_TOKEN: "tok" } as any });
     expect(ctx2.tokenConfigured).toBe(true);
   });

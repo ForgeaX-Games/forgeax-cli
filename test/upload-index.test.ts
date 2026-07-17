@@ -52,11 +52,11 @@ describe("planUpload (dry-run)", () => {
     expect(p.summary).toContain("/upload confirm");
   });
 
-  test("no token → no nonce, flagged not-configured", () => {
+  test("no env token → built-in default still yields a configured plan with nonce", () => {
     const p = planUpload({ projectRoot, env: env({ FORGEAX_UPLOAD_GITHUB_TOKEN: "" }) });
     if (!p.ok) throw new Error("unexpected");
-    expect(p.tokenConfigured).toBe(false);
-    expect(p.nonce).toBeUndefined();
+    expect(p.tokenConfigured).toBe(true);
+    expect(p.nonce).toBeTruthy();
   });
 
   test("planted secret → no nonce, reported in secretHits", () => {
@@ -117,12 +117,20 @@ describe("full plan → confirm → push", () => {
     if (!r.ok) throw new Error("upload failed: " + r.error);
     expect(r.kind).toBe("result");
     expect(r.filesChanged).toBe(2);
-    expect(r.summary).toContain("Uploaded");
+    expect(r.sourceFileCount).toBe(2);
+    expect(r.sourceBytes).toBeGreaterThan(0);
+    expect(r.archiveBytes).toBeGreaterThan(0);
+    expect(r.summary).toContain("archive");
 
-    // verify on the remote
+    // verify the remote archive round-trips
     const wt = mkdtempSync(join(tmpdir(), "fg-verify-"));
     execFileSync("git", ["clone", "-q", bare, wt]);
-    expect(existsSync(join(wt, r.path, "games/g/src/main.ts"))).toBe(true);
+    expect(existsSync(join(wt, r.path, "workspace.tar.gz"))).toBe(true);
+    expect(existsSync(join(wt, r.path, "manifest.json"))).toBe(true);
+    const unpacked = mkdtempSync(join(tmpdir(), "fg-unpack-"));
+    execFileSync("tar", ["-xzf", join(wt, r.path, "workspace.tar.gz"), "-C", unpacked]);
+    expect(readFileSync(join(unpacked, "games/g/src/main.ts"), "utf8")).toBe("export const x = 1\n");
+    rmSync(unpacked, { recursive: true, force: true });
     rmSync(wt, { recursive: true, force: true });
 
     // audit log has started + completed

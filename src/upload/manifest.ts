@@ -227,6 +227,13 @@ export function scanContentForSecrets(rel: string, content: string, literals: st
   return hits;
 }
 
+/** Scan already-read bytes. Archive construction reuses this so every source file
+ *  is read only once while still applying the same fail-closed policy. */
+export function scanBufferForSecrets(rel: string, buf: Buffer, literals: string[]): SecretHit[] {
+  if (looksBinary(buf)) return [];
+  return scanContentForSecrets(rel, buf.toString("utf8"), literals);
+}
+
 /** Scan a set of files on disk. Skips files that look binary (NUL byte in the head)
  *  to avoid garbage matches; secrets are text by nature. Fail-closed: caller must
  *  abort the upload if the returned array is non-empty. */
@@ -239,8 +246,7 @@ export function scanFilesForSecrets(files: UploadFile[], literals: string[]): Se
     } catch {
       continue;
     }
-    if (looksBinary(buf)) continue;
-    hits.push(...scanContentForSecrets(f.rel, buf.toString("utf8"), literals));
+    hits.push(...scanBufferForSecrets(f.rel, buf, literals));
   }
   return hits;
 }

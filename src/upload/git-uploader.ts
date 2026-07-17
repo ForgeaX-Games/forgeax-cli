@@ -1,11 +1,11 @@
 // The git push of a workspace snapshot into one namespace subtree.
 //
-// Remote layout:  <namespace>/data/<YYYY-MM-DD_HHMMSS>/**
+// Remote layout:
+//   <namespace>/data/<YYYY-MM-DD_HHMMSS>/workspace.tar.gz
+//   <namespace>/data/<YYYY-MM-DD_HHMMSS>/manifest.json
 // Every upload lands in a fresh timestamped snapshot directory — nothing is ever
-// overwritten or deleted, so history is browsable as plain directories (and each
-// snapshot is also one git commit). Identical re-uploads are deduped against the
-// latest snapshot (git stores blobs content-addressed, so unchanged files across
-// snapshots cost no extra storage anyway).
+// overwritten or deleted. Identical re-uploads are deduped by the manifest's
+// canonical source-content hash.
 //
 // Design points (all driven by the adversarial review):
 //   - remote-agnostic: pushSubset takes a remoteUrl + optional authHeader, so unit
@@ -26,16 +26,23 @@
 //     namespace subtrees never content-conflict).
 
 import {
-  cpSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { devNull, tmpdir } from "node:os";
 import { execFile } from "node:child_process";
-import type { UploadFile } from "./manifest";
+import {
+  ARCHIVE_FILENAME,
+  MANIFEST_FILENAME,
+  parseUploadArchiveManifest,
+  serializeUploadArchiveManifest,
+  type UploadArchive,
+} from "./archive";
 
 export type GitErrorKind =
   | "no-git"
@@ -68,8 +75,7 @@ export interface PushSubsetParams {
   namespace: string;
   /** Timestamped snapshot directory this upload lands in (see snapshotDirName). */
   snapshotDir: string;
-  files: UploadFile[];
-  sourceRoot: string; // files[].abs are under here; copy preserves rel layout
+  archive: UploadArchive;
   commitMessage: string;
   committer?: { name: string; email: string };
   maxAttempts?: number; // push retry attempts, default 5
@@ -78,8 +84,11 @@ export interface PushSubsetParams {
 
 export interface PushSubsetResult {
   commit: string;
+  /** Git paths staged by this snapshot (two for a new archive, zero when skipped). */
   filesChanged: number;
-  bytes: number;
+  sourceFileCount: number;
+  sourceBytes: number;
+  archiveBytes: number;
   skipped: boolean; // true when identical to the latest snapshot (no commit made)
   /** repo-relative path of the snapshot the content lives in (the previous one when skipped). */
   path: string;
@@ -197,10 +206,9 @@ function classifyGitError(scrubbedMsg: string, code?: string): GitUploadError {
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Clone (or init), write the snapshot into `<namespace>/data/<snapshotDir>/`,
- *  commit + push with backoff. Skips (no commit) when the content is identical to
- *  the latest existing snapshot. Caller is responsible for secret-scanning
- *  `files` first. */
+/** Clone (or init), write the archive snapshot into `<namespace>/data/<snapshotDir>/`,
+ *  commit + push with backoff. Skips (no commit) when the source content hash is
+ *  identical to the latest archive snapshot. */
 export async function pushSubset(params: PushSubsetParams): Promise<PushSubsetResult> {
   const {
     remoteUrl,
@@ -208,8 +216,7 @@ export async function pushSubset(params: PushSubsetParams): Promise<PushSubsetRe
     branch,
     namespace,
     snapshotDir,
-    files,
-    sourceRoot,
+    archive,
     commitMessage,
     committer = DEFAULT_COMMITTER,
     maxAttempts = 5,
@@ -223,7 +230,7 @@ export async function pushSubset(params: PushSubsetParams): Promise<PushSubsetRe
     secrets.push(b64);
   }
 
-  if (files.length === 0) {
+  if (archive.manifest.sourceFileCount === 0) {
     throw new GitUploadError("empty-set", "nothing to upload (the include set is empty) — refusing to push an empty snapshot");
   }
 
@@ -275,18 +282,45 @@ export async function pushSubset(params: PushSubsetParams): Promise<PushSubsetRe
       }
     }
 
-    // Write the snapshot. Existing snapshots are never touched.
-    const snapAbs = join(staging, namespace, "data", snapshotDir);
-    let bytes = 0;
-    for (const f of files) {
-      const dest = join(snapAbs, f.rel);
-      mkdirSync(dirname(dest), { recursive: true });
-      cpSync(f.abs, dest); // f.abs are concrete files (symlinks already excluded by the walk)
-      bytes += f.bytes;
+    // Compare before writing/staging. Old expanded snapshots have no manifest and
+    // naturally cause the first archive snapshot to be created.
+    const prev = await latestSnapshot(staging, namespace, authHeader, secrets);
+    if (prev) {
+      const raw = await git(
+        ["show", `HEAD:${namespace}/data/${prev}/${MANIFEST_FILENAME}`],
+        { cwd: staging, authHeader, secrets },
+      ).catch(() => "");
+      const previous = parseUploadArchiveManifest(raw);
+      if (previous?.contentHash === archive.manifest.contentHash) {
+        const head = (await git(["rev-parse", "HEAD"], { cwd: staging, authHeader, secrets })).trim();
+        return {
+          commit: head,
+          filesChanged: 0,
+          sourceFileCount: archive.manifest.sourceFileCount,
+          sourceBytes: archive.manifest.sourceBytes,
+          archiveBytes: previous.archiveBytes,
+          skipped: true,
+          path: `${namespace}/data/${prev}`,
+        };
+      }
     }
 
-    // Stage only the namespace pathspec; assert nothing escaped.
-    await git(["add", "-A", "--", namespace], { cwd: staging, authHeader, secrets });
+    // Write two files regardless of how many source files the workspace contains.
+    // Existing snapshots are never touched.
+    const snapAbs = join(staging, namespace, "data", snapshotDir);
+    mkdirSync(snapAbs, { recursive: true });
+    copyFileSync(archive.archivePath, join(snapAbs, ARCHIVE_FILENAME));
+    writeFileSync(join(snapAbs, MANIFEST_FILENAME), serializeUploadArchiveManifest(archive.manifest), { mode: 0o600 });
+
+    // Stage only the two concrete files. A directory pathspec outside the original
+    // sparse cone can be treated as skip-worktree even after extending the cone;
+    // concrete file pathspecs are unambiguous. -f also prevents a remote .gitignore
+    // from suppressing the archive suffix.
+    await git(["add", "-f", "--sparse", "--", `${snapPath}/${ARCHIVE_FILENAME}`, `${snapPath}/${MANIFEST_FILENAME}`], {
+      cwd: staging,
+      authHeader,
+      secrets,
+    });
     const staged = (await git(["diff", "--cached", "--name-only"], { cwd: staging, authHeader, secrets }))
       .split("\n")
       .map((s) => s.trim())
@@ -294,24 +328,6 @@ export async function pushSubset(params: PushSubsetParams): Promise<PushSubsetRe
     const escaped = staged.find((p) => p !== namespace && !p.startsWith(`${namespace}/`));
     if (escaped) {
       throw new GitUploadError("git-failed", `internal: staged path escaped namespace: ${escaped}`);
-    }
-
-    // Idempotency: identical content to the LATEST existing snapshot → skip.
-    // Compared by blob oid + relative path (git ls-files vs ls-tree), so it is
-    // content-exact and needs no blobs fetched.
-    const prev = await latestSnapshot(staging, namespace, authHeader, secrets);
-    if (prev) {
-      const stagedSet = normalizeLsFiles(
-        await git(["ls-files", "-s", "--", snapPath], { cwd: staging, authHeader, secrets }),
-        `${snapPath}/`,
-      );
-      const prevSet = normalizeLsTree(
-        await git(["ls-tree", "-r", `HEAD:${namespace}/data/${prev}`], { cwd: staging, authHeader, secrets }),
-      );
-      if (setsEqual(stagedSet, prevSet)) {
-        const head = (await git(["rev-parse", "HEAD"], { cwd: staging, authHeader, secrets })).trim();
-        return { commit: head, filesChanged: 0, bytes, skipped: true, path: `${namespace}/data/${prev}` };
-      }
     }
 
     await git(
@@ -330,7 +346,15 @@ export async function pushSubset(params: PushSubsetParams): Promise<PushSubsetRe
     await pushWithBackoff({ staging, branch, namespace, authHeader, secrets, maxAttempts, sleep });
 
     const commit = (await git(["rev-parse", "HEAD"], { cwd: staging, authHeader, secrets })).trim();
-    return { commit, filesChanged: staged.length, bytes, skipped: false, path: snapPath };
+    return {
+      commit,
+      filesChanged: staged.length,
+      sourceFileCount: archive.manifest.sourceFileCount,
+      sourceBytes: archive.manifest.sourceBytes,
+      archiveBytes: archive.manifest.archiveBytes,
+      skipped: false,
+      path: snapPath,
+    };
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
@@ -354,31 +378,6 @@ async function latestSnapshot(
   return snaps.length ? snaps[snaps.length - 1]! : null;
 }
 
-/** `git ls-files -s` lines → set of "oid path" with `prefix` stripped from path. */
-function normalizeLsFiles(out: string, prefix: string): Set<string> {
-  const set = new Set<string>();
-  for (const line of out.split("\n")) {
-    const m = /^\d+ ([0-9a-f]{40,}) \d\t(.+)$/.exec(line.trim());
-    if (m) set.add(`${m[1]} ${m[2]!.startsWith(prefix) ? m[2]!.slice(prefix.length) : m[2]}`);
-  }
-  return set;
-}
-
-/** `git ls-tree -r` lines → set of "oid path". */
-function normalizeLsTree(out: string): Set<string> {
-  const set = new Set<string>();
-  for (const line of out.split("\n")) {
-    const m = /^\d+ blob ([0-9a-f]{40,})\t(.+)$/.exec(line.trim());
-    if (m) set.add(`${m[1]} ${m[2]}`);
-  }
-  return set;
-}
-
-function setsEqual(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const x of a) if (!b.has(x)) return false;
-  return true;
-}
 
 async function branchExistsOnRemote(
   staging: string,
