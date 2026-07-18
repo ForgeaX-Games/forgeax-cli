@@ -50,8 +50,10 @@ describe("namespace", () => {
   });
 });
 
-describe("loadUploadConfig fail-fast", () => {
-  test("no env token → falls back to the built-in shared token", () => {
+describe("loadUploadConfig", () => {
+  test("no env token → falls back to the built-in shared default", () => {
+    // A built-in shared token ships by default so upload works out of the box;
+    // FORGEAX_UPLOAD_GITHUB_TOKEN overrides it when non-empty.
     const cfg = loadUploadConfig({ projectRoot, env: { FORGEAX_UPLOAD_REPO: "o/r" } as any });
     expect(cfg.token).toBe(DEFAULT_UPLOAD_TOKEN);
     expect(cfg.token.length).toBeGreaterThan(0);
@@ -85,7 +87,7 @@ describe("loadUploadConfig fail-fast", () => {
 });
 
 describe("resolvePlanContext", () => {
-  test("does not require an env token; built-in default keeps tokenConfigured true", () => {
+  test("tokenConfigured reports effective credential availability", () => {
     const ctx = resolvePlanContext({ projectRoot, env: { FORGEAX_UPLOAD_REPO: "o/r" } as any });
     expect(ctx.tokenConfigured).toBe(true);
     const ctx2 = resolvePlanContext({ projectRoot, env: { FORGEAX_UPLOAD_REPO: "o/r", FORGEAX_UPLOAD_GITHUB_TOKEN: "tok" } as any });

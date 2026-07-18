@@ -36,7 +36,6 @@ import {
 import { buildUploadArchive, UploadArchiveError } from "./archive";
 
 export type UploadErrorKind =
-  | "no-token"
   | "no-repo"
   | "secret-detected"
   | "bad-nonce"
@@ -56,7 +55,7 @@ export interface UploadPlan {
   skippedLarge: { rel: string; bytes: number }[];
   secretHits: SecretHit[];
   tokenConfigured: boolean;
-  /** present only when the plan is safe to confirm (token set, no secrets). */
+  /** Present only when an effective credential exists and the plan is safe. */
   nonce?: string;
   summary: string;
 }
@@ -160,7 +159,6 @@ export function planUpload(opts: PlanOpts = {}): UploadPlan | UploadFailure {
   lines.push(`  ${walk.files.length} files, ${fmtBytes(walk.totalBytes)}`);
   if (walk.skippedSymlinks.length) lines.push(`  skipped ${walk.skippedSymlinks.length} symlinked dir(s) (monorepo samples)`);
   if (walk.skippedLarge.length) lines.push(`  skipped ${walk.skippedLarge.length} oversized file(s)`);
-  if (!ctx.tokenConfigured) lines.push(`  ⚠ token not set — add FORGEAX_UPLOAD_GITHUB_TOKEN in Settings → Upload`);
   if (secretHits.length) lines.push(`  ✋ ${secretHits.length} secret(s) detected — upload blocked (see secretHits)`);
   if (walk.files.length === 0) lines.push(`  ⚠ nothing to upload`);
   if (nonce) lines.push(`  → run: /upload confirm ${nonce}`);

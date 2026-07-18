@@ -9,8 +9,8 @@
 //   upload-log                  → tail the last ~10 audit entries                   hasExecute
 //
 // All path/credential resolution lives in src/upload (defaults to
-// FORGEAX_PROJECT_ROOT). The shared token is read from the server process env only —
-// it is never an argument and never returned.
+// FORGEAX_PROJECT_ROOT). A non-empty env token overrides the compiled built-in
+// fallback; neither credential is accepted as an argument or returned.
 
 import type { CommandModule } from "../../src/commands/types";
 import { planUpload, uploadWorkspace, tailUploadLog } from "../../src/upload";

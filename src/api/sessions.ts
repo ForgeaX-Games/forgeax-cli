@@ -471,7 +471,10 @@ export function createSessionsRouter() {
           ? await seamTool.run(args, hostToolRunCtx(builtinCtx))
           : await executeTool(toolName, args, agent.agentContext.tools.list(), agent.agentContext);
       if (out && typeof out === 'object' && !Array.isArray(out) && 'error' in out) {
-        const errMsg = String((out as { error: unknown }).error);
+        const rawErr = (out as { error: unknown }).error;
+        const errMsg = typeof rawErr === 'string' ? rawErr
+          : rawErr instanceof Error ? rawErr.message
+          : JSON.stringify(rawErr);
         // 工具执行返回 error 字段 —— ok=false
         appendToolAudit({ sid, agent: agentPath, tool: toolName, trustTier, allow: true, ok: false, error: errMsg, durationMs: Date.now() - start, ts: start });
         return c.json({ ok: false, error: errMsg });

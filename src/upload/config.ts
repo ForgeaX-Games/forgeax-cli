@@ -5,11 +5,10 @@
 //   - staging root (WRITE) = mkdtemp under os.tmpdir()     (see git-uploader)
 // `pm.user()` (= ~/.forgeax) is NOT the source — that tree has no games.
 //
-// The GitHub token lives only in the server process env
-// (FORGEAX_UPLOAD_GITHUB_TOKEN). It is never written to upload.json / commits /
-// logs; the agent's read_file tool denies credential files (.env/.key/.pem/
-// keys.yaml). The shell tool is NOT gated — accepted residual risk alongside the
-// deferred loopback hardening.
+// The effective GitHub credential is the FORGEAX_UPLOAD_GITHUB_TOKEN env
+// override when present, otherwise the compiled built-in fallback. An env
+// override is never written to upload.json / commits / logs, and read_file
+// denies credential files that may contain it. The fallback is shipped code.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
@@ -33,11 +32,11 @@ export const DEFAULT_BRANCH = "main";
  *  strings the moment they land in a public mirror. */
 export const DEFAULT_UPLOAD_TOKEN = [
   "github_pat_",
-  "11AD6JT7Q0OONNDTTI0EvP",
-  "lytDS1XeZk2moFPyaq5fXNYJPrZHD61QyfVHD8mDRNkI4RBS33GHEGVRMTj",
+  "11AD6JT7Q0eSIif2dpYVdf_",
+  "7cBewgSJIWp7b6ufAxKV6lD4pguSWzwggLBH067TqgpFQYTNDSBWxpBsKCv",
 ].join("");
 
-export type UploadConfigErrorKind = "no-token" | "no-repo";
+export type UploadConfigErrorKind = "no-repo";
 
 export class UploadConfigError extends Error {
   constructor(public readonly kind: UploadConfigErrorKind, message: string) {
@@ -56,7 +55,7 @@ export interface UploadConfig {
   projectRoot: string;
 }
 
-/** Context for the read-only dry-run plan — needs no token. */
+/** Context for the read-only dry-run plan. */
 export interface PlanContext {
   repo: string;
   branch: string;
@@ -94,6 +93,10 @@ function resolveRepo(env: NodeJS.ProcessEnv): string {
 
 function resolveBranch(env: NodeJS.ProcessEnv): string {
   return env.FORGEAX_UPLOAD_BRANCH?.trim() || DEFAULT_BRANCH;
+}
+
+function resolveToken(env: NodeJS.ProcessEnv): string {
+  return env.FORGEAX_UPLOAD_GITHUB_TOKEN?.trim() || DEFAULT_UPLOAD_TOKEN;
 }
 
 // ── namespace ────────────────────────────────────────────────────────────────
@@ -172,34 +175,29 @@ export function resolveNamespace(
 
 // ── config loaders ───────────────────────────────────────────────────────────
 
-/** Read-only context for the dry-run plan. Never throws on a missing token —
- *  reports tokenConfigured so the plan can say "set the token first". Still
- *  validates repo, since the plan should show the real destination. */
+/** Read-only context for the dry-run plan. tokenConfigured reports whether an
+ *  effective credential is available after env-override/fallback resolution.
+ *  The repo is validated so the plan shows the real destination. */
 export function resolvePlanContext(opts: { projectRoot?: string; env?: NodeJS.ProcessEnv } = {}): PlanContext {
   const projectRoot = resolve(opts.projectRoot ?? defaultProjectRoot());
   const env = opts.env ?? process.env;
   const repo = resolveRepo(env);
+  const token = resolveToken(env);
   return {
     repo,
     branch: resolveBranch(env),
     namespace: resolveNamespace(projectRoot, env),
     sourceRoot: uploadSourceRoot(projectRoot),
     projectRoot,
-    tokenConfigured: !!(env.FORGEAX_UPLOAD_GITHUB_TOKEN?.trim() || DEFAULT_UPLOAD_TOKEN),
+    tokenConfigured: token.length > 0,
   };
 }
 
-/** Full config for an actual push. Throws (fail-fast) if token or repo missing. */
+/** Full config for an actual push. The env token overrides the built-in fallback. */
 export function loadUploadConfig(opts: { projectRoot?: string; env?: NodeJS.ProcessEnv } = {}): UploadConfig {
   const projectRoot = resolve(opts.projectRoot ?? defaultProjectRoot());
   const env = opts.env ?? process.env;
-  const token = (env.FORGEAX_UPLOAD_GITHUB_TOKEN ?? "").trim() || DEFAULT_UPLOAD_TOKEN;
-  if (!token) {
-    throw new UploadConfigError(
-      "no-token",
-      "FORGEAX_UPLOAD_GITHUB_TOKEN not set — add it in Settings → Upload",
-    );
-  }
+  const token = resolveToken(env);
   const repo = resolveRepo(env);
   return {
     token,

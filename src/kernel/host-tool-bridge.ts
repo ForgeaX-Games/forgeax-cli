@@ -153,7 +153,11 @@ export function makeInProcessExecuteTool(
       //   工具内 throw 都落此形状)。翻成 throw → 下方 catch 记**唯一**一行 ok:false 审计 +
       //   rethrow → RPC reject → 内核标 isError(而非 ok:true 夹 error,§5 fail-fast)。
       if (out && typeof out === 'object' && !Array.isArray(out) && 'error' in out) {
-        throw new Error(String((out as { error: unknown }).error));
+        const rawErr = (out as { error: unknown }).error;
+        const errMsg = typeof rawErr === 'string' ? rawErr
+          : rawErr instanceof Error ? rawErr.message
+          : JSON.stringify(rawErr);
+        throw new Error(errMsg);
       }
       tt('htb.exec-done', { name, agent: agentPath, ms: Date.now() - start });
       // 工具执行成功 —— allow=true / ok=true。

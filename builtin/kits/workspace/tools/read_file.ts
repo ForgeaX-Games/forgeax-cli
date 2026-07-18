@@ -108,9 +108,9 @@ export default {
       return `Error: reading device/proc paths is not allowed — ${absPath}`;
     }
 
-    // Never let the agent read credential files. The workspace upload token
-    // (FORGEAX_UPLOAD_GITHUB_TOKEN) and LLM keys live in $ROOT/.env; allowing
-    // read_file on a host .env would let a prompt-injected brief exfiltrate them.
+    // Never let the agent read credential files. Upload-token env overrides and
+    // LLM keys may live in $ROOT/.env; allowing read_file on a host .env would
+    // let a prompt-injected brief exfiltrate those file-backed credentials.
     if (isSecretEnvFile(absPath)) {
       return `Error: reading credential/.env files is not allowed — ${absPath}`;
     }

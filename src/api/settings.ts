@@ -178,9 +178,9 @@ export function createSettingsRouter(): Hono {
         LITELLM_PROXY_BASE_URL: env.LITELLM_PROXY_BASE_URL ?? null,
         DEEPSEEK_API_KEY: maskKey(env.DEEPSEEK_API_KEY),
         DEEPSEEK_BASE_URL: env.DEEPSEEK_BASE_URL ?? null,
-        // Workspace upload — token masked (theft hygiene); repo shows the
-        // EFFECTIVE destination (env override or the shared default) so the
-        // drawer always displays where an upload would actually land.
+        // Workspace upload — a masked token represents an env override; null
+        // means no override, so upload uses the compiled built-in fallback. Repo
+        // shows the effective destination (env override or shared default).
         FORGEAX_UPLOAD_GITHUB_TOKEN: maskKey(env.FORGEAX_UPLOAD_GITHUB_TOKEN),
         FORGEAX_UPLOAD_REPO: env.FORGEAX_UPLOAD_REPO?.trim() || DEFAULT_UPLOAD_REPO,
         FORGEAX_UPLOAD_BRANCH: env.FORGEAX_UPLOAD_BRANCH ?? null,

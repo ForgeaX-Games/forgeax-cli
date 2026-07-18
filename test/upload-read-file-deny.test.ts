@@ -1,5 +1,5 @@
 // The agent's read_file must refuse credential/.env files so a prompt-injected
-// brief can't exfiltrate FORGEAX_UPLOAD_GITHUB_TOKEN / ANTHROPIC keys.
+// brief cannot exfiltrate file-backed upload overrides or LLM credentials.
 
 import { describe, expect, test } from "bun:test";
 import { isSecretEnvFile } from "../builtin/kits/workspace/tools/read_file";

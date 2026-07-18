@@ -52,7 +52,7 @@ describe("planUpload (dry-run)", () => {
     expect(p.summary).toContain("/upload confirm");
   });
 
-  test("no env token → built-in default still yields a configured plan with nonce", () => {
+  test("empty token env → built-in token keeps upload configured", () => {
     const p = planUpload({ projectRoot, env: env({ FORGEAX_UPLOAD_GITHUB_TOKEN: "" }) });
     if (!p.ok) throw new Error("unexpected");
     expect(p.tokenConfigured).toBe(true);
