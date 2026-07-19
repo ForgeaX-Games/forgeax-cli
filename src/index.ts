@@ -1,31 +1,29 @@
-// forgeax-cli — package entry (Stage0).
-//
-// Reusable orchestration layer public surface. The product shell can either:
-//   (a) import the high-level seam from here:  `import { createForgeaxApp } from 'forgeax-cli'`
-//   (b) import individual routers/boot helpers via subpaths:
-//       `import { createCliRouter } from 'forgeax-cli/api/cli/chat'`  (enabled by
-//       the `"./*": "./src/*.ts"` export map).
-//
-// 现状(2026-06):产品壳 packages/server/src/main.ts 走 (a) —— `createForgeaxApp(ctx)`
-// 装配全部 /api/* 路由 + boot;(b) 子路径导出仍开放给需要单独拿某个 router/helper 的场景。
-
-export * from './app';
-
-// Boot / lifecycle helpers used by product shells.
-export { initPathManager } from './fs/path-manager';
-export { ensureUserDirDefaults } from './defaults/scaffold';
-export { initSessionManager, getSessionManager } from './core/session-manager';
-export { bootCliProviders } from './cli-providers';
-export { reloadExtensions } from './extensions/registry';
-export { loadBrand, createBrandRouter } from './brand';
-export { getVersion } from '@forgeax/platform-io';
-export { listAllCommands } from './commands/runner';
-
-// WS + watcher primitives the shell wires into Bun.serve.
-export { WsHub, createWsHandler, type WsClientData } from './ws';
-export { FsWatcher, type AssetDiskChangedEvent, type FileChangeEvent, type FsWatcherEvent } from './api/lib/watcher';
-
-// Path helpers.
-export { defaultProjectRoot } from '@forgeax/platform-io';
-export { friendlyPath } from '@forgeax/platform-io';
-export { mp, interfaceDist } from '@forgeax/platform-io';
+/**
+ * @forgeax/cli — self-contained single-agent runtime.
+ *
+ * Wave 0 surface (contract freeze): events (sync hook bus block/modify + 事件目录),
+ * history (EventStore default + ledger fold), inject (§4 injection interfaces),
+ * and the cross-package CONTRACTS the parallel team builds against —
+ *   capability/ (C2 Tool/Slot/Plugin ABI + C8 memory seam),
+ *   provider/   (C4 LLMProvider + stream + usage + errors),
+ *   agent/      (C5 Agent API + loop stages + Terminal reasons),
+ *   context/    (C7 system-prompt slot + cache scope + compaction strategy).
+ * Later waves add the IMPLEMENTATIONS behind these contracts (provider/, context/,
+ * capability host, agent loop, kernel-facade).
+ */
+export * from './events/index';
+export * from './history/index';
+export * from './inject/types';
+export * from './inject/in-process-scheduler';
+export * from './capability/index';
+export * from './provider/index';
+export * from './agent/index';
+export * from './context/index';
+export * from './permission/index';
+// NOTE: `./kernel-facade` (ForgeaxCoreKernel) is intentionally NOT re-exported here.
+// It is the sidecar's internal engine, constructed only by `src/cli/serve.ts` via a
+// relative import. The server-side in-process construction was removed (WS-B), so the
+// facade is demoted out of the public `@forgeax/cli` `.` export. A
+// dependency-cruiser rule (`facade-serve-internal`) keeps any other src/ module from
+// importing it.
+export * from './runtime/index';

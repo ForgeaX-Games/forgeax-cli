@@ -1,3 +1,3 @@
 [test]
-# 单测默认走旧 in-process/provider 路径(内核+sidecar 需真二进制/进程)。见 test/setup.ts。
-preload = ["./test/setup.ts"]
+# 密闭性护栏:把 FORGEAX_CONFIG_DIR 指到临时目录,单测绝不写真实 ~/.forgeax(见 test/preload.ts)。
+preload = ["./test/preload.ts"]

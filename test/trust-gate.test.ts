@@ -1,200 +1,173 @@
-/** 信任闸单测(T-D 三档 allow/ask/deny)。
- *  own:读/写/编辑/委派直放;危险 {exec,network,credential,delete} → ask。
- *  imported:读/委派直放;credential 硬 deny;exec/network → ask;write/delete 路径能解析(内/外)→ ask、解析不出 → deny。 */
-import { describe, expect, test } from 'bun:test';
-import { checkKernelTool, classifyTool } from '../src/kernel/trust-gate';
+/**
+ * 信任门行为(src/cli/trust.ts trustGate + textTrustPrompt):
+ *   - textTrustPrompt:y/yes 接受;n/空(默认 N)拒绝;fail-closed。
+ *   - trustGate:非交互/FORGEAX_SKIP_TRUST/已信任 → 放行且不弹(桩计数=0);
+ *     拒绝 → false 且**不落盘**(拒绝后 isTrusted 仍 false → 不装配的前提成立);
+ *     接受 → true 且落盘(下次不再弹);
+ *     Ink 弹窗抛异常 → 降级纯文本门,绝不放行(P0-1)。
+ */
+import { test, expect, describe, beforeEach, afterEach } from 'bun:test';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { isTrusted, persistTrust, textTrustPrompt, trustGate } from '../src/cli/trust';
 
-describe('classifyTool', () => {
-  test('按子串分类(顺序敏感)', () => {
-    expect(classifyTool('get_secret')).toBe('credential'); // credential 先于 read
-    expect(classifyTool('get_api_key')).toBe('credential');
-    expect(classifyTool('Bash')).toBe('exec');
-    expect(classifyTool('run_command')).toBe('exec');
-    expect(classifyTool('http_get')).toBe('network'); // network 先于 read
-    expect(classifyTool('fetch_url')).toBe('network');
-    expect(classifyTool('delegate_to_subagent')).toBe('delegate');
-    expect(classifyTool('delete_file')).toBe('delete'); // delete 先于 write
-    expect(classifyTool('remove_dir')).toBe('delete');
-    expect(classifyTool('write_file')).toBe('write');
-    expect(classifyTool('edit_file')).toBe('write');
-    expect(classifyTool('read_file')).toBe('read');
-    expect(classifyTool('list_games')).toBe('read');
-    expect(classifyTool('get_active_game')).toBe('read');
-    expect(classifyTool('zzz_unknown')).toBe('other');
+let configDir: string;
+let work: string;
+let prevEnv: string | undefined;
+
+beforeEach(() => {
+  configDir = mkdtempSync(join(tmpdir(), 'fxc-gate-cfg-'));
+  work = mkdtempSync(join(tmpdir(), 'fxc-gate-work-'));
+  prevEnv = process.env.FORGEAX_CONFIG_DIR;
+  process.env.FORGEAX_CONFIG_DIR = configDir;
+});
+
+afterEach(() => {
+  if (prevEnv === undefined) delete process.env.FORGEAX_CONFIG_DIR;
+  else process.env.FORGEAX_CONFIG_DIR = prevEnv;
+  rmSync(configDir, { recursive: true, force: true });
+  rmSync(work, { recursive: true, force: true });
+});
+
+/** 注入假 io 跑 textTrustPrompt:answer 预写进 input 流。 */
+async function promptWith(answer: string): Promise<{ ok: boolean; out: string }> {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let out = '';
+  output.on('data', (c: Buffer) => (out += c.toString()));
+  input.write(`${answer}\n`);
+  const ok = await textTrustPrompt(work, { input, output });
+  return { ok, out };
+}
+
+describe('textTrustPrompt (readline y/N fallback gate)', () => {
+  test("'y' accepts", async () => {
+    expect((await promptWith('y')).ok).toBe(true);
+  });
+  test("'YES' accepts (case-insensitive)", async () => {
+    expect((await promptWith('YES')).ok).toBe(true);
+  });
+  test("'n' rejects", async () => {
+    expect((await promptWith('n')).ok).toBe(false);
+  });
+  test('empty answer rejects (default N, fail-closed)', async () => {
+    expect((await promptWith('')).ok).toBe(false);
+  });
+  test('prompt prints title + cwd + body copy', async () => {
+    const { out } = await promptWith('n');
+    expect(out).toContain('Do you trust');
+    expect(out).toContain('[y/N]');
   });
 });
 
-describe('checkKernelTool — own (确认危险,直放读写编辑委派)', () => {
-  test('读/写/编辑/委派 → allow', () => {
-    expect(checkKernelTool('own', 'read_file').outcome).toBe('allow');
-    expect(checkKernelTool('own', 'write_file').outcome).toBe('allow'); // 写代码是 Forge 主循环,不打断
-    expect(checkKernelTool('own', 'edit_file').outcome).toBe('allow');
-    expect(checkKernelTool('own', 'write_file', { args: { path: '/etc/passwd' } }).outcome).toBe('allow');
-  });
-
-  test('exec/network 直放(own 主循环 shell/curl 不打断)', () => {
-    expect(checkKernelTool('own', 'Bash').outcome).toBe('allow');
-    expect(checkKernelTool('own', 'http_get').outcome).toBe('allow');
-    expect(checkKernelTool('own', 'shell').outcome).toBe('allow');
-  });
-
-  test('只有真正危险 {credential,delete} → ask', () => {
-    expect(checkKernelTool('own', 'get_secret').outcome).toBe('ask');
-    expect(checkKernelTool('own', 'delete_file').outcome).toBe('ask');
-  });
-
-  test('ask/deny 的 allow 字段为 false(向后兼容 fail-closed)', () => {
-    const d = checkKernelTool('own', 'get_secret');
-    expect(d.outcome).toBe('ask');
-    expect(d.allow).toBe(false); // 旧调用方只看 .allow → 不会误放行
-    expect(d.capability).toBe('credential');
-  });
-});
-
-describe('checkKernelTool — imported (凭据硬拒,危险 ask,写删作用域)', () => {
-  test('读/委派 → allow', () => {
-    expect(checkKernelTool('imported', 'read_file').outcome).toBe('allow');
-    expect(checkKernelTool('imported', 'list_games').outcome).toBe('allow');
-    expect(checkKernelTool('imported', 'delegate_to_subagent').outcome).toBe('allow');
-  });
-
-  test('credential → deny(硬拒,绝不给不可信 pack 真凭据)', () => {
-    expect(checkKernelTool('imported', 'get_secret').outcome).toBe('deny');
-    expect(checkKernelTool('imported', 'get_api_key').outcome).toBe('deny');
-  });
-
-  test('exec/network → ask', () => {
-    expect(checkKernelTool('imported', 'Bash').outcome).toBe('ask');
-    expect(checkKernelTool('imported', 'run_command').outcome).toBe('ask');
-    expect(checkKernelTool('imported', 'fetch_url').outcome).toBe('ask');
-    expect(checkKernelTool('imported', 'http_get').outcome).toBe('ask');
-  });
-
-  test('write/delete 无路径上下文 → deny(fail-closed)', () => {
-    expect(checkKernelTool('imported', 'write_file').outcome).toBe('deny');
-    expect(checkKernelTool('imported', 'delete_file').outcome).toBe('deny');
-  });
-
-  test('未命中能力分类的工具(other)→ ask(交人判断,非静默放行,R2-09)', () => {
-    // 注:"frobnicate" 含子串 "cat" → classifyTool 归 read(非 other),不是合格探针;
-    // 用 "zorp"/"zzz_unknown" 这类真正命不中任何能力子串的名字。
-    // imported 上叫不出名字的工具**不静默放行**:弹卡交用户判断(§8/§9),而非 deny 死路。
-    const d = checkKernelTool('imported', 'zorp');
-    expect(d.outcome).toBe('ask');
-    expect(d.outcome).not.toBe('allow');
-    expect(d.allow).toBe(false); // ask 仍 allow:false → 旧只看 .allow 的调用方不会误自动放行
-    expect(checkKernelTool('imported', 'zzz_unknown').outcome).toBe('ask');
-  });
-});
-
-describe('缺 trustTier → fail-closed(当 imported)', () => {
-  test('危险/写 → 非 allow;读 → allow', () => {
-    expect(checkKernelTool(undefined, 'Bash').outcome).toBe('ask'); // imported exec
-    expect(checkKernelTool(undefined, 'get_secret').outcome).toBe('deny'); // imported credential
-    expect(checkKernelTool(undefined, 'read_file').outcome).toBe('allow');
-    expect(checkKernelTool(undefined, 'write_file').outcome).toBe('deny'); // imported write 无路径
-  });
-
-  test('未知工具(other)缺 trustTier → ask(回退 imported,交人判断 R2-09)', () => {
-    const d = checkKernelTool(undefined, 'zorp');
-    expect(d.outcome).toBe('ask');
-    expect(d.allow).toBe(false); // 非自动放行
-  });
-});
-
-describe('own 不回归(other 仍直放,读写执行不被收窄)', () => {
-  test('own 的 other(zorp)仍 → allow', () => {
-    const d = checkKernelTool('own', 'zorp');
-    expect(d.outcome).toBe('allow');
-    expect(d.allow).toBe(true);
-  });
-
-  test('own 读/写/执行仍直放', () => {
-    expect(checkKernelTool('own', 'read_file').outcome).toBe('allow');
-    expect(checkKernelTool('own', 'write_file').outcome).toBe('allow');
-    expect(checkKernelTool('own', 'Bash').outcome).toBe('allow');
-  });
-
-  test('own 凭据/删除仍 → ask', () => {
-    expect(checkKernelTool('own', 'get_secret').outcome).toBe('ask');
-    expect(checkKernelTool('own', 'delete_file').outcome).toBe('ask');
-  });
-});
-
-describe('R2-08 imported write/delete-scope(路径能解析→ask 目录内/外 / 解析不出→deny)', () => {
-  const projectRoot = '/tmp/forgeax-ws';
-  const activeGame = 'snake';
-
-  test('写在激活游戏目录内 → ask(确认)', () => {
-    const d = checkKernelTool('imported', 'write_file', {
-      args: { path: '.forgeax/games/snake/src/main.ts' },
-      projectRoot,
-      activeGame,
+describe('trustGate', () => {
+  test('non-interactive → pass without prompting (cc -p semantics)', async () => {
+    let calls = 0;
+    const ok = await trustGate({
+      cwd: work,
+      interactive: false,
+      wantTui: false,
+      prompt: async () => ((calls++), true),
+      env: {},
     });
-    expect(d.outcome).toBe('ask');
+    expect(ok).toBe(true);
+    expect(calls).toBe(0);
+    expect(isTrusted(work)).toBe(false); // 跳过 ≠ 信任落盘
   });
 
-  test('删在激活游戏目录内 → ask(确认)', () => {
-    const d = checkKernelTool('imported', 'delete_file', {
-      args: { path: '.forgeax/games/snake/src/old.ts' },
-      projectRoot,
-      activeGame,
+  test('FORGEAX_SKIP_TRUST=1 → pass without prompting (escape hatch)', async () => {
+    let calls = 0;
+    const ok = await trustGate({
+      cwd: work,
+      interactive: true,
+      wantTui: false,
+      prompt: async () => ((calls++), true),
+      env: { FORGEAX_SKIP_TRUST: '1' },
     });
-    expect(d.outcome).toBe('ask');
+    expect(ok).toBe(true);
+    expect(calls).toBe(0);
   });
 
-  // 037-A:目录外从 deny 改 ask —— 路径能解析出具体落点就弹卡交人兜(不再无回退死路 deny)。
-  test('写到 games/** 之外 → ask(弹卡显目标路径,人来兜)', () => {
-    const d = checkKernelTool('imported', 'write_file', {
-      args: { path: 'src/secret.ts' },
-      projectRoot,
-      activeGame,
+  test('already trusted (incl. via ancestor) → pass without prompting', async () => {
+    persistTrust(work);
+    const sub = join(work, 'sub');
+    mkdirSync(sub, { recursive: true });
+    let calls = 0;
+    const ok = await trustGate({
+      cwd: sub,
+      interactive: true,
+      wantTui: true,
+      dialog: async () => ((calls++), true),
+      env: {},
     });
-    expect(d.outcome).toBe('ask');
-    expect(d.allow).toBe(false); // ask 仍 fail-closed,不自动放行
-    expect(d.reason).toContain('OUTSIDE'); // 卡片摘要标明越界
+    expect(ok).toBe(true);
+    expect(calls).toBe(0);
   });
 
-  test('写到另一个(非激活)游戏目录 → ask(越界,弹卡)', () => {
-    const d = checkKernelTool('imported', 'write_file', {
-      args: { path: '.forgeax/games/other/src/main.ts' },
-      projectRoot,
-      activeGame,
+  test('reject → false and NOT persisted (caller exits before any assembly)', async () => {
+    const ok = await trustGate({
+      cwd: work,
+      interactive: true,
+      wantTui: false,
+      prompt: async () => false,
+      env: {},
     });
-    expect(d.outcome).toBe('ask');
-    expect(d.reason).toContain('OUTSIDE');
+    expect(ok).toBe(false);
+    expect(isTrusted(work)).toBe(false); // Esc/拒绝不落盘
   });
 
-  test('路径穿越越界(snake-evil)→ ask(解析后落点暴露在卡片,人来判)', () => {
-    const d = checkKernelTool('imported', 'write_file', {
-      args: { path: '.forgeax/games/snake/../snake-evil/x.ts' },
-      projectRoot,
-      activeGame,
+  test('accept → true and persisted (no re-prompt on next run)', async () => {
+    let calls = 0;
+    const ok = await trustGate({
+      cwd: work,
+      interactive: true,
+      wantTui: false,
+      prompt: async () => ((calls++), true),
+      env: {},
     });
-    expect(d.outcome).toBe('ask');
-    // 卡片如实显示解析后的绝对落点(snake-evil),不被 `..` 蒙混。
-    expect(d.reason).toContain('snake-evil');
-  });
-
-  test('无 activeGame → 限定到 games 根下任一游戏(ask)', () => {
-    const d = checkKernelTool('imported', 'write_file', {
-      args: { path: '.forgeax/games/anything/x.ts' },
-      projectRoot,
+    expect(ok).toBe(true);
+    expect(calls).toBe(1);
+    expect(isTrusted(work)).toBe(true);
+    // 第二次进程:已信任 → 不再弹。
+    const again = await trustGate({
+      cwd: work,
+      interactive: true,
+      wantTui: false,
+      prompt: async () => ((calls++), true),
+      env: {},
     });
-    expect(d.outcome).toBe('ask');
+    expect(again).toBe(true);
+    expect(calls).toBe(1);
   });
 
-  test('缺 projectRoot 或缺路径 → fail-closed(deny,无法证明目标)', () => {
-    expect(checkKernelTool('imported', 'write_file', { args: { path: '.forgeax/games/snake/x.ts' } }).outcome).toBe('deny');
-    expect(checkKernelTool('imported', 'write_file', { projectRoot, activeGame }).outcome).toBe('deny');
+  test('TUI dialog throws → degrade to text prompt, never fail-open (P0-1)', async () => {
+    let promptCalls = 0;
+    const rejected = await trustGate({
+      cwd: work,
+      interactive: true,
+      wantTui: true,
+      dialog: async () => {
+        throw new Error('ink exploded');
+      },
+      prompt: async () => ((promptCalls++), false),
+      env: {},
+    });
+    expect(rejected).toBe(false); // 弹窗崩 ≠ 放行
+    expect(promptCalls).toBe(1);
+    expect(isTrusted(work)).toBe(false);
   });
-});
 
-describe('委派/编排原语始终放行(含 imported)', () => {
-  test('delegate/list 原语 → allow', () => {
-    expect(checkKernelTool('imported', 'delegate_to_subagent').outcome).toBe('allow');
-    expect(checkKernelTool('imported', 'list_subagents').outcome).toBe('allow');
-    expect(checkKernelTool('imported', 'list_agents').outcome).toBe('allow');
-    expect(checkKernelTool(undefined, 'delegate_to_subagent').outcome).toBe('allow');
+  test('TUI dialog accepts → persisted', async () => {
+    const ok = await trustGate({
+      cwd: work,
+      interactive: true,
+      wantTui: true,
+      dialog: async () => true,
+      env: {},
+    });
+    expect(ok).toBe(true);
+    expect(isTrusted(work)).toBe(true);
   });
 });

@@ -1,95 +1,118 @@
-/**
- * forgeax-cli 编排层依赖铁律(dependency-cruiser)。
- *
- * 心智:`forgeax-cli` 是「可独立拆出的编排层」。依赖倒置后它**只**允许依赖
- *   - `@forgeax/agent-runtime`(运行时契约)
- *   - `@forgeax/types`(zod schema SSOT)
- *   - package.json 里声明的第三方依赖(hono / zod / yaml / sharp / chokidar /
- *     minimatch / @google/genai / @ag-ui/core 等)+ node 内置。
- *
- * **禁止**反向依赖任何业务/内核宿主包,否则它就拆不出去了:
- *   - `@forgeax/forgeax-core`、`@forgeax/server`、`@forgeax/interface`、
- *     `@forgeax/studio`(以及经相对路径 `../../{server,interface,...}` 偷摸引用);
- *   - 任何内核适配 / CC SDK(`@anthropic-ai/*`、`*claude-code-sdk*`)——内核细节
- *     由宿主经 `createForgeaxApp` 注入,编排层不直接 bind 具体 driver。
- *
- * 与 packages/editor/.dependency-cruiser.cjs 同源写法;工具同为 dependency-cruiser。
- * 跑法:`bun run lint:boundaries`(见 package.json scripts)。
- */
 /** @type {import('dependency-cruiser').IConfiguration} */
+//
+// Boundary lint for forgeax-core (@forgeax/cli).
+//
+// 设计铁律: 内核本体 core 不许 import 任何外部内核适配,也不许 import
+// 编排层 @forgeax/orchestrator。core/src 只认:
+//   - @forgeax/agent-runtime (AgentKernel 契约) + 子路径
+//   - @forgeax/types (共享 DTO) + 子路径
+//   - 自身相对路径 (./ ../)
+//   - node: builtins + 已声明的第三方运行时依赖 (package.json dependencies)
+//
+// 这份 .dependency-cruiser.cjs 把上面约定固化进 CI。它与
+// scripts/check-core-boundaries.mjs (轻量 regex 兜底, 无需安装 depcruise) 表达
+// 同一组不变量;depcruise 解析真实模块图,覆盖动态 import / 间接路径,作为强制源。
+//
+// 运行: bun run lint:boundaries  (= depcruise -c .dependency-cruiser.cjs src)
+//
 module.exports = {
   forbidden: [
     {
-      name: 'cli-no-host-packages',
+      name: 'core-cannot-import-kernel-adaptor',
       severity: 'error',
       comment:
-        '编排层不得依赖业务/内核宿主包(forgeax-core/server/interface/studio),' +
-        '否则无法独立拆出;宿主由 createForgeaxApp 注入。',
-      from: { path: '^src/' },
+        '内核本体禁止 import 任何外部内核适配或其 SDK。' +
+        'provider 层用 fetch 直连,绝不引入 @anthropic-ai/* / @openai/* 依赖,' +
+        '更不许依赖 *-kernel / kernel-adaptors 这类宿主适配。',
+      from: {
+        path: '^src/',
+      },
       to: {
-        path: '@forgeax/(forgeax-core|server|interface|studio)(/|$)',
+        path: [
+          '@anthropic-ai/',
+          '@openai/',
+          'bc-kernel',
+          'codex-kernel',
+          'kernel-adaptors',
+        ],
       },
     },
     {
-      name: 'cli-no-host-relative',
+      name: 'core-cannot-import-orchestration',
       severity: 'error',
       comment:
-        '禁止用相对路径绕过包名直接 reach into 兄弟宿主包源码' +
-        '(../../server、../../interface、../../studio、../../forgeax-core)。',
-      from: { path: '^src/' },
+        '内核本体禁止 import 编排层/宿主 (@forgeax/orchestrator / server / interface / studio)。' +
+        '依赖方向只能 host → core,反向会倒置分层。',
+      from: {
+        path: '^src/',
+      },
       to: {
-        path: '(^|/)\\.\\./\\.\\./(server|interface|studio|forgeax-core)/',
+        path: [
+          '^@forgeax/orchestrator($|/)',
+          '@forgeax/server',
+          '@forgeax/interface',
+          '@forgeax/studio',
+        ],
       },
     },
     {
-      name: 'cli-no-kernel-sdk',
+      name: 'core-mechanism-no-otel-sdk',
       severity: 'error',
       comment:
-        '编排层不直接绑定具体内核适配 / CC SDK(@anthropic-ai/*、claude-code-sdk);' +
-        '内核细节由宿主注入。',
-      from: { path: '^src/' },
+        '机制层禁止 import OTel SDK / OTLP exporter / consola —— 只 HOST(src/cli/、src/tui/)可用。' +
+        '机制层只认 @opentelemetry/api(zero-dep noop 契约),实现经注入缝下发(v3/B 档)。',
+      from: {
+        path: '^src/',
+        pathNot: ['^src/cli/', '^src/tui/'],
+      },
       to: {
-        path: '(@anthropic-ai/|claude-code-sdk)',
+        path: [
+          '^@opentelemetry/sdk',
+          '^@opentelemetry/exporter',
+          '^@opentelemetry/resources',
+          '^@opentelemetry/semantic-conventions',
+          '^consola($|/)',
+        ],
       },
     },
     {
-      name: 'cli-allowed-forgeax-only',
+      name: 'facade-serve-internal',
       severity: 'error',
       comment:
-        '@forgeax/* 范围内只允许 agent-runtime(契约)、types(schema)与 ' +
-        'platform-io(后L1 文件/IO 基建,R1 抽出,cli 后L2→后L1 合法下行);' +
-        '其余 @forgeax 包一律禁止。注意:@forgeax/engine-*、@forgeax/game-types ' +
-        '若仅出现在 prompt 模板字符串里(非真实 import)不会被算作依赖。',
-      from: { path: '^src/' },
+        'kernel-facade (ForgeaxCoreKernel) 是 sidecar 的内部引擎,只许 src/cli/serve.ts ' +
+        '相对 import。它已从公共包导出降级 (WS-B):其他 src/ 模块不得 import kernel-facade,' +
+        '内核的对外消费方应走 @forgeax/agent-runtime 契约 + sidecar --serve,而非进程内 facade。',
+      from: {
+        path: '^src/',
+        pathNot: ['^src/cli/serve\\.ts$', '^src/kernel-facade/'],
+      },
       to: {
-        path: '^@forgeax/',
-        pathNot: '^@forgeax/(agent-runtime|types|platform-io)(/|$)',
+        path: '^src/kernel-facade/',
       },
     },
     {
-      // 编排层内部禁循环依赖(阻断级)。历史遗留的两处 cycle 已清:
-      //   - skills↔plugins↔tools:plugins/registry 不再 import event-bridge,
-      //     改由组合根(app boot)经 onPluginsReloaded 钩子接线(registry 成 sink)。
-      //   - core↔kernel session 链:单例访问器下沉 session-registry.ts(对类仅
-      //     import type,不计边),compose-turn-request 经 registry 取单例。
-      // 注:image-gateway 内部 cycle 属在途 image-gen 重构(去 character 耦合),
-      // 由该重构自行收口。
       name: 'no-circular',
       severity: 'error',
-      comment: '编排层内部禁止循环依赖(运行时环)。',
-      from: { path: '^src/' },
-      to: { circular: true },
+      comment: 'core/src 内部不允许出现循环依赖。',
+      from: {
+        path: '^src/',
+      },
+      to: {
+        circular: true,
+      },
     },
   ],
   options: {
+    // 不用 includeOnly: 它会把指向 src/ 外的边 (正是被禁的那些) 从依赖图里
+    // 过滤掉,规则就永远命不中。改为不跟进外部模块 (doNotFollow),但保留这些
+    // 出边,让 from:^src/ + to:<禁用 path> 的规则能命中其 resolved 路径/specifier。
     doNotFollow: {
-      path: ['node_modules', 'dist', 'build', '.vite'],
+      path: ['node_modules', 'dist', '.vite'],
     },
-    // 只审 cli 自己的源码。
-    includeOnly: '^src/',
-    tsPreCompilationDeps: false,
     tsConfig: {
       fileName: 'tsconfig.json',
     },
+    // 跟随 TS 类型 import,确保 `import type` 也受边界约束。
+    tsPreCompilationDeps: true,
   },
 };

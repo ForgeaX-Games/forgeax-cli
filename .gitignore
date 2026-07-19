@@ -1,8 +1,16 @@
+# Secrets — defense-in-depth, do not rely solely on the repo-root .gitignore
+.env
+.env.*
+!.env.example
+*.key
+key.txt
+llm_key.json
+
+scripts/whistle-debug.sh
+
+# Standalone repo ignores (previously covered by the super-repo root .gitignore)
 node_modules/
 dist/
-.vite/
 *.log
 .DS_Store
-.env
-.env.local
-docs/agentic-design-patterns
+.forgeax/

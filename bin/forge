@@ -1,2 +1,0 @@
-#!/usr/bin/env bun
-import('../src/cli/forge-run.ts').then((m) => m.runForgeRun(process.argv.slice(2))).then((code) => process.exit(code ?? 0));
