@@ -32,7 +32,7 @@ function read(rel: string): string {
   return readFileSync(join(cwd, rel), "utf-8");
 }
 function mgr(): CheckpointManager {
-  return new CheckpointManager({ cwd, sessionId: SID, sessionsDir });
+  return new CheckpointManager({ cwd, sessionId: SID, sessionsDir, enableFileSnapshots: true });
 }
 function ok<T>(r: T | { error: string }): T {
   if (r && typeof r === "object" && "error" in r) throw new Error(`unexpected error: ${(r as { error: string }).error}`);
@@ -40,6 +40,13 @@ function ok<T>(r: T | { error: string }): T {
 }
 
 describe("CheckpointManager", () => {
+  test("file snapshots default off (Studio owns per-game rewind)", () => {
+    const m = new CheckpointManager({ cwd, sessionId: SID, sessionsDir });
+    expect(m.hasStore()).toBe(false);
+    m.snapshotForMessage("m1");
+    expect(m.list().every((e) => !e.hasCode)).toBe(true);
+  });
+
   test("snapshotForMessage + list:每条消息一锚点,标 hasCode", () => {
     write("a.ts", "v1\n");
     const m = mgr();
@@ -136,7 +143,7 @@ describe("CheckpointManager", () => {
     const { boundaryId } = ok(await m1.rewind("m1"));
 
     // 新实例(模拟重启)读同一索引
-    const m2 = new CheckpointManager({ cwd, sessionId: SID, sessionsDir });
+    const m2 = new CheckpointManager({ cwd, sessionId: SID, sessionsDir, enableFileSnapshots: true });
     expect(m2.list().map((e) => e.msgId)).toEqual(["m1", "m2"]);
     expect(m2.pending()?.boundaryId).toBe(boundaryId);
     // 重建后 cancel 仍可用(Redo 落点持久)

@@ -132,11 +132,12 @@ export function createAgentDriver(opts: DriverOptions, initial: HostContext): Ag
   /** 回退点 reseed:下一轮 driveTurn 用这份历史播种一次,然后清空。 */
   let pendingHistory: ProviderMessage[] | null = null;
 
-  // ── 回退点状态机:文件侧 manager(落 <cwd>/.forgeax/checkpoints + 会话 checkpoints.jsonl)──
+  // ── rewind points · conversation side always on; file CAS is opt-in (default off) ──
   const checkpoints = new CheckpointManager({
     cwd: process.cwd(),
     sessionId: opts.sessionId ?? 'default',
     sessionsDir: opts.sessionsDir ?? defaultSessionsDir(),
+    // Studio owns per-game file rewind; leave CLI CAS off unless FORGEAX_CLI_FILE_CHECKPOINT=1.
   });
   /** 当前挂起态的「对话侧」快照(messages 由 Repl 持有传入,convo 由 driver 持有)。
    *  boundaryId 串联文件侧 manager.pending();null = 无挂起。 */

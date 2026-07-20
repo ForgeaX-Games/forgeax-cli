@@ -85,12 +85,27 @@ export type RewindResult =
   | { error: string };
 
 export interface CheckpointManagerOptions {
-  /** 工作目录 = 快照目标。一般是 process.cwd()。 */
+  /** Working directory = snapshot target. Usually process.cwd(). */
   cwd: string;
-  /** 会话 id(= WAL 子目录名),索引落该会话目录下。 */
+  /** Session id (= WAL subdirectory name); index lives under that session dir. */
   sessionId: string;
-  /** 会话 WAL 根目录(与 resume-fold.defaultSessionsDir 同源)。 */
+  /** Session WAL root (same source as resume-fold.defaultSessionsDir). */
   sessionsDir: string;
+  /**
+   * Opt-in cwd-wide CAS file snapshots (writes `<cwd>/.forgeax/checkpoints`).
+   * Default OFF: Studio already owns per-game rewind via orchestrator
+   * (`.forgeax/state/checkpoints/<slug>/`). Enabling CLI snapshots at a monorepo
+   * root previously produced multi-GB stores. Tests that need file rewind pass
+   * `true`; operators may also set `FORGEAX_CLI_FILE_CHECKPOINT=1`.
+   */
+  enableFileSnapshots?: boolean;
+}
+
+/** Resolve whether to open the CAS file store. Explicit option wins; else env opt-in. */
+export function resolveCliFileSnapshotsEnabled(opts: Pick<CheckpointManagerOptions, "enableFileSnapshots">): boolean {
+  if (opts.enableFileSnapshots === true) return true;
+  if (opts.enableFileSnapshots === false) return false;
+  return process.env.FORGEAX_CLI_FILE_CHECKPOINT === "1";
 }
 
 export class CheckpointManager {
@@ -117,17 +132,17 @@ export class CheckpointManager {
 
   constructor(opts: CheckpointManagerOptions) {
     this.indexFile = `${opts.sessionsDir}/${opts.sessionId}/checkpoints.jsonl`;
-    // 目标 = cwd(总是存在);storeRoot 落 <cwd>/.forgeax/checkpoints。
-    //   构造期试探可写性,失败则 store=null → 优雅降级(文件回退不可用,对话回退照常)。
+    // File store is opt-in (see enableFileSnapshots). When off → store=null →
+    // conversation rewind still works; hasCode stays false.
     let store: SnapshotStore | null = null;
     let targetDir: string | null = null;
     try {
-      if (existsSync(opts.cwd)) {
+      if (existsSync(opts.cwd) && resolveCliFileSnapshotsEnabled(opts)) {
         targetDir = opts.cwd;
         store = new SnapshotStore(`${opts.cwd}/.forgeax/checkpoints`);
       }
     } catch {
-      /* cwd 不可用 → 纯对话模式 */
+      /* cwd unavailable → conversation-only mode */
     }
     this.store = store;
     this.targetDir = targetDir;

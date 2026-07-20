@@ -28,8 +28,10 @@ beforeEach(() => {
   prevCwd = process.cwd();
   tmp = mkdtempSync(join(tmpdir(), 'repl-cp-'));
   process.chdir(tmp);
+  process.env.FORGEAX_CLI_FILE_CHECKPOINT = '1';
 });
 afterEach(() => {
+  delete process.env.FORGEAX_CLI_FILE_CHECKPOINT;
   process.chdir(prevCwd);
   rmSync(tmp, { recursive: true, force: true });
 });
