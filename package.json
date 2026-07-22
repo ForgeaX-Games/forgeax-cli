@@ -35,6 +35,7 @@
     "e2e": "bun test/e2e-real.ts && bun test test/mcp && bun test/plan-serve-e2e.ts && bun test/subagent-serve-e2e.ts"
   },
   "dependencies": {
+    "zod": "^3.25.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
     "@opentelemetry/resources": "^2.8.0",
