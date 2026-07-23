@@ -276,13 +276,14 @@ export function createAgentDriver(opts: DriverOptions, initial: HostContext): Ag
             delta?: { text?: string; thinking?: string; partial_json?: string };
           };
           // 上下文占用随请求刷新(对齐 cc),计费累计随 assistant 收尾累加(/cost):
-          //   - message_start:本请求的 prompt 大小已知(usage 带 input/cache),刷新 ctxPromptTokens
-          //     (非累计,取代上一请求值);重置在飞 output 估算。
+          //   - message_start:provider 可能只先给部分 usage（例如仅 input=1、cacheRead 要到收尾才补齐）。
+          //     因而生成期只允许 prompt 基线增长，不能用不完整的小值把上一请求的完整上下文瞬间
+          //     覆盖成 1；assistant 收尾拿到 final usage 后再精确校准（压缩导致的真实下降也在此生效）。
           //   - content_block_delta:累计已流出字符,供 getContextTokens 的 chars/4 估算平滑涨。
           //   - assistant:本消息收尾——usageAcc 逐项累加(计费);ctxPromptTokens 按 final usage 校准;
           //     重置 output 估算,故静默时状态栏 == 纯 input+cache(cc 的上下文占用口径)。
           if (sev?.type === 'message_start') {
-            if (sev.usage) ctxPromptTokens = ctxTokensOf(sev.usage);
+            if (sev.usage) ctxPromptTokens = Math.max(ctxPromptTokens, ctxTokensOf(sev.usage));
             liveOutChars = 0;
           } else if (sev?.type === 'content_block_delta') {
             const d = sev.delta;

@@ -6,7 +6,7 @@
 // `@forgeax/*` workspace source (agent-runtime, types) and leave third-party deps
 // external (installed via package.json `dependencies`).
 import { build } from 'bun';
-import { rmSync } from 'node:fs';
+import { chmodSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
 rmSync('./dist', { recursive: true, force: true });
 
@@ -42,4 +42,15 @@ const res = await build({
 
 for (const l of res.logs) console.log(String(l));
 if (!res.success) process.exit(1);
+
+// Published bin must run on plain Node (npm global install has no Bun).
+// Source keeps `#!/usr/bin/env bun` for local `bun src/cli/main.ts`.
+const cliMain = './dist/cli/main.js';
+const cliSrc = readFileSync(cliMain, 'utf8');
+writeFileSync(
+  cliMain,
+  cliSrc.replace(/^#!\/usr\/bin\/env bun\b/, '#!/usr/bin/env node'),
+);
+chmodSync(cliMain, 0o755);
+
 console.log('[build] @forgeax/cli → dist/ (%d files)', res.outputs.length);

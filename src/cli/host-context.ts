@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import type { AgentContext } from '../agent/types';
+import { DEFAULT_MAIN_MAX_TURNS } from '../agent/agent';
 import type { LLMProvider, ProviderMessage } from '../provider/types';
 import { resolveProviderEnv, resolveProviderFromEnv } from './provider-env';
 import { makeProviderCompactSummarize } from '../context/compaction-llm';
@@ -63,10 +64,12 @@ export const DEFAULT_LEADING = 'You are forgeax-core, a self-contained coding ag
  * 子 agent 走 `DEFAULT_SUBAGENT_MAX_TURNS`(另一个高位兜底,frontmatter 可逐类收紧),
  * 不走这个常量。
  */
-export const DEFAULT_MAIN_MAX_TURNS = ((): number => {
-  const raw = Number(process.env.FORGEAX_MAX_TURNS);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 500;
-})();
+export { DEFAULT_MAIN_MAX_TURNS };
+
+export function resolveMainMaxTurns(raw = process.env.FORGEAX_MAX_TURNS): number {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_MAIN_MAX_TURNS;
+}
 
 /** host-context 装配所需的输入(runCli 从 CliArgs 喂;driver 自造)。 */
 export interface HostContextArgs {
@@ -117,7 +120,9 @@ export function resolveHostProvider(args: { model: string; demo?: boolean }, pro
   if (args.demo || providerOverride) return providerOverride ?? demoProvider();
   const cfg = resolveProviderEnv(args.model);
   if (!cfg.apiKey) {
-    const keyName = cfg.api === 'openai-compat' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+    // openai-compat 家族凭证 OPENAI_* 优先、兜底 ANTHROPIC_*(见 provider-env),故两者皆可。
+    const keyName =
+      cfg.api === 'openai-compat' ? 'OPENAI_API_KEY(或 ANTHROPIC_API_KEY)' : 'ANTHROPIC_API_KEY';
     throw new Error(`${keyName} 未设置(api 家族 ${cfg.api})。设置后重试,或用 --demo 演示 CLI 形态。`);
   }
   return resolveProviderFromEnv(args.model);
@@ -277,7 +282,7 @@ export async function buildHostContext(args: HostContextArgs, providerOverride?:
       leadingSystemText,
       model: args.model,
       tools: [...assembled.tools, ...teamTools],
-      maxTurns: DEFAULT_MAIN_MAX_TURNS,
+      maxTurns: resolveMainMaxTurns(),
     },
     toolContext,
   };

@@ -1,0 +1,14 @@
+.env
+.env.*
+.forgeax/
+src/
+test/
+docs/
+*.ts
+*.tsx
+!dist/**
+tsconfig*.json
+.dependency-cruiser.cjs
+*.tgz
+.DS_Store
+*.log

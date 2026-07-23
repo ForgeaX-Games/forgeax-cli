@@ -24,25 +24,33 @@ const python = Bun.which('python3');
 const hasPython = python != null;
 
 interface Step {
-  send: string;
+  send?: string;
   then_ms?: number;
+  resize?: { rows: number; cols: number };
 }
 interface DriveSpec {
   steps: Step[];
   boot_ms?: number;
   settle_ms?: number;
+  history?: number;
   env?: Record<string, string>;
+  cmd?: string[];
+}
+interface DriveCapture {
+  screen: string;
+  scrollback: string;
+  pyte: boolean;
 }
 
-/** 跑一段脚本化 TUI 交互,返回 ttydrive 打印的 SCREEN 段(可见文本)。 */
-async function drive(spec: DriveSpec, rows = 30, cols = 100): Promise<string> {
+/** 跑一段脚本化 TUI 交互,返回 ttydrive 模拟出的可见屏幕与 normal-buffer scrollback。 */
+async function driveCapture(spec: DriveSpec, rows = 30, cols = 100): Promise<DriveCapture> {
   const dir = mkdtempSync(join(tmpdir(), 'forgeax-ttydrive-'));
   try {
     const stepFile = join(dir, 'step.json');
     writeFileSync(
       stepFile,
       JSON.stringify({
-        cmd: ['bun', 'src/cli/main.ts', '--demo', '--no-memory'],
+        cmd: spec.cmd ?? ['bun', 'src/cli/main.ts', '--demo', '--no-memory'],
         // 隔离会话/记忆到临时目录;清掉 key 证明真免网络;FORGEAX_NO_TUI 必须空(否则不进 TUI)。
         // FORGEAX_SKIP_TRUST=1:跳过首启信任门(CI 逃生口;信任门自身的 PTY 覆盖见下方专项)。
         env: {
@@ -57,6 +65,7 @@ async function drive(spec: DriveSpec, rows = 30, cols = 100): Promise<string> {
         boot_ms: spec.boot_ms ?? 2500,
         steps: spec.steps,
         settle_ms: spec.settle_ms ?? 1200,
+        history: spec.history ?? 0,
       }),
     );
     const proc = Bun.spawn([python!, TTYDRIVE, String(rows), String(cols), stepFile], {
@@ -66,11 +75,20 @@ async function drive(spec: DriveSpec, rows = 30, cols = 100): Promise<string> {
     });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
-    const m = out.match(/==== SCREEN[^\n]*\n([\s\S]*?)\n==== END ====/);
-    return m ? m[1] : out;
+    const screenMatch = out.match(/==== SCREEN[^\n]*\n([\s\S]*?)\n==== END ====/);
+    const historyMatch = out.match(/==== SCROLLBACK[^\n]*\n([\s\S]*?)\n==== END SCROLLBACK ====/);
+    return {
+      screen: screenMatch ? screenMatch[1] : out,
+      scrollback: historyMatch?.[1] ?? '',
+      pyte: /==== SCREEN[^\n]* pyte\)/.test(out),
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+async function drive(spec: DriveSpec, rows = 30, cols = 100): Promise<string> {
+  return (await driveCapture(spec, rows, cols)).screen;
 }
 
 describe.skipIf(!hasPython)('TUI PTY e2e (real Ink TUI under a pseudo-terminal)', () => {
@@ -160,12 +178,76 @@ describe.skipIf(!hasPython)('TUI PTY e2e (real Ink TUI under a pseudo-terminal)'
   );
 
   test(
+    'npm start resize keeps one live input frame and never commits it to normal scrollback',
+    async () => {
+      const longInput =
+        'RESIZE-LIVE-CANARY this is a long input line before resize to make input frame occupy and wrap across rows and expose stale border ghosts';
+      const capture = await driveCapture(
+        {
+          // Regression path for the user report: `npm start -- --demo --no-memory` must load
+          // the patched Ink and survive real SIGWINCH reflow, not only direct `bun src/...`.
+          cmd: [
+            'sh',
+            '-c',
+            "i=1; while [ $i -le 40 ]; do echo NORMAL-HISTORY-CANARY-$i; i=$((i+1)); done; exec npm start -- --demo --no-memory",
+          ],
+          history: 500,
+          steps: [
+            { send: longInput, then_ms: 800 },
+            { resize: { rows: 24, cols: 55 }, then_ms: 900 },
+            { resize: { rows: 18, cols: 42 }, then_ms: 900 },
+            { resize: { rows: 24, cols: 55 }, then_ms: 1200 },
+          ],
+          settle_ms: 800,
+        },
+        30,
+        100,
+      );
+
+      const borderLines = capture.screen
+        .split('\n')
+        .filter(line => line.includes('╭') || line.includes('╰'));
+      expect(borderLines).toHaveLength(2);
+      expect(capture.screen).toContain('RESIZE-LIVE-CANARY');
+      expect(capture.screen).toContain('expose stale border ghosts');
+      // A stale wide frame from the pre-resize 100-column layout would leave the old border length.
+      expect(capture.screen).not.toContain('──────────────────────────────────────────────────────────────────────────────────────────────────');
+
+      // History assertions require terminal semantics; raw ANSI capture cannot distinguish redraw
+      // bytes from scrollback. With pyte, ttydrive explicitly models DEC 1049 main/alternate buffers.
+      if (capture.pyte) {
+        // Non-vacuous canary: npm itself writes this line before the TUI enters the alternate screen,
+        // proving normal-buffer history/capture is observable rather than accidentally empty.
+        expect(capture.scrollback).toContain('NORMAL-HISTORY-CANARY-1');
+        expect(capture.scrollback).not.toContain('RESIZE-LIVE-CANARY');
+        expect(capture.scrollback).not.toContain('╭');
+        expect(capture.scrollback).not.toContain('╰');
+      }
+    },
+    60_000,
+  );
+
+  test(
     'welcome banner renders on boot (version + model + cwd via <Static>)',
     async () => {
       const screen = await drive({ steps: [] });
       // 横幅三要素:产品名+版本、模型、cwd(可能被头部截断,断言尾部)。
       expect(screen).toContain('forgeax-cli v');
       expect(screen).toContain('claude-opus-4-8');
+      expect(screen).toContain('packages/cli');
+    },
+    60_000,
+  );
+
+  test(
+    'npm start owns alternate screen from the top row',
+    async () => {
+      const screen = await drive({ cmd: ['npm', 'start', '--', '--demo', '--no-memory'], steps: [] });
+      const bannerRow = screen.split('\n').findIndex(line => line.includes('forgeax-cli v'));
+      // DEC 1049 alone is not sufficient on every terminal: some preserve the old cursor row when
+      // switching buffers. The host must explicitly clear+home before Ink renders its first frame.
+      expect(bannerRow).toBeGreaterThanOrEqual(0);
+      expect(bannerRow).toBeLessThanOrEqual(1);
       expect(screen).toContain('packages/cli');
     },
     60_000,

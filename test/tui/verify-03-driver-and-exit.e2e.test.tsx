@@ -105,6 +105,54 @@ describe('03 driver-level numeric truth', () => {
       await driver.dispose();
     }
   }, 30_000);
+
+  test('message_start 的部分 usage 不会把已有上下文短暂覆盖成 1', async () => {
+    let call = 0;
+    let release: (() => void) | undefined;
+    let markSecondStarted!: () => void;
+    const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+    const provider: LLMProvider = {
+      api: 'partial-usage',
+      async *stream(): AsyncIterable<ProviderStreamEvent> {
+        call++;
+        const finalUsage = {
+          inputTokens: 1,
+          outputTokens: 20,
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: 24_399,
+        } as Usage;
+        yield { type: 'message_start', usage: call === 1 ? finalUsage : { inputTokens: 1 } };
+        if (call === 2) {
+          markSecondStarted();
+          await new Promise<void>((resolve) => { release = resolve; });
+        }
+        yield {
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+          usage: finalUsage,
+          stopReason: 'end_turn',
+        };
+      },
+    };
+    const opts = { model: MODEL, demo: true, sessionsDir: join(tmp, '.forgeax/sessions'), sessionId: 'partial' } as const;
+    const host = await buildHostContext({ ...opts }, provider);
+    const driver = createAgentDriver({ ...opts, providerOverride: provider }, host);
+    try {
+      await driver.driveTurn('one', () => {});
+      expect(driver.getContextTokens()).toBe(24_400);
+
+      const second = driver.driveTurn('two', () => {});
+      await secondStarted;
+      // 第二次 message_start 暂时只带 input=1；应保留上一轮完整 prompt 基线，不能闪成 1。
+      expect(driver.getContextTokens()).toBe(24_400);
+      release?.();
+      await second;
+      expect(driver.getContextTokens()).toBe(24_400);
+    } finally {
+      release?.();
+      await driver.dispose();
+    }
+  }, 30_000);
 });
 
 describe('03 App-level: idle ctrl-c exit & file-command enqueue', () => {

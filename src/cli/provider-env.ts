@@ -7,10 +7,13 @@
  *   (bug-empty-response-2026-07-13):端点讲什么协议不总能从模型名推出——
  *   逻辑模型名(claude-fable-5)发给 Azure Anthropic 直连端点会被当作
  *   deployment name → 404 DeploymentNotFound,必须能声明「走 openai-compat」。
- * - **凭证**:按家族取各自的行业标准 env 对——
- *   `openai-compat` → `OPENAI_BASE_URL` / `OPENAI_API_KEY`;
- *   其余(anthropic-messages/gemini/…)→ `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`
- *   (非 anthropic 家族沿用 ANTHROPIC_* 兜底是既有行为,此处不扩大)。
+ * - **凭证**:按家族取各自的行业标准 env 对,`OPENAI_*` 优先、缺省兜底 `ANTHROPIC_*`——
+ *   `openai-compat` → `OPENAI_BASE_URL`/`OPENAI_API_KEY`,**未配置时回落** `ANTHROPIC_BASE_URL`/
+ *   `ANTHROPIC_API_KEY`;其余(anthropic-messages/gemini/…)→ `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`。
+ *   openai-compat 的 ANTHROPIC_* 兜底恢复 2026-07-14 收敛前的既有行为:用户常把一个讲 OpenAI
+ *   协议的代理端点配进 `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` 跑 gpt-* 模型;收敛后硬切到
+ *   OPENAI_* 使这类配置启动即抛「OPENAI_API_KEY 未设」且无法自救,故回落而非硬失败。显式配了
+ *   OPENAI_* 时仍优先 OPENAI_*(代理产品认知留在宿主层,core 只认这组中立变量)。
  *
  * 宿主(如 studio)对具体代理产品(LiteLLM 等)的认知留在宿主层:由宿主把自己的
  * 配置翻译成上面这组中立变量注入;core 不认识任何代理产品。
@@ -35,10 +38,11 @@ export interface ProviderEnvConfig extends ProviderFactoryOpts {
 export function resolveProviderEnv(model: string): ProviderEnvConfig {
   const api = process.env.FORGEAX_PROVIDER_API || pickApi(model);
   if (api === 'openai-compat') {
+    // OPENAI_* 优先,缺省兜底 ANTHROPIC_*(恢复收敛前行为:代理端点常配进 ANTHROPIC_*)。
     return {
       api,
-      apiKey: process.env.OPENAI_API_KEY ?? '',
-      baseUrl: process.env.OPENAI_BASE_URL,
+      apiKey: process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || '',
+      baseUrl: process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL,
     };
   }
   return {

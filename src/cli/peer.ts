@@ -17,6 +17,7 @@
  * Boundary: 仅 core 相对 import(CoreAgent/EventBus/types + inject executor + team router)。
  */
 import { CoreAgent } from '../agent/agent';
+import { DEFAULT_SUBAGENT_MAX_TURNS } from '../agent/subagent';
 import { EventBus } from '../events/event-bus';
 import type { AgentContext } from '../agent/types';
 import type { AgentTool } from '../capability/types';
@@ -55,8 +56,8 @@ export function buildChildSpawnFn(
   provider: LLMProvider,
   tools: AgentTool[],
   model: string,
-  maxTurns = 20,
   team?: TeamWiring,
+  maxTurns = DEFAULT_SUBAGENT_MAX_TURNS,
 ): SpawnFn {
   return (spec: AgentSpec, ctx: SpawnContext): SpawnedAgent => {
     const agentId = `${spec.type}:${ctx.parentId ?? 'root'}`;

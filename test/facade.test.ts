@@ -118,6 +118,15 @@ describe('ForgeaxCoreKernel — peer 多 agent handoff seam(forgeax-cli 专属,�
 });
 
 describe('ForgeaxCoreKernel — runTurn maps a full turn', () => {
+  test('budget {} continues beyond the stale 16-turn cap and completes', async () => {
+    const scripts = Array.from({ length: 17 }, (_, i) => [asstToolUse(`t${i}`, 'echo', {})]);
+    scripts.push([asstText('done')]);
+    const k = new ForgeaxCoreKernel({ provider: scripted(scripts), executeTool: async () => null });
+    const events = await collect(k, req({ budget: {} }));
+    expect(events.filter((e) => e.kind === 'tool.call')).toHaveLength(17);
+    expect(events.some((e) => e.kind === 'turn.done' && e.reason === 'stop')).toBe(true);
+  });
+
   test('tool turn → tool.call + tool.result via host bridge, then turn.done(stop)', async () => {
     const calls: string[] = [];
     const k = new ForgeaxCoreKernel({

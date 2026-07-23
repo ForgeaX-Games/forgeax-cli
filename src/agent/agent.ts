@@ -77,6 +77,9 @@ import type { HandoffSink, HandoffIntent, HandoffResolution } from '../inject/ty
 import { HANDOFF_INTENT_KEY } from '../capability/builtin-tools/message-tools';
 import { EXIT_PLAN_INTENT_KEY, exitPlanModeTool } from '../capability/builtin-tools/plan-tools';
 
+/** 主 agent 单次请求的 LLM↔工具往返防失控上限。host 可显式收紧。 */
+export const DEFAULT_MAIN_MAX_TURNS = 500;
+
 /**
  * Compaction V2(压缩改造,可选;注入即激活新路径,缺省走旧 `compaction` strategy → 零回归)。
  * 把 Stream A–F 接进 loop:比例 per-model 水位 + 有序触发闸(冷却/熔断/querySource)+
@@ -736,7 +739,7 @@ export class CoreAgent implements Agent {
     }
 
     // ─── normal 场景:多 turn 工具循环 ────────────────────────────────────
-    const maxTurns = this.o.context.config.maxTurns ?? 16;
+    const maxTurns = this.o.context.config.maxTurns ?? DEFAULT_MAIN_MAX_TURNS;
     // 开机回放 seed(resume/replay)在最前 → FACADE 注入的 host-owned 历史 seed → 本轮
     // user 输入(native 内核消费 TurnRequest.history)。initialMessages 不传则 [],行为不变。
     const messages: ProviderMessage[] = [

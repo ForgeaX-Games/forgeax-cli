@@ -14,7 +14,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NodeSandboxFs, NodeTerminal } from '../src/cli/io';
 import { parseArgs, buildContext, runTurn, runCli } from '../src/cli/main';
-import { DEFAULT_MAIN_MAX_TURNS } from '../src/cli/host-context';
+import { resolveMainMaxTurns } from '../src/cli/host-context';
+import { DEFAULT_MAIN_MAX_TURNS } from '../src/agent/agent';
 import { resetSettingsCache, updateUserSettings } from '../src/cli/settings';
 import type { DirEnt } from '../src/inject/types';
 import type { LLMProvider, ProviderStreamEvent, Usage } from '../src/provider/types';
@@ -397,6 +398,16 @@ describe('buildContext — provider selection paths', () => {
     expect(ctx.config.maxTurns).toBe(DEFAULT_MAIN_MAX_TURNS);
     expect(Array.isArray(ctx.config.tools)).toBe(true);
     expect(typeof ctx.config.leadingSystemText).toBe('string');
+  });
+
+  test('FORGEAX_MAX_TURNS preserves valid overrides and invalid values fall back to 500', () => {
+    expect(DEFAULT_MAIN_MAX_TURNS).toBe(500);
+    expect(resolveMainMaxTurns('37')).toBe(37);
+    expect(resolveMainMaxTurns('37.9')).toBe(37);
+    expect(resolveMainMaxTurns(undefined)).toBe(DEFAULT_MAIN_MAX_TURNS);
+    expect(resolveMainMaxTurns('garbage')).toBe(DEFAULT_MAIN_MAX_TURNS);
+    expect(resolveMainMaxTurns('0')).toBe(DEFAULT_MAIN_MAX_TURNS);
+    expect(resolveMainMaxTurns('-4')).toBe(DEFAULT_MAIN_MAX_TURNS);
   });
 });
 

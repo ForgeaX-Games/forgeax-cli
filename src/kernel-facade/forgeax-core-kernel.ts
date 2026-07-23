@@ -22,7 +22,7 @@ import type {
   ForkExtractRequest,
   ForkExtractResult,
 } from '@forgeax/agent-runtime/contract';
-import { CoreAgent } from '../agent/agent';
+import { CoreAgent, DEFAULT_MAIN_MAX_TURNS } from '../agent/agent';
 import { EventBus } from '../events/event-bus';
 import { CoreEventType } from '../events/events';
 import { runForkedAgent } from '../agent/forked-agent';
@@ -34,7 +34,7 @@ import { makeProviderCompactSummarize } from '../context/compaction-llm';
 import { makeRehydrateInjection } from '../context/post-compact-rehydrate';
 import { microCompact } from '../context/micro-compaction';
 import { contextWindowForModel } from '../context/model-window';
-import { makeTaskTool, runSubagent } from '../agent/subagent';
+import { DEFAULT_SUBAGENT_MAX_TURNS, makeTaskTool, runSubagent } from '../agent/subagent';
 import type { SubagentRegistry } from '../agent/subagent-registry';
 import { handoffTool } from '../capability/builtin-tools/message-tools';
 import type { PermissionMode as NativePermissionMode } from '../permission/engine';
@@ -611,7 +611,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
         ],
         model,
         tools,
-        maxTurns: req.budget.maxTurns,
+        maxTurns: req.budget.maxTurns ?? DEFAULT_MAIN_MAX_TURNS,
       },
       toolContext,
     };
@@ -780,7 +780,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
       // subagent 自压缩(V2)+ 压后重挂(D-01)。
       compactionV2: { summarize: makeProviderCompactSummarize(this.o.provider, model), rehydrate: makeRehydrateInjection(toolContext) },
       contextWindow: contextWindowForModel(model),
-      maxTurns: req.budget.maxTurns ?? 20,
+      maxTurns: req.budget.maxTurns ?? DEFAULT_SUBAGENT_MAX_TURNS,
       onSubagentEvent: (ev) => {
         const k = subEventToKernel(ev);
         if (k) pushSub(k);

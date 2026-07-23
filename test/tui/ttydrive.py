@@ -33,14 +33,51 @@ try:
     import pyte  # type: ignore
 
     if HISTORY > 0:
-        _screen = pyte.HistoryScreen(cols, rows, history=HISTORY)
+        _main_screen = pyte.HistoryScreen(cols, rows, history=HISTORY)
     else:
-        _screen = pyte.Screen(cols, rows)
-    _stream = pyte.ByteStream(_screen)
+        _main_screen = pyte.Screen(cols, rows)
+    # pyte does not implement DECSET 1049. Model the two buffers explicitly so tests observe the
+    # same invariant as a real terminal: alternate-screen frames never enter normal scrollback.
+    _alt_screen = pyte.Screen(cols, rows)
+    _main_stream = pyte.ByteStream(_main_screen)
+    _alt_stream = pyte.ByteStream(_alt_screen)
+    _screen = _main_screen
+    _stream = _main_stream
+    _mode_pending = bytearray()
     USING_PYTE = True
+    _ENTER_ALT = b"\x1b[?1049h"
+    _EXIT_ALT = b"\x1b[?1049l"
 
     def feed(data: bytes) -> None:
-        _stream.feed(data)
+        global _screen, _stream
+        _mode_pending.extend(data)
+        while _mode_pending:
+            enter_at = _mode_pending.find(_ENTER_ALT)
+            exit_at = _mode_pending.find(_EXIT_ALT)
+            found = [(at, seq, True) for at, seq in [(enter_at, _ENTER_ALT)] if at >= 0]
+            found += [(at, seq, False) for at, seq in [(exit_at, _EXIT_ALT)] if at >= 0]
+            if found:
+                at, seq, entering = min(found, key=lambda item: item[0])
+                if at:
+                    _stream.feed(bytes(_mode_pending[:at]))
+                del _mode_pending[:at + len(seq)]
+                if entering:
+                    _alt_screen.reset()
+                    _screen, _stream = _alt_screen, _alt_stream
+                else:
+                    _screen, _stream = _main_screen, _main_stream
+                continue
+            # Retain only a possible split mode-sequence suffix; feed everything else now.
+            keep = 0
+            for seq in (_ENTER_ALT, _EXIT_ALT):
+                for n in range(1, min(len(seq), len(_mode_pending)) + 1):
+                    if _mode_pending[-n:] == seq[:n]:
+                        keep = max(keep, n)
+            emit = len(_mode_pending) - keep
+            if emit:
+                _stream.feed(bytes(_mode_pending[:emit]))
+                del _mode_pending[:emit]
+            break
 
     def render_lines():
         return [line.rstrip() for line in _screen.display]
@@ -49,8 +86,8 @@ try:
         if HISTORY <= 0:
             return []
         out = []
-        for line in _screen.history.top:  # 最老 → 最新
-            out.append("".join(line[x].data for x in range(cols)).rstrip())
+        for line in _main_screen.history.top:  # normal buffer, 最老 → 最新
+            out.append("".join(line[x].data for x in range(_main_screen.columns)).rstrip())
         return out
 
 except ImportError:
@@ -137,7 +174,8 @@ for st in spec.get("steps", []):
         rows, cols = int(size["rows"]), int(size["cols"])
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         if USING_PYTE:
-            _screen.resize(lines=rows, columns=cols)
+            _main_screen.resize(lines=rows, columns=cols)
+            _alt_screen.resize(lines=rows, columns=cols)
     s = expand(st.get("send", ""))
     if s:
         os.write(fd, s.encode())

@@ -16,7 +16,7 @@
  */
 import { createInterface } from 'node:readline';
 import { StringDecoder } from 'node:string_decoder';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync, mkdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { CoreAgent } from '../agent/agent';
 import type { AgentContext } from '../agent/types';
@@ -57,7 +57,7 @@ import { renderEvent } from './render';
 import type { AutoMemoryHook } from '../agent/agent';
 import type { PermissionRuleSet } from '../permission/rules';
 import { demoProvider } from './demo-provider';
-import { buildHostContext, resolveHostProvider, DEFAULT_MODEL, DEFAULT_LEADING, DEFAULT_MAIN_MAX_TURNS } from './host-context';
+import { buildHostContext, resolveHostProvider, DEFAULT_MODEL, DEFAULT_LEADING, resolveMainMaxTurns } from './host-context';
 import { getMergedSettings } from './settings';
 import { coercePermissionMode, PERMISSION_MODES } from '../permission/inspect';
 import type { PermissionMode } from '../permission/engine';
@@ -265,7 +265,7 @@ export function buildContext(args: CliArgs, providerOverride?: LLMProvider): Age
       leadingSystemText: DEFAULT_LEADING,
       model: args.model,
       tools: [...base, taskTool],
-      maxTurns: DEFAULT_MAIN_MAX_TURNS,
+      maxTurns: resolveMainMaxTurns(),
     },
     toolContext,
   };
@@ -391,6 +391,8 @@ usage:
   forgeax-cli -p "<prompt>"     one-shot print mode
   forgeax-cli                   REPL
   forgeax-cli --demo -p "hi"    demo (no API key)
+  forgeax update                update the global @forgeax/cli install from npm
+  forgeax update --check        report whether an update is available (no install)
   forgeax-cli mcp-serve         reverse MCP server over stdio (expose core tools to MCP clients; --allow-writes for mutating tools)
 
 flags:
@@ -454,6 +456,13 @@ function readStdin(timeoutMs = 3000): Promise<string> {
 }
 
 export async function runCli(argv: string[], providerOverride?: LLMProvider): Promise<number> {
+  // Self-update 子命令:`forgeax update` / `forgeax-cli update` —— 查 npm 并全局安装最新版。
+  //   与 mcp-serve 同级:先于 parseArgs,避免把 `update` 误当成 prompt。
+  if (argv[0] === 'update') {
+    const { runUpdate } = await import('./update');
+    return await runUpdate(argv.slice(1));
+  }
+
   // 反向 MCP server 子命令(F-01):`forgeax-cli mcp-serve` 以 stdio MCP server
   //   形态暴露本内核工具集给外部 MCP 客户端。与 `--serve`(AgentKernel sidecar)并存。
   //   host 入口在此装配工具集 + 权限规则,把纯 deps 交给 mcp-serve 的协议循环
@@ -746,8 +755,16 @@ export async function runCli(argv: string[], providerOverride?: LLMProvider): Pr
 // 直接运行时执行(node `dist/cli/main.js …` / `src/cli/main.ts …`),被 import 为库时不执行。
 // 用 node-portable 的入口脚本路径比对。**不用 `import.meta.main`**:它是 Bun/Node≥24.2 专属,
 // 且 bun build 会把它转成引用未定义 `__require` 的 polyfill —— 在 ESM 产物里直接 ReferenceError 崩溃。
-const runAsEntry =
-  process.argv[1] ? import.meta.url === pathToFileURL(process.argv[1]).href : false;
-if (runAsEntry) {
+// npm 全局 bin 是 symlink(`…/bin/forgeax` → `…/dist/cli/main.js`):argv[1] 是 link 路径,
+// import.meta.url 是 realpath —— 必须 realpath 后再比,否则全局安装后静默 no-op。
+function isCliEntry(argv1: string | undefined): boolean {
+  if (!argv1) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(argv1)).href;
+  } catch {
+    return import.meta.url === pathToFileURL(argv1).href;
+  }
+}
+if (isCliEntry(process.argv[1])) {
   runCli(process.argv.slice(2)).then((code) => process.exit(code));
 }

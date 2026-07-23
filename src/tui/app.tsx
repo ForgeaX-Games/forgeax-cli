@@ -36,6 +36,7 @@ import type { AgentDriver } from './contracts';
 import { routes, defaultRoute, type RouteName } from './routes';
 import { installStderrGuard } from './stderr-guard';
 import { inkInstanceRef } from './ink-instance-ref';
+import { enterAlternateScreen } from './alternate-screen';
 import { mostRecentSessionId, sessionHasHistory } from '../cli/resume-fold';
 
 // 触发各注册表的副作用注册(views/* 在自己文件内 registerX;commands 同)。
@@ -166,16 +167,30 @@ export async function runTui(args: TuiArgs, providerOverride?: LLMProvider): Pro
   //   stock ink 的 patch-console 只接管 console.*,拦不住 core 的裸 stderr 写,会污染帧
   //   (输入框残影/重复)。详见 ./stderr-guard。⚠️ 只拦 stderr,ink 帧走 stdout 不可碰。
   const restoreStderr = installStderrGuard();
-  const instance = render(<App driver={driver} controller={controller} bootResumeId={bootResumeId} />);
-  // 暴露 Instance 给 resize 干净重绘用(Transcript 经 inkInstanceRef 调 resetStaticOutput)。
-  inkInstanceRef.current = instance as unknown as typeof inkInstanceRef.current;
+  // Full-screen Ink frames must never live in the normal buffer: on a width shrink the terminal can
+  // reflow transient input/overlay rows into scrollback before SIGWINCH reaches Ink, and no later
+  // erase can retrieve them. DEC 1049 gives the REPL a disposable buffer and restores the shell's
+  // normal buffer on every exit path.
+  const restoreScreen = enterAlternateScreen();
   try {
+    const instance = render(<App driver={driver} controller={controller} bootResumeId={bootResumeId} />);
+    // 暴露 Instance 给 transcript 整体替换时重置 Static 累加器。
+    inkInstanceRef.current = instance as unknown as typeof inkInstanceRef.current;
     await instance.waitUntilExit();
   } finally {
     inkInstanceRef.current = null;
-    await controller.dispose(); // 登出 / 关闭全部远端通道(wechaty bot.stop 等)。
-    await driver.dispose();
-    restoreStderr(); // ink 已卸载、终端已还屏,此时 flush 缓冲不污染画面。
+    // Nest cleanup so a failing disposer cannot strand the terminal in the alternate buffer or keep
+    // stderr intercepted. Restore the normal screen before flushing buffered diagnostics.
+    try {
+      await controller.dispose(); // 登出 / 关闭全部远端通道(wechaty bot.stop 等)。
+    } finally {
+      try {
+        await driver.dispose();
+      } finally {
+        restoreScreen();
+        restoreStderr();
+      }
+    }
   }
   // 退出提示:会话**真有 WAL 历史**才提示怎么续接(空会话续无可续,不打扰)。
   //   id 取 driver 的活值——/clear、/resume 中途换会话后,提示的是**退出时**所在的那条。

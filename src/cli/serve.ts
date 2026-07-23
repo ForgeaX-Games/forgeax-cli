@@ -178,7 +178,7 @@ export async function startServe(sockPath: string): Promise<Server> {
         ? {
             handoff: ({ provider, model, tools }) =>
               new InProcessScheduler({
-                spawnFn: buildChildSpawnFn(provider, tools, model, 20, {
+                spawnFn: buildChildSpawnFn(provider, tools, model, {
                   executor: teamExecutor!,
                   bus: teamBus!,
                 }),

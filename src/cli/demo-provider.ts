@@ -42,7 +42,7 @@ export function demoProvider(): LLMProvider {
     async *stream(req, opts): AsyncIterable<ProviderStreamEvent> {
       const last = req.messages.at(-1);
       const input = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content);
-      const text = `forgeax-core(demo) 收到: ${input}`;
+      const text = `forgeax-cli(demo) 收到: ${input}`;
       // 逐块下发:让 TUI 走真流式路径(delta → assistant 收口)。
       //   人眼观察节奏可选:FORGEAX_DEMO_STREAM_DELAY_MS 拉开每块间隔(默认 0 —— 不引入
       //   人为延时,免拖慢时序敏感的 --demo e2e 测试)。视觉验证时设 40 即可看到"边写边出"。

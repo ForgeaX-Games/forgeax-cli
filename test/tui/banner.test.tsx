@@ -102,7 +102,7 @@ describe('Transcript header (banner via <Static>)', () => {
       <Transcript log={longLog} busy={false} toolMeta={toolMeta} header={banner} redrawNonce={1} />,
     );
     const resumeFrames = ink.frames.slice(beforeResume).join('\n');
-    expect(resumeFrames).toContain('forgeax-core');
+    expect(resumeFrames).toContain('forgeax-cli');
     expect(resumeFrames).toContain('RECENT-RESUME-MARKER');
     expect(resumeFrames).toContain('EARLY-RESUME-MARKER');
 

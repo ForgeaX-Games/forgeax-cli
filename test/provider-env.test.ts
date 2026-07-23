@@ -7,7 +7,8 @@
  *    (a) `FORGEAX_PROVIDER_API` 显式覆盖家族,压过模型名推断(claude-* 也走
  *        openai-compat),凭证随家族切到 OPENAI_*;
  *    (b) 无覆盖 → 按 pickApi(model) 分派,anthropic 家族取 ANTHROPIC_*;
- *    (c) 家族与凭证成对:openai-compat 绝不误拿 ANTHROPIC_* 的 key/baseUrl。
+ *    (c) 家族与凭证成对:openai-compat 优先取 OPENAI_*,缺省兜底 ANTHROPIC_*(不误拿
+ *        anthropic 家族在两者皆在场时的 key/baseUrl)。
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -59,5 +60,28 @@ describe('resolveProviderEnv', () => {
     expect(pickApi('gpt-5')).toBe('openai-compat');
     expect(pickApi('gemini-3-pro')).toBe('gemini');
     expect(pickApi('deepseek-v4-pro')).toBe('deepseek-v4');
+  });
+
+  // openai-compat 凭证兜底:OPENAI_* 缺省时回落 ANTHROPIC_*(恢复 2026-07-14 收敛前行为)。
+  // 用户把一个讲 OpenAI 协议的代理端点配进 ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY 跑 gpt-*,
+  // 收敛后硬切 OPENAI_* 使其启动即抛「OPENAI_API_KEY 未设」无法自救;此处锁回落而非硬失败。
+  test('openai-compat 家族:OPENAI_* 缺省 → 兜底 ANTHROPIC_*(gpt-* 可直接用 ANTHROPIC_API_KEY)', () => {
+    process.env.ANTHROPIC_API_KEY = 'sk-anthropic';
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com/v1';
+    // OPENAI_* 未设
+    const gpt = resolveProviderEnv('gpt-5');
+    expect(gpt.api).toBe('openai-compat');
+    expect(gpt.apiKey).toBe('sk-anthropic'); // 回落 ANTHROPIC_API_KEY
+    expect(gpt.baseUrl).toBe('https://proxy.example.com/v1'); // 回落 ANTHROPIC_BASE_URL
+  });
+
+  test('openai-compat 家族:OPENAI_* 在场时优先于 ANTHROPIC_* 兜底', () => {
+    process.env.OPENAI_API_KEY = 'sk-compat';
+    process.env.OPENAI_BASE_URL = 'https://openai-proxy.example.com/v1';
+    process.env.ANTHROPIC_API_KEY = 'sk-anthropic';
+    process.env.ANTHROPIC_BASE_URL = 'https://azure.example.com';
+    const gpt = resolveProviderEnv('gpt-5');
+    expect(gpt.apiKey).toBe('sk-compat'); // OPENAI_* 赢
+    expect(gpt.baseUrl).toBe('https://openai-proxy.example.com/v1');
   });
 });

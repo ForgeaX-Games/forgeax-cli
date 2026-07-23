@@ -93,7 +93,13 @@ import { randomUUID } from 'node:crypto';
  *  display=transcript 展示文本(粘贴正文/微信标注/斜杠命令原文),prompt=喂模型的文本。
  *  ⚠️ user 条目与回退锚点(msgId)**不在入队时定格**——统一延迟到队列消费(轮到它跑)时,
  *  否则条目插在上一轮回复之前,transcript 的 user↔assistant 配对错乱。 */
-type QueuedTurn = { prompt: string; display: string; origin?: RemoteOrigin; images?: ImageAttachment[] };
+type QueuedTurn = {
+  prompt: string;
+  display: string;
+  origin?: RemoteOrigin;
+  images?: ImageAttachment[];
+  pastes?: readonly string[];
+};
 
 // ─── UiMessage[] → SessionEntry[](梁② reduce 的输入,无损映射)─────────────────
 function toSessionLog(msgs: UiMessage[]): SessionEntry[] {

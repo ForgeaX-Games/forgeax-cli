@@ -3,7 +3,7 @@
  * tools through the normal/interrupt/agent_command scenarios.
  */
 import { test, expect, describe } from 'bun:test';
-import { CoreAgent } from '../src/agent/agent';
+import { CoreAgent, DEFAULT_MAIN_MAX_TURNS } from '../src/agent/agent';
 import { partition, dispatchTools } from '../src/agent/dispatch';
 import { buildTool, type AgentTool } from '../src/capability/types';
 import type { AgentContext, AgentEvent } from '../src/agent/types';
@@ -57,11 +57,11 @@ function scriptedProvider(scripts: ProviderStreamEvent[][]): LLMProvider {
   };
 }
 
-function ctx(tools: AgentTool[], provider: LLMProvider, maxTurns = 16): AgentContext {
+function ctx(tools: AgentTool[], provider: LLMProvider, maxTurns?: number): AgentContext {
   return {
     agentId: 'a1',
     provider,
-    config: { systemPromptSlots: [], model: 'm', tools, maxTurns },
+    config: { systemPromptSlots: [], model: 'm', tools, ...(maxTurns === undefined ? {} : { maxTurns }) },
     toolContext: {},
   };
 }
@@ -215,11 +215,25 @@ describe('LOOP permission gate', () => {
 });
 
 describe('LOOP max_turns', () => {
-  test('stops at maxTurns when model keeps requesting tools', async () => {
-    // every call returns a tool_use → never ends naturally
+  test('mechanism-owned main default is literally 500', () => {
+    expect(DEFAULT_MAIN_MAX_TURNS).toBe(500);
+  });
+
+  test('omitted maxTurns continues beyond the stale 16-turn cap and completes', async () => {
+    const scripts = Array.from({ length: 17 }, (_, i) => [asstWithToolUse(`t${i}`, 'echo', {})]);
+    scripts.push([asstText('done after 17 tool rounds')]);
+    const agent = new CoreAgent({ context: ctx([echoTool], scriptedProvider(scripts)) });
+    const events = await collect(agent, { input: { type: 'user', payload: 'hi', ts: 0 } });
+    expect(events.filter((e) => e.type === 'turn_start')).toHaveLength(18);
+    const last = events.at(-1)!;
+    expect(last.type === 'done' && last.terminal.reason).toBe('completed');
+  });
+
+  test('explicit maxTurns still wins when model keeps requesting tools', async () => {
     const provider = scriptedProvider([[asstWithToolUse('t', 'echo', {})]]);
     const agent = new CoreAgent({ context: ctx([echoTool], provider, 2) });
     const events = await collect(agent, { input: { type: 'user', payload: 'hi', ts: 0 } });
+    expect(events.filter((e) => e.type === 'turn_start')).toHaveLength(2);
     const last = events.at(-1)!;
     expect(last.type === 'done' && last.terminal.reason).toBe('max_turns');
   });

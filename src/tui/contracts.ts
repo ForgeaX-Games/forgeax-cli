@@ -102,7 +102,7 @@ export interface ImageAttachment {
 //   best-effort,见 checkpoint-manager。
 //   images:该轮附带的图片(占位符 `[Image #n]` 进 text 供显示;真 base64 走 images 上模型)。
 export type UiMessage =
-  | { kind: 'user'; text: string; msgId?: string; images?: ImageAttachment[] }
+  | { kind: 'user'; text: string; msgId?: string; images?: ImageAttachment[]; pastes?: readonly string[] }
   | { kind: 'agent'; event: AgentEvent }; // 原生事件直接挂
 
 // ── Session 真相 = 有序事件日志(梁②;reduceTranscript 的输入)──
