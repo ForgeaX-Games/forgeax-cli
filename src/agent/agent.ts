@@ -126,6 +126,9 @@ export interface AutoMemoryHook {
 
 export interface CoreAgentOptions {
   context: AgentContext;
+  /** Native sidecar seam: refresh host-owned tools and uncached context before
+   * every provider call. Absent keeps the in-process/static behavior. */
+  refreshTurnContext?: () => Promise<{ tools?: AgentTool[]; dynamicContext?: string }>;
   bus?: EventBus;
   rules?: Partial<PermissionRuleSet> | null;
   mode?: PermissionMode;
@@ -793,23 +796,47 @@ export class CoreAgent implements Agent {
     if (upsExtra.additionalContext) hookContextReminders.push(`<system-reminder>${upsExtra.additionalContext}</system-reminder>`);
 
     // ─── deferred tool loading + ToolSearch(无工具声明 shouldDefer 时与今天逐字一致)。
-    const allTools = this.o.context.config.tools;
-    const deferred = allTools.filter((t) => t.shouldDefer?.() === true && t.alwaysLoad !== true);
-    const activeTools = deferred.length > 0 ? allTools.filter((t) => !deferred.includes(t)) : allTools;
+    let allTools = this.o.context.config.tools;
+    let deferred = allTools.filter((t) => t.shouldDefer?.() === true && t.alwaysLoad !== true);
+    let activeTools = deferred.length > 0 ? allTools.filter((t) => !deferred.includes(t)) : allTools;
     const activated = new Set<string>();
-    const toolSearch =
+    let toolSearch =
       deferred.length > 0 ? buildToolSearchTool(deferred, (names) => names.forEach((n) => activated.add(n))) : null;
+    let liveDynamicContext = '';
 
     // plan 出口工具(007,SSOT 注入点):plan 模式的轮才把 ExitPlanMode 进模型工具集(见
     //   stage1)。注入收敛在 loop 这一处 —— 直连(TUI/CLI/库嵌入)与 facade 路径同源获得,
     //   host 无需(也不应)各自注入。
     const planExitTool = exitPlanModeTool();
+    const resolveEffectiveTools = (): AgentTool[] => {
+      const baseTools = toolSearch
+        ? [...activeTools, ...deferred.filter((d) => activated.has(d.name)), toolSearch]
+        : activeTools;
+      return this.currentMode === 'plan' && !baseTools.some((t) => t.name === planExitTool.name)
+        ? [...baseTools, planExitTool]
+        : baseTools;
+    };
 
     // ─── 全局 tool-result 预算兜底(移植 agentic_os 03.B):单 tool 声明 maxResultSizeChars,LOOP 统一裁。
     const budgetMap = new Map<string, number>();
-    for (const t of allTools) budgetMap.set(t.name, t.maxResultSizeChars);
-    if (toolSearch) budgetMap.set(toolSearch.name, toolSearch.maxResultSizeChars);
-    budgetMap.set(planExitTool.name, planExitTool.maxResultSizeChars);
+    const rebuildToolState = (nextTools: AgentTool[]): void => {
+      allTools = nextTools;
+      deferred = allTools.filter((t) => t.shouldDefer?.() === true && t.alwaysLoad !== true);
+      activeTools = deferred.length > 0 ? allTools.filter((t) => !deferred.includes(t)) : allTools;
+      toolSearch =
+        deferred.length > 0 ? buildToolSearchTool(deferred, (names) => names.forEach((n) => activated.add(n))) : null;
+      budgetMap.clear();
+      for (const t of allTools) budgetMap.set(t.name, t.maxResultSizeChars);
+      if (toolSearch) budgetMap.set(toolSearch.name, toolSearch.maxResultSizeChars);
+      budgetMap.set(planExitTool.name, planExitTool.maxResultSizeChars);
+    };
+    rebuildToolState(allTools);
+    const refreshLiveContext = async (): Promise<void> => {
+      if (!this.o.refreshTurnContext) return;
+      const refreshed = await this.o.refreshTurnContext();
+      if (refreshed.tools) rebuildToolState(refreshed.tools);
+      liveDynamicContext = refreshed.dynamicContext ?? '';
+    };
     const budgetFor = (name: string): number => budgetMap.get(name) ?? Infinity;
 
     // ─── 真实 token 账(reactive autocompact):用上一轮 API 回传 prompt token 判水位。
@@ -883,6 +910,11 @@ export class CoreAgent implements Agent {
         }
       }
 
+      // Sidecar mode: the host registry is authoritative and may grow after a
+      // host-executed tool_search. Refresh at the provider boundary so the very
+      // next model request sees the newly activated definitions.
+      await refreshLiveContext();
+
       // ★ Compaction V2 pre-message 预压(#11):turn 顶部按 preCompactThreshold(0.80)静默预压,
       //   比 emergency(0.92,stage3)更早、更平滑。闸内冷却/熔断兜底,失败不崩(吞 → 留给 stage3/反应式)。
       if (this.o.compactionV2 && this.o.compactionV2.preMessage !== false) {
@@ -895,15 +927,9 @@ export class CoreAgent implements Agent {
       }
 
       // stage1 resolve capabilities —— effectiveTools = active + 已激活 deferred + ToolSearch。
-      const baseTools: AgentTool[] = toolSearch
-        ? [...activeTools, ...deferred.filter((d) => activated.has(d.name)), toolSearch]
-        : activeTools;
       // plan 模式:补注 ExitPlanMode(它是模型走出 plan 的唯一缝;host 已声明同名工具则不重复)。
       //   逐轮判定:setMode 中途切 plan 也能在下一轮拿到工具、退出后即从工具集消失。
-      const tools: AgentTool[] =
-        this.currentMode === 'plan' && !baseTools.some((t) => t.name === planExitTool.name)
-          ? [...baseTools, planExitTool]
-          : baseTools;
+      const tools = resolveEffectiveTools();
       yield { type: 'stage', stage: 'resolve_capabilities', turn };
       this.bus.publish(this.ev(CoreEventType.CapabilitiesResolved, { toolNames: tools.map((t) => t.name) }));
 
@@ -918,7 +944,12 @@ export class CoreAgent implements Agent {
       const system = await this.assembler.assemble({
         leading: leading != null ? { render: () => leading } : undefined,
         staticSlots: this.o.context.config.systemPromptSlots,
-        dynamicSlots: [...autoMemSlots, ...deferredSlots, ...readReminderSlots(), ...hookContextSlots()],
+        dynamicSlots: [
+          ...autoMemSlots,
+          ...deferredSlots,
+          ...readReminderSlots(),
+          ...hookContextSlots(),
+        ],
         ctx: { agentId: this.id },
         globalCacheEnabled: this.o.globalCacheEnabled,
       });
@@ -993,7 +1024,13 @@ export class CoreAgent implements Agent {
 
       // stage4 provider call (stream + retry/fallback + abort)
       yield { type: 'stage', stage: 'provider_call', turn };
-      const req = this.buildRequest(system, messages, tools);
+      // Host dynamicSuffix is an ephemeral USER suffix by contract. Do not put
+      // it in system slots or persist it into history; append it only to this
+      // provider request so each iteration observes the latest host state.
+      const providerMessages = liveDynamicContext
+        ? [...messages, { role: 'user' as const, content: liveDynamicContext }]
+        : messages;
+      const req = this.buildRequest(system, providerMessages, tools);
       let assistantMessage: unknown = null;
       let stopReason: StopReason = null;
       let turnOutputTokens = 0;
@@ -1007,6 +1044,17 @@ export class CoreAgent implements Agent {
             // ★ T5:每次上游重试前把观测信息投射到 bus → facade 映射成 api_retry 出墙。
             //   纯观测,不改重试行为(缺省无订阅者时是一次空 publish)。
             onRetry: (info) => this.bus.publish(this.ev(CoreEventType.ApiRetry, info)),
+            ...(this.o.refreshTurnContext
+              ? {
+                  refreshRequest: async () => {
+                    await refreshLiveContext();
+                    const retryMessages = liveDynamicContext
+                      ? [...messages, { role: 'user' as const, content: liveDynamicContext }]
+                      : messages;
+                    return this.buildRequest(system, retryMessages, resolveEffectiveTools());
+                  },
+                }
+              : {}),
           },
           this.o.retry,
         )) {

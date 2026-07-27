@@ -82,6 +82,45 @@ function bumpSemver(version, kind) {
   return `${major}.${minor}.${patch}`;
 }
 
+/** Compare simple x.y.z; <0 if a<b, 0 if equal, >0 if a>b. */
+function compareSemver(a, b) {
+  const pa = String(a).split('.').map((n) => Number(n) || 0);
+  const pb = String(b).split('.').map((n) => Number(n) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  }
+  return 0;
+}
+
+/** npm latest, or null when the package / tag is missing (first publish). */
+function fetchNpmLatest() {
+  try {
+    return runCapture('npm', ['view', EXPECTED_NAME, 'version', '--registry', REGISTRY]) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Pick the version to publish.
+ * Auto-bump bases on max(package.json, npm latest) so a prior publish that left
+ * package.json behind (or a restored checkout) still advances to a free version
+ * instead of colliding with an already-published patch.
+ * `--set` stays exact and still errors if that version exists on npm.
+ */
+function resolveTargetVersion({ from, bump, set, remote }) {
+  if (set) {
+    return { to: set, base: from, note: null };
+  }
+  let base = from;
+  let note = null;
+  if (remote && compareSemver(remote, from) > 0) {
+    base = remote;
+    note = `npm latest (${remote}) is ahead of package.json (${from}); basing bump on npm.`;
+  }
+  return { to: bumpSemver(base, bump), base, note };
+}
+
 function run(cmd, args, opts = {}) {
   console.log(`\n> ${cmd} ${args.join(' ')}`);
   const r = spawnSync(cmd, args, {
@@ -149,8 +188,10 @@ function printHelp() {
   console.log(`Usage: node scripts/publish.mjs [options]
 
 Options:
-  --bump patch|minor|major   Semver bump (default: patch)
-  --set <x.y.z>              Set exact version (skips --bump)
+  --bump patch|minor|major   Semver bump (default: patch). Base is
+                             max(package.json, npm latest) so a drifted
+                             local version still advances past published.
+  --set <x.y.z>              Set exact version (skips --bump; errors if taken)
   --dry-run                  Build+gate only; restore package.json version
   --no-publish               Bump+build+gate; do not npm publish
   --yes, -y                  Skip confirmation
@@ -178,13 +219,33 @@ async function main() {
   }
 
   const from = pkg.version;
-  const to = args.set || bumpSemver(from, args.bump);
+
+  // Resolve target against npm *before* confirm, so a drifted package.json does not
+  // propose a version that already exists and then fail after the user said yes.
+  const remote = fetchNpmLatest();
+  console.log(`npm latest: ${remote || '(none)'}`);
+
+  const resolved = resolveTargetVersion({
+    from,
+    bump: args.bump,
+    set: args.set,
+    remote,
+  });
+  const to = resolved.to;
   if (!/^\d+\.\d+\.\d+$/.test(to)) {
     throw new Error(`Invalid target version: ${to}`);
   }
+  if (resolved.note) console.log(`Note: ${resolved.note}`);
+
+  if (remote && remote === to) {
+    // Only reachable with --set (auto-bump always advances past remote).
+    throw new Error(
+      `${EXPECTED_NAME}@${to} already exists on npm. Pick another --set, or omit --set to auto-bump.`,
+    );
+  }
 
   console.log(`Package: ${pkg.name}`);
-  console.log(`Version: ${from} → ${to}`);
+  console.log(`Version: ${from} → ${to}${resolved.base !== from ? ` (bumped from ${resolved.base})` : ''}`);
   console.log(`Registry: ${REGISTRY}`);
   console.log(
     `Mode: ${args.dryRun ? 'dry-run (no publish, restore version)' : args.noPublish ? 'no-publish (keep bump)' : 'publish'}`,
@@ -210,17 +271,6 @@ async function main() {
           `  npm whoami --registry ${REGISTRY}\n` +
           `Detail: ${e.message}`,
       );
-    }
-    try {
-      const remote = runCapture('npm', ['view', EXPECTED_NAME, 'version', '--registry', REGISTRY]);
-      console.log(`npm latest: ${remote || '(none)'}`);
-      if (remote === to) {
-        throw new Error(`${EXPECTED_NAME}@${to} already exists on npm — bump again.`);
-      }
-    } catch (e) {
-      if (/already exists/.test(e.message)) throw e;
-      // 404 first publish of a version line is fine
-      console.log(`npm view: ${e.message.split('\n')[0]}`);
     }
   }
 

@@ -138,6 +138,9 @@ export interface ProviderCallOpts {
   /** ★ T5 观测缝(可选;不传 = 与今天逐字一致,零回归):每次即将重试前调用一次,供上层
    *  (loop)把重试事件投射到 bus → facade 映射成 `api_retry` KernelEvent 出墙。 */
   onRetry?: (info: RetryInfo) => void;
+  /** Rebuild a request immediately before a retry/fallback provider call.
+   * Native sidecars use this to refresh live host tools/context. */
+  refreshRequest?: () => Promise<ProviderRequest>;
 }
 
 export interface LLMProvider {

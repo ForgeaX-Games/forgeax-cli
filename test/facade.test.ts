@@ -563,3 +563,46 @@ describe('ForgeaxCoreKernel — toolPolicy 裁剪内建工具(验收报告 D.3)'
     expect(seen[0]).toEqual(['echo']);
   });
 });
+
+describe('ForgeaxCoreKernel — 内核默认 web 工具', () => {
+  function capturingProvider(seen: string[][]): LLMProvider {
+    return {
+      api: 'stub',
+      async *stream(r: ProviderRequest) {
+        seen.push(r.tools.map((t) => t.name));
+        yield asstText('ok');
+      },
+    };
+  }
+
+  test('host 未声明时默认上线注入的 web 工具', async () => {
+    const seen: string[][] = [];
+    const k = new ForgeaxCoreKernel({
+      provider: capturingProvider(seen),
+      executeTool: async () => null,
+      localToolImpls: [spyLocalTool('web_fetch', () => {}), spyLocalTool('web_search', () => {})],
+    });
+    await collect(k, req({ tools: [{ name: 'echo', inputSchema: {} }] }));
+    expect(seen[0]).toContain('web_fetch');
+    expect(seen[0]).toContain('web_search');
+  });
+
+  test('host 已声明同名工具时不重复叠加', async () => {
+    const seen: string[][] = [];
+    const k = new ForgeaxCoreKernel({
+      provider: capturingProvider(seen),
+      executeTool: async () => null,
+      localToolImpls: [spyLocalTool('web_fetch', () => {})],
+    });
+    await collect(k, req({ tools: [{ name: 'web_fetch', inputSchema: {} }] }));
+    expect(seen[0]?.filter((name) => name === 'web_fetch')).toHaveLength(1);
+  });
+
+  test('未注入 web 实现时保持原工具面', async () => {
+    const seen: string[][] = [];
+    const k = new ForgeaxCoreKernel({ provider: capturingProvider(seen), executeTool: async () => null });
+    await collect(k, req({ tools: [{ name: 'echo', inputSchema: {} }] }));
+    expect(seen[0]).not.toContain('web_fetch');
+    expect(seen[0]).not.toContain('web_search');
+  });
+});

@@ -98,7 +98,10 @@ export async function* streamWithRetry(
     if (opts.signal.aborted) return;
     let started = false;
     try {
-      for await (const ev of provider.stream({ ...req, model }, opts)) {
+      const attemptRequest = attempt > 1 && opts.refreshRequest
+        ? await opts.refreshRequest()
+        : req;
+      for await (const ev of provider.stream({ ...attemptRequest, model }, opts)) {
         started = true;
         yield ev;
       }

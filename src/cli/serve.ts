@@ -24,7 +24,13 @@
  */
 import { existsSync, unlinkSync } from 'node:fs';
 import type { Server } from 'node:net';
-import type { TurnRequest, KernelEvent, ForkExtractRequest } from '@forgeax/agent-runtime/contract';
+import type {
+  TurnRequest,
+  KernelEvent,
+  ForkExtractRequest,
+  HostTurnSnapshotRequest,
+  HostTurnSnapshotResponse,
+} from '@forgeax/agent-runtime/contract';
 import { ForgeaxCoreKernel, type ExecuteToolFn } from '../kernel-facade/forgeax-core-kernel';
 import { InProcessScheduler } from '../inject/in-process-scheduler';
 import { InProcessTeammateExecutor } from '../inject/in-process-teammate-executor';
@@ -36,10 +42,12 @@ import type { LLMProvider, ProviderRequest } from '../provider/types';
 import type { AgentTool } from '../capability/types';
 import { builtinToolsPack } from '../capability/builtin-tools/index';
 import { notebookToolsPack } from '../capability/builtin-tools/notebook-tools';
+import { webToolsPack } from '../capability/builtin-tools/web-tools';
 import { NodeSandboxFs, NodeTerminal } from './io';
 import { makeImageDownscaler } from './image-scale';
 import { makeNodeObservability } from './observability';
 import { loadPermissionRulesFromSettings } from './permission-settings';
+import { makeDefaultSearchBackend } from './host-bits';
 import { isExitPlanTool } from '../permission/engine';
 import type { TelemetryRecord } from '@forgeax/types';
 
@@ -79,9 +87,13 @@ export async function startServe(sockPath: string): Promise<Server> {
   //   host 经 `ToolSpec.delivery==='local'` 决定哪些工具走本地;facade wrapTools 按名取本表实现,
   //   在本进程内直跑(满速 + crash 隔离),不回宿主。注入全量 builtin 无害——未标 local 的仍走
   //   host 桥。serve 是 HOST 层,引 capability/io 合法(机制层不碰 node:fs 的约束不破)。
+  //   web tools 与 CLI assembleCapabilities 同源:web_fetch 始终挂;web_search 仅在
+  //   FORGEAX_SEARCH_URL / BRAVE_* 配置了后端时挂。
+  const searchBackend = makeDefaultSearchBackend();
   const localToolImpls: AgentTool[] = [
     ...(builtinToolsPack().tools ?? []),
     ...(notebookToolsPack().tools ?? []),
+    ...(webToolsPack({ searchBackend }).tools ?? []),
   ];
   const downscaleImage = makeImageDownscaler();
   const localToolContext: Record<string, unknown> = {
@@ -103,8 +115,12 @@ export async function startServe(sockPath: string): Promise<Server> {
 
   const server = await listenRpc(sockPath, (conn: RpcConnection, sock) => {
     // 反向 host-tool 桥:serve 的所有工具执行都回调宿主(adapter 复跑 checkKernelTool)。
-    const executeTool: ExecuteToolFn = async (name, args, sid, agentId, callId) =>
-      conn.request('hostTool', { name, args, sid, agentId, callId });
+    const executeTool: ExecuteToolFn = async (name, args, sid, agentId, callId, turnCallId) =>
+      conn.request('hostTool', { name, args, sid, agentId, callId, turnCallId });
+    const getTurnSnapshot = async (
+      request: HostTurnSnapshotRequest,
+    ): Promise<HostTurnSnapshotResponse> =>
+      conn.request('hostTurnSnapshot', request) as Promise<HostTurnSnapshotResponse>;
 
     // ★ 可观测性(v3/B 档):exporter `send` → 独立 `telemetry` RPC 通知回流 server(与 turn 解耦,
     //   不开自己的 WS、不落盘——落盘+广播在 host/server 端)。FORGEAX_OTEL=off 时 makeNodeObservability
@@ -131,6 +147,7 @@ export async function startServe(sockPath: string): Promise<Server> {
     const kernel = new ForgeaxCoreKernel({
       provider: buildProvider('claude-opus-4-8'),
       executeTool,
+      getTurnSnapshot,
       observability,
       // B 路径:本地工具实现表 + 本地 IO。delivery==='local' 的工具经此本进程直跑(不回宿主);
       //   其余仍走上面的 executeTool 桥(host 把闸)。
@@ -194,7 +211,7 @@ export async function startServe(sockPath: string): Promise<Server> {
     conn.setRequestHandler(async (method, params) => {
       switch (method) {
         case 'ping':
-          return { ok: true };
+          return { ok: true, capabilities: ['hostTurnSnapshot.v1'] };
         case 'runTurn': {
           const req = params as WireTurnRequest;
           const callId = req.callId ?? req.session?.threadId ?? 'turn';

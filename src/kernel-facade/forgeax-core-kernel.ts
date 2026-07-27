@@ -19,6 +19,8 @@ import type {
   TurnHandle,
   TurnMessage,
   TurnRequest,
+  ToolSpec,
+  HostTurnSnapshotProvider,
   ForkExtractRequest,
   ForkExtractResult,
 } from '@forgeax/agent-runtime/contract';
@@ -132,13 +134,23 @@ export type HandoffProvider = HandoffSink | ((ctx: TurnHandoffCtx) => HandoffSin
 /** host-tool 执行缝(K11):facade 不自己执行工具,委托 host(对齐合订方案 §5 方案 A
  *  的 `POST /:sid/kernel-tool` 桥)。`agentId` = 本轮真实 agent(委派轮里即被委派方,
  *  如 mochi),供 host 桥按真实身份求 trustTier / 弹权限卡 / 选执行 context;缺省回落主 agent。 */
-export type ExecuteToolFn = (name: string, args: unknown, sid?: string, agentId?: string, callId?: string) => Promise<unknown>;
+export type ExecuteToolFn = (
+  name: string,
+  args: unknown,
+  sid?: string,
+  agentId?: string,
+  callId?: string,
+  turnCallId?: string,
+) => Promise<unknown>;
 
 export interface ForgeaxCoreKernelOptions {
   /** 注入 provider(per-session baseUrl+token 经 ConfigSource;支持 M4)。 */
   provider: LLMProvider;
   /** host-tool 执行桥。 */
   executeTool: ExecuteToolFn;
+  /** Live host state for sidecar turns. The callback is invoked immediately
+   * before every provider call; absent keeps static TurnRequest semantics. */
+  getTurnSnapshot?: HostTurnSnapshotProvider;
   /** 初始权限模式(engine 原生;缺省 'default')。`setPermissionMode` 运行中可改活 agent。 */
   initialMode?: NativePermissionMode;
   /** host 注入的权限规则集(deny/ask/allow);透传给每轮 CoreAgent,使 facade 驱动的轮也尊规则。 */
@@ -484,14 +496,25 @@ export class ForgeaxCoreKernel implements AgentKernel {
     });
   }
 
+  /**
+   * 内核内建 web 工具。不依赖 host `TurnRequest.tools` 声明，避免编排层为
+   * forgeax-core 补工具时与 CC/CBC 自带的 WebFetch 重复。
+   */
+  private kernelWebTools(hostTools: AgentTool[]): AgentTool[] {
+    const hosted = new Set(hostTools.map((t) => t.name));
+    return (this.o.localToolImpls ?? []).filter(
+      (t) => (t.name === 'web_fetch' || t.name === 'web_search') && !hosted.has(t.name),
+    );
+  }
+
   /** ToolSpec → AgentTool,call 委托 host-tool 桥(K11)。 */
-  private wrapTools(req: TurnRequest): AgentTool[] {
+  private wrapTools(req: TurnRequest, specs: ToolSpec[] = req.tools): AgentTool[] {
     const sid = req.hostSessionId as string | undefined;
     // 本轮真实 agent —— 透给 host 桥(委派轮里即被委派方,如 mochi);丢了会让权限卡错记到主 agent。
     const agentId = req.session?.agentId;
     // 本地实现表(B 路径):name → core builtin AgentTool(host=serve 注入)。
     const localByName = new Map((this.o.localToolImpls ?? []).map((t) => [t.name, t]));
-    return req.tools.map((spec) => {
+    return specs.map((spec) => {
       // delivery==='local' 且有同名本地实现 → 本进程内直跑(经 ctx.sandboxFs,不回宿主)。
       //   拿不到本地实现 → fail-safe 落回下方 host 桥(永不因缺实现而失能)。
       if (spec.delivery === 'local') {
@@ -508,7 +531,9 @@ export class ForgeaxCoreKernel implements AgentKernel {
         // ctx.toolUseId = 本轮工具调用 id(= tool.call/tool.result 的 callId)。透传给 host
         // 桥,让宿主(studio remoteAgentRuntime)能把前端 HITL 卡片的 pending 表 key 钉在
         // 同一 id 上——否则 host 侧只能随机造 id,前端回填对不上 → ask_user_question 卡死。
-        call: async (input: unknown, ctx) => ({ data: await this.o.executeTool(spec.name, input, sid, agentId, ctx?.toolUseId) }),
+        call: async (input: unknown, ctx) => ({
+          data: await this.o.executeTool(spec.name, input, sid, agentId, ctx?.toolUseId, req.callId),
+        }),
         mapResult: (data, id) => ({ type: 'tool.result', payload: { callId: id, ok: true, result: data }, ts: 0 }),
         maxResultSizeChars: Infinity,
       });
@@ -553,7 +578,13 @@ export class ForgeaxCoreKernel implements AgentKernel {
     //   控制面 setPermissionMode 仍可中途再改;此处把 req 的初始模式落到 currentMode
     //   (applyMode 顺带维护 prePlanMode)。
     if (req.permissionMode) this.applyMode(translateNeutral(req.permissionMode));
-    const hostTools = this.wrapTools(req);
+    let toolsRevision = req.toolsRevision;
+    let hostTools = this.wrapTools(req);
+    const withKernelTools = (nextHostTools: AgentTool[]): AgentTool[] => [
+      ...nextHostTools,
+      ...this.kernelWebTools(nextHostTools),
+    ];
+    const kernelTools = withKernelTools(hostTools);
     // ★ L5 observability:本轮 FIFO 队列,缓冲子 agent 生命周期回调投射出的 KernelEvent。
     //   onSubagentEvent 在 Task 工具 await 期间(即 agent.run 两次 yield 之间)同步推入,
     //   逐轮 drain 即可保 start→turn→tool→done 顺序排在父 tool.result 之前。
@@ -583,24 +614,27 @@ export class ForgeaxCoreKernel implements AgentKernel {
       //   工具经此建子 span(显式认 parent)/出带 traceId 的 log,不押 active-context。
       observability: { tracer: obs.tracer, logger: turnLogger } satisfies Observability,
     };
-    // taskTool 构造抽成 buildTaskTool(SSOT):forkExtract 复用同一份 → 工具定义字节一致,缓存键匹配。
-    const taskTool = this.buildTaskTool(req, model, hostTools, toolContext, (k) => subQueue.push(k));
     // ★ peer 多 agent:每轮解析 handoff sink(工厂拿本轮 provider/model/host 工具,
     //   使被 spawn 的子 agent 用同源 host 工具)。注入了 sink 才把 Handoff 工具加进模型
     //   工具集 —— 否则模型无从触发,即便注了 sink 也维持单 agent(零行为变化)。
     const handoffSink =
       typeof this.o.handoff === 'function'
-        ? this.o.handoff({ provider: this.o.provider, model, tools: hostTools })
+        ? this.o.handoff({ provider: this.o.provider, model, tools: kernelTools })
         : this.o.handoff;
     // plan 出口工具(ExitPlanMode)不在此注入:CoreAgent loop 是唯一注入点(007,SSOT)——
     //   plan 模式的轮由 loop 逐轮补注,facade 与直连路径同源。
     // 内建编排工具(Task/Handoff)默认叠加;再经 req.toolPolicy 按 host roster 裁剪
     //   (缺省全放行 = 零行为变化;studio 对 game-gen profile deny Task/Handoff → 与 legacy 对齐,
     //   见 applyToolPolicy 与验收报告 D.3)。
-    const assembled = handoffSink
-      ? [...hostTools, taskTool, handoffTool()]
-      : [...hostTools, taskTool];
-    const tools = this.applyToolPolicy(assembled, req.toolPolicy);
+    const assembleTools = (nextHostTools: AgentTool[]): AgentTool[] => {
+      const nextKernelTools = withKernelTools(nextHostTools);
+      const nextTaskTool = this.buildTaskTool(req, model, nextKernelTools, toolContext, (k) => subQueue.push(k));
+      const assembled = handoffSink
+        ? [...nextKernelTools, nextTaskTool, handoffTool()]
+        : [...nextKernelTools, nextTaskTool];
+      return this.applyToolPolicy(assembled, req.toolPolicy);
+    };
+    const tools = assembleTools(hostTools);
     const context: AgentContext = {
       agentId: req.session.agentId,
       provider: this.o.provider,
@@ -618,6 +652,26 @@ export class ForgeaxCoreKernel implements AgentKernel {
 
     const agent = new CoreAgent({
       context,
+      ...(req.liveHostContext && this.o.getTurnSnapshot
+        ? {
+            refreshTurnContext: async () => {
+              const snapshot = await this.o.getTurnSnapshot!({
+                callId: req.callId ?? req.session.threadId,
+                ...(toolsRevision ? { knownToolsRevision: toolsRevision } : {}),
+              });
+              let refreshedTools: AgentTool[] | undefined;
+              if (snapshot.tools) {
+                hostTools = this.wrapTools(req, snapshot.tools);
+                refreshedTools = assembleTools(hostTools);
+              }
+              toolsRevision = snapshot.toolsRevision;
+              return {
+                ...(refreshedTools ? { tools: refreshedTools } : {}),
+                dynamicContext: snapshot.dynamicSuffix ?? sp.dynamicSuffix ?? '',
+              };
+            },
+          }
+        : {}),
       globalCacheEnabled: true,
       // ★ T5:注入本轮 bus,使内部 CompactionApplied / ApiRetry 事件被 facade 订阅并出墙。
       bus: turnBus,
@@ -649,7 +703,10 @@ export class ForgeaxCoreKernel implements AgentKernel {
     });
     if (req.callId) this.handles.set(req.callId, agent);
 
-    const userText = sp.dynamicSuffix ? `${req.input.text}\n\n${sp.dynamicSuffix}` : req.input.text;
+    const userText =
+      !(req.liveHostContext && this.o.getTurnSnapshot) && sp.dynamicSuffix
+        ? `${req.input.text}\n\n${sp.dynamicSuffix}`
+        : req.input.text;
     // 多模态:有图片附件时,user 消息 payload 升级为 content 数组([text, image…]),
     //   否则保持纯字符串(零回归)。content 数组经 agent.run(:567 content=payload)
     //   原样落到 provider(anthropic.ts:62 透传)→ 模型收到图。
@@ -807,9 +864,10 @@ export class ForgeaxCoreKernel implements AgentKernel {
       budget: {},
     } as unknown as TurnRequest;
     const hostTools = this.wrapTools(wrapReq);
+    const kernelTools = [...hostTools, ...this.kernelWebTools(hostTools)];
     const toolContext: Record<string, unknown> = { ...(this.o.toolContext ?? {}) };
-    const taskTool = this.buildTaskTool(wrapReq, model, hostTools, toolContext, () => {});
-    const tools = [...hostTools, taskTool];
+    const taskTool = this.buildTaskTool(wrapReq, model, kernelTools, toolContext, () => {});
+    const tools = [...kernelTools, taskTool];
     const allowed = new Set(req.allowedTools);
     const result = await runForkedAgent(
       {

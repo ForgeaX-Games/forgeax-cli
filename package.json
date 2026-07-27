@@ -1,6 +1,6 @@
 {
   "name": "@forgeax/cli",
-  "version": "0.1.5",
+  "version": "0.1.8",
   "private": false,
   "type": "module",
   "description": "@forgeax/cli — self-contained single-agent runtime (agent loop, events, history, capability, provider, compaction). Embeddable natively; also implements the AgentKernel contract as a drop-in kernel.",
