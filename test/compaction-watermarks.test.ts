@@ -37,6 +37,11 @@ describe('Stream A — watermarks 比例/per-model (#1)', () => {
     expect(lookupModelContext('gpt-4o-2024-11-20').contextWindow).toBe(128_000);
     expect(lookupModelContext('gemini-2.5-pro').contextWindow).toBe(1_000_000);
     expect(lookupModelContext('deepseek-chat').contextWindow).toBe(128_000);
+    // 造化 alias and the upstream GLM id must reserve room beyond adaptive
+    // thinking; otherwise the provider's 8192 fallback can end a tool turn
+    // with zero visible text.
+    expect(lookupModelContext('zaohua-pro').maxOutputTokens).toBe(128_000);
+    expect(lookupModelContext('glm-5.2').maxOutputTokens).toBe(128_000);
     // overrides 精确优先
     expect(
       lookupModelContext('my-model', { 'my-model': { contextWindow: 42 } }).contextWindow,

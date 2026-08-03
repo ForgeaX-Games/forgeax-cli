@@ -105,6 +105,17 @@ export async function assembleCapabilities(opts: AssembleCapabilitiesOptions): P
   const disposers: Array<() => void | Promise<void>> = [];
   const packs: CapabilityPack[] = [];
 
+  // Load plugins once up front. Their command/skill component paths join the
+  // same Skill dispatcher as standalone `.forgeax/commands` and `.forgeax/skills`.
+  let loadedPlugins: ReturnType<typeof loadPlugins>['plugins'] = [];
+  if (opts.pluginSources && opts.pluginSources.length > 0) {
+    const loaded = loadPlugins(opts.pluginSources);
+    loadedPlugins = loaded.plugins;
+    for (const e of loaded.errors) {
+      process.stderr.write(`[assemble] plugin ${e.path}: ${e.reason}\n`);
+    }
+  }
+
   // 007:给了非阻塞 spawn 接缝 → 建后台进程注册表;退出/abort 时 kill 残留进程。
   let shellRegistry: BackgroundShellRegistry | undefined;
   if (opts.backgroundSpawn) {
@@ -132,8 +143,20 @@ export async function assembleCapabilities(opts: AssembleCapabilitiesOptions): P
   }
 
   // ③ skill(+ 单文件 markdown 指令;两者合并进同一 Skill 工具)。
-  if ((opts.skillDirs && opts.skillDirs.length > 0) || (opts.commandDirs && opts.commandDirs.length > 0)) {
-    packs.push(skillPack(opts.skillDirs ?? [], undefined, { commandDirs: opts.commandDirs }));
+  // Plugin components are folded into this same pack so plugin commands and
+  // skills behave identically across kernels.
+  const pluginSkillDirs = loadedPlugins.flatMap((p) => [
+    ...(p.skillsPath ? [p.skillsPath] : []),
+    ...(p.skillsPaths ?? []),
+  ]);
+  const pluginCommandDirs = loadedPlugins.flatMap((p) => [
+    ...(p.commandsPath ? [p.commandsPath] : []),
+    ...(p.commandsPaths ?? []),
+  ]);
+  const skillDirs = [...(opts.skillDirs ?? []), ...pluginSkillDirs];
+  const commandDirs = [...(opts.commandDirs ?? []), ...pluginCommandDirs];
+  if (skillDirs.length > 0 || commandDirs.length > 0) {
+    packs.push(skillPack(skillDirs, undefined, { commandDirs }));
   }
 
   // ④ MCP:解析配置 →(pass1)连接+计数 → decideMcpDeferMode →(pass2)按 deferMode 打 pack。
@@ -193,11 +216,9 @@ export async function assembleCapabilities(opts: AssembleCapabilitiesOptions): P
     }
   }
 
-  // ⑤ plugin:扫目录加载 → 转 pack(hooks 经 buildHooksPlugin 订阅 bus)。
-  if (opts.pluginSources && opts.pluginSources.length > 0) {
-    const { plugins, errors } = loadPlugins(opts.pluginSources);
-    for (const e of errors) process.stderr.write(`[assemble] plugin ${e.path}: ${e.reason}\n`);
-    for (const lp of plugins) packs.push(pluginToCapabilityPack(lp, opts.bus, { runHook: opts.runHook }));
+  // ⑤ plugin:已在装配开始扫描 → 转 pack(hooks 经 buildHooksPlugin 订阅 bus)。
+  for (const lp of loadedPlugins) {
+    packs.push(pluginToCapabilityPack(lp, opts.bus, { runHook: opts.runHook }));
   }
 
   // 索引所有 pack 的 tools/slots/plugins(同名后注册覆盖 = 高层 override 近似)。

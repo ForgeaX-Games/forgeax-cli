@@ -7,9 +7,8 @@
  * JSON-RPC sidecar 并存:sidecar 面向 agent-host 宿主(自有协议、unix sock),
  * mcp-serve 面向外部 MCP 生态(stdio、标准 MCP)。
  *
- * 协议:手写 newline-framed JSON-RPC(每条消息一行 `JSON.stringify(msg)+"\n"`,
- * 对齐 `cli/mcp-stdio.ts` 的 client 帧格式与 MCP stdio transport spec)——**不引
- * 外部 MCP SDK**(与 `FetchMCPClient`/`InProcessMCPClient` 同路线自实现,boundary 不破)。
+ * 协议由 `src/mcp/protocol.ts` 统一处理 newline-framed JSON-RPC 与 MCP
+ * dispatch；本模块只负责工具装配、权限和执行策略。
  *
  * 信任边界:每次 `tools/call` 都过现有权限引擎(`hasPermissionsToUseTool`,读
  * settings.permissions 规则)。server 非交互——`ask` 一律拒绝;**改动型工具默认
@@ -22,6 +21,12 @@ import type { AgentTool, ToolContext } from '../capability/types';
 import type { PermissionRuleSet } from '../permission/rules';
 import { hasPermissionsToUseTool, safeReadOnly } from '../permission/engine';
 import { MCP_PROTOCOL_VERSION, type MCPTool, type MCPToolResult } from '../capability/mcp/client';
+import {
+  createMcpDispatcher,
+  RpcError,
+  serveStdio,
+  type McpServerSpec,
+} from '../mcp/protocol';
 import { FORGEAX_CORE_VERSION } from '../version';
 
 /** mcp-serve 处理一条请求所需的装配依赖(纯,供测试直接驱动)。 */
@@ -36,13 +41,6 @@ export interface McpServeDeps {
 }
 
 const SERVER_INFO = { name: 'forgeax-core', version: FORGEAX_CORE_VERSION } as const;
-
-/** 带 JSON-RPC error code 的错误(runMcpServe 据 `.code` 包 error 帧)。 */
-class RpcError extends Error {
-  constructor(readonly code: number, message: string) {
-    super(message);
-  }
-}
 
 /** AgentTool → MCP `tools/list` 描述(缺 JSON Schema 时给宽松 object)。 */
 function toMcpTool(t: AgentTool): MCPTool {
@@ -68,22 +66,36 @@ export async function handleMcpRequest(
   params: unknown,
   deps: McpServeDeps,
 ): Promise<unknown> {
-  switch (method) {
-    case 'initialize':
-      return {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: SERVER_INFO,
-      };
-    case 'ping':
-      return {};
-    case 'tools/list':
-      return { tools: deps.tools.map(toMcpTool) };
-    case 'tools/call':
-      return callTool(params as { name?: string; arguments?: unknown }, deps);
-    default:
-      throw new RpcError(-32601, `method not found: ${method}`);
-  }
+  const response = await createMcpDispatcher(createServerSpec(deps))({
+    jsonrpc: '2.0',
+    id: 1,
+    method,
+    params: (params ?? {}) as Record<string, unknown>,
+  });
+  if (!response) return undefined;
+  const error = response.error as { code?: number; message?: string } | undefined;
+  if (error) throw new RpcError(error.code ?? -32603, error.message ?? 'MCP request failed');
+  return response.result;
+}
+
+function createServerSpec(deps: McpServeDeps): McpServerSpec {
+  const protocolTools = deps.tools.map((tool) => ({
+    ...toMcpTool(tool),
+    run: (args: Record<string, unknown>) => callTool({ name: tool.name, arguments: args }, deps),
+  }));
+  return {
+    serverInfo: SERVER_INFO,
+    protocolVersion: MCP_PROTOCOL_VERSION,
+    capabilities: { tools: { listChanged: false } },
+    tools: protocolTools,
+    resolveTool: (name, tools) => {
+      const index = deps.tools.findIndex((tool) => tool.name === name || tool.aliases?.includes(name));
+      return index >= 0 ? tools[index] : undefined;
+    },
+    onUnknownTool: (name) => {
+      throw new RpcError(-32602, `unknown tool: ${name}`);
+    },
+  };
 }
 
 async function callTool(
@@ -107,7 +119,7 @@ async function callTool(
   if (!readOnly && !deps.allowMutations) {
     return toolError(`tool "${name}" mutates state; start mcp-serve with --allow-writes to enable it`);
   }
-  if (perm.behavior === 'ask' && !deps.allowMutations) {
+  if (perm.behavior === 'ask') {
     return toolError(`tool "${name}" requires interactive approval; unavailable over non-interactive MCP`);
   }
 
@@ -137,41 +149,6 @@ let callSeq = 0;
  * ——本模块只管协议 + 循环,不反向依赖 main(避免 host 入口 ↔ 本模块循环依赖)。
  */
 export async function runMcpServe(deps: McpServeDeps): Promise<number> {
-  const send = (obj: unknown): void => void process.stdout.write(JSON.stringify(obj) + '\n');
-
-  const onLine = async (line: string): Promise<void> => {
-    let msg: { id?: unknown; method?: unknown; params?: unknown };
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      return; // 坏帧忽略(不毒化流)
-    }
-    const { id, method, params } = msg;
-    if (typeof method !== 'string') return; // response / 垃圾帧
-    if (id === undefined || id === null) return; // 通知(如 notifications/initialized)——不回
-    try {
-      const result = await handleMcpRequest(method, params, deps);
-      send({ jsonrpc: '2.0', id, result });
-    } catch (e) {
-      const code = e instanceof RpcError ? e.code : -32603;
-      send({ jsonrpc: '2.0', id, error: { code, message: e instanceof Error ? e.message : String(e) } });
-    }
-  };
-
-  let buf = '';
-  process.stdin.setEncoding('utf8');
-  await new Promise<void>((resolve) => {
-    process.stdin.on('data', (chunk: string) => {
-      buf += chunk;
-      let nl: number;
-      while ((nl = buf.indexOf('\n')) !== -1) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (line) void onLine(line);
-      }
-    });
-    process.stdin.on('end', resolve);
-    process.stdin.on('close', resolve);
-  });
+  await serveStdio(createMcpDispatcher(createServerSpec(deps)));
   return 0;
 }

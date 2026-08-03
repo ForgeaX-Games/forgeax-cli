@@ -330,6 +330,21 @@ function capturingModel(scripts: ProviderStreamEvent[][], sink: { model?: string
 }
 
 describe('ForgeaxCoreKernel — setModel 控制面覆盖(P0.1)', () => {
+  test('OS2 zaohua-pro 主轮把模型输出预算透传到 provider', async () => {
+    const seen: ProviderRequest[] = [];
+    const provider: LLMProvider = {
+      api: 'stub',
+      async *stream(request) {
+        seen.push(request);
+        yield asstText('ok');
+      },
+    };
+    const k = new ForgeaxCoreKernel({ provider, executeTool: async () => null });
+    await collect(k, req({ model: 'zaohua-pro', tools: [] }));
+    expect(seen[0]?.model).toBe('zaohua-pro');
+    expect(seen[0]?.maxOutputTokens).toBe(128_000);
+  });
+
   test('openHandle.setModel(X) → 后续轮 provider 请求用模型 X(覆盖 req.model)', async () => {
     const sink: { model?: string } = {};
     const k = new ForgeaxCoreKernel({ provider: capturingModel([[asstText('ok')]], sink), executeTool: async () => null });

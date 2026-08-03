@@ -19,12 +19,15 @@ import { normalizeRules } from '../src/permission/rules';
 import { makeStdioMcpFactory } from '../src/cli/mcp-stdio';
 import { InProcessMCPClient, type MCPToolResult } from '../src/capability/mcp/client';
 
-function makeDeps(allowMutations = false): McpServeDeps {
+function makeDeps(
+  allowMutations = false,
+  rules: McpServeDeps['rules'] = normalizeRules({}),
+): McpServeDeps {
   const ctx = buildContext(parseArgs(['--demo']));
   return {
     tools: ctx.config.tools,
     toolContext: ctx.toolContext as Record<string, unknown>,
-    rules: normalizeRules({}),
+    rules,
     allowMutations,
   };
 }
@@ -89,6 +92,24 @@ describe('F-01 reverse MCP server — hermetic (handleMcpRequest)', () => {
         makeDeps(true),
       )) as MCPToolResult;
       expect(allowed.isError).toBeFalsy();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('settings ask 在非交互 MCP 中恒拒绝,即使启用 --allow-writes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-serve-'));
+    const file = join(dir, 'out.txt');
+    try {
+      const asked = (await handleMcpRequest(
+        'tools/call',
+        { name: 'write_file', arguments: { file_path: file, content: 'x' } },
+        makeDeps(true, normalizeRules({
+          ask: [{ toolName: 'write_file', behavior: 'ask', source: 'test' }],
+        })),
+      )) as MCPToolResult;
+      expect(asked.isError).toBe(true);
+      expect((asked.content as Array<{ text: string }>)[0].text).toContain('interactive approval');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

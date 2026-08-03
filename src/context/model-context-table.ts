@@ -34,6 +34,13 @@ const TABLE: Array<{ match: string; info: ModelContextInfo }> = [
   { match: 'gemini', info: { contextWindow: 1_000_000, maxOutputTokens: 8_192 } },
   // DeepSeek
   { match: 'deepseek', info: { contextWindow: 128_000, maxOutputTokens: 8_192 } },
+  // 造化网关 / GLM-5.2. `zaohua-pro` is the host-facing alias while the
+  // gateway may expose the upstream id as `glm-5.2`. Both need an
+  // explicit output ceiling: adaptive thinking can consume the whole provider
+  // default (8192) before the model reaches its visible answer/tool summary.
+  { match: 'glm-5.2', info: { contextWindow: 200_000, maxOutputTokens: 128_000 } },
+  { match: 'glm-5.2', info: { contextWindow: 200_000, maxOutputTokens: 128_000 } },
+  { match: 'zaohua-pro', info: { contextWindow: 200_000, maxOutputTokens: 128_000 } },
 ];
 
 /**
