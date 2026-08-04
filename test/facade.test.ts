@@ -118,6 +118,26 @@ describe('ForgeaxCoreKernel — peer 多 agent handoff seam(forgeax-cli 专属,�
 });
 
 describe('ForgeaxCoreKernel — runTurn maps a full turn', () => {
+  test('model_error preserves the provider error before turn.done(error)', async () => {
+    const provider: LLMProvider = {
+      api: 'stub',
+      async *stream() {
+        const error = Object.assign(new Error('upstream rejected the request'), { status: 400 });
+        throw error;
+      },
+    };
+    const k = new ForgeaxCoreKernel({ provider, executeTool: async () => null });
+    const events = await collect(k, req({ tools: [] }));
+    const error = events.find((e) => e.kind === 'error');
+    const done = events.find((e) => e.kind === 'turn.done');
+    expect(error).toMatchObject({
+      kind: 'error',
+      error: { code: 'protocol', message: 'upstream rejected the request' },
+    });
+    expect(done).toMatchObject({ kind: 'turn.done', reason: 'error' });
+    expect(events.indexOf(error!)).toBeLessThan(events.indexOf(done!));
+  });
+
   test('budget {} continues beyond the stale 16-turn cap and completes', async () => {
     const scripts = Array.from({ length: 17 }, (_, i) => [asstToolUse(`t${i}`, 'echo', {})]);
     scripts.push([asstText('done')]);
@@ -149,6 +169,25 @@ describe('ForgeaxCoreKernel — runTurn maps a full turn', () => {
     expect(di).toBeGreaterThan(ui);
     const done = events[di] as { kind: 'turn.done'; reason: string };
     expect(done.reason).toBe('stop');
+  });
+
+  test('preserves scalar host schemas for execution-time validation', async () => {
+    let calls = 0;
+    const k = new ForgeaxCoreKernel({
+      provider: scripted([[asstToolUse('t1', 'echo', 'hello')], [asstText('done')]]),
+      executeTool: async (name, input) => {
+        calls++;
+        expect(name).toBe('echo');
+        expect(input).toBe('hello');
+        return { ok: true };
+      },
+    });
+    const events = await collect(k, req({
+      tools: [{ name: 'echo', inputSchema: { type: 'string' } }],
+    }));
+
+    expect(calls).toBe(1);
+    expect(events.some((e) => e.kind === 'turn.done' && e.reason === 'stop')).toBe(true);
   });
 
   test('emits message.delta for assistant text', async () => {

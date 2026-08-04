@@ -127,7 +127,11 @@ describe('循环兜底 unrecoverable_tool_error', () => {
     const events = await collect(agent, { input: { type: 'user', payload: 'hi', ts: 0 } });
     const last = events.at(-1)!;
     expect(last.type).toBe('done');
-    if (last.type === 'done') expect(last.terminal.reason).toBe('unrecoverable_tool_error');
+    if (last.type === 'done') {
+      expect(last.terminal.reason).toBe('unrecoverable_tool_error');
+      expect((last.terminal.error as Error)?.message).toContain('tool "flaky" failed 2 consecutive times');
+      expect((last.terminal.error as Error)?.message).toContain('boom');
+    }
   });
 
   test('成功穿插重置该 key — 不误杀', async () => {

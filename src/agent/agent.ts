@@ -975,9 +975,14 @@ export class CoreAgent implements Agent {
           yield done('prompt_too_long', { error: e });
           return;
         }
-        if (marks.blockingLimit > 0 && isOverBlockingLimit(estimateTokens(messages), marks)) {
-          yield done('blocking_limit');
-          return;
+        if (marks.blockingLimit > 0) {
+          const estimatedTokens = estimateTokens(messages);
+          if (isOverBlockingLimit(estimatedTokens, marks)) {
+            yield done('blocking_limit', { error: new Error(
+              `conversation context is too large (${estimatedTokens} estimated tokens; blocking limit ${marks.blockingLimit}); start a new chat or compact the current session`,
+            ) });
+            return;
+          }
         }
       } else if (this.o.compaction) {
         const marks = computeWatermarks(this.o.contextWindow ?? 200_000);
@@ -1016,7 +1021,9 @@ export class CoreAgent implements Agent {
         if (marks.blockingLimit > 0) {
           const afterTokens = estimateTokens(messages);
           if (isOverBlockingLimit(afterTokens, marks)) {
-            yield done('blocking_limit');
+            yield done('blocking_limit', { error: new Error(
+              `conversation context is too large (${afterTokens} estimated tokens after compaction; blocking limit ${marks.blockingLimit}); start a new chat or compact the current session`,
+            ) });
             return;
           }
         }
@@ -1135,7 +1142,9 @@ export class CoreAgent implements Agent {
             // 压缩失败 → 落 prompt_too_long(下方),不崩。
           }
         }
-        yield done('prompt_too_long');
+        yield done('prompt_too_long', {
+          error: new Error('model context window exceeded and the conversation could not be compacted further'),
+        });
         return;
       }
 
@@ -1399,6 +1408,7 @@ export class CoreAgent implements Agent {
       if (maxStreak > 0 && Number.isFinite(maxStreak)) {
         const resById = new Map(results.map((r) => [r.toolUseId, r]));
         let bail = false;
+        const bailErrors: string[] = [];
         for (const tu of toolUses) {
           const r = resById.get(tu.id);
           if (!r) continue;
@@ -1406,7 +1416,10 @@ export class CoreAgent implements Agent {
           if (r.isError) {
             const n = (errorStreak.get(key) ?? 0) + 1;
             errorStreak.set(key, n);
-            if (n >= maxStreak) bail = true;
+            if (n >= maxStreak) {
+              bail = true;
+              bailErrors.push(`tool "${tu.name}" failed ${n} consecutive times: ${briefError(r.result)}`);
+            }
           } else {
             errorStreak.set(key, 0);
           }
@@ -1414,7 +1427,9 @@ export class CoreAgent implements Agent {
         if (bail) {
           yield { type: 'turn_aborted', turn };
           this.bus.publish(this.ev(CoreEventType.TurnAborted, { turn, reason: 'unrecoverable_tool_error' }));
-          yield done('unrecoverable_tool_error');
+          yield done('unrecoverable_tool_error', {
+            error: new Error(bailErrors.join('; ') || 'repeated tool failures exceeded the retry threshold'),
+          });
           return;
         }
       }

@@ -370,6 +370,9 @@ describe('GATE: watermark blocking-limit', () => {
 
     const last = events.at(-1)!;
     expect(last.type === 'done' && last.terminal.reason).toBe('blocking_limit');
+    expect(last.type === 'done' && (last.terminal.error as Error)?.message).toContain(
+      'conversation context is too large',
+    );
     expect(providerCalled).toBe(false); // bailed before the model call
   });
 
@@ -399,5 +402,8 @@ describe('GATE: watermark blocking-limit', () => {
     const last = events.at(-1)!;
     // Before the fix, toolUses.length===0 made this branch read as `completed`.
     expect(last.type === 'done' && last.terminal.reason).toBe('prompt_too_long');
+    expect(last.type === 'done' && (last.terminal.error as Error)?.message).toContain(
+      'model context window exceeded',
+    );
   });
 });

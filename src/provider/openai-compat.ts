@@ -334,6 +334,21 @@ export async function* normalizeOpenAIStream(
       continue;
     }
 
+    if (parsed.error) {
+      const detail = typeof parsed.error === 'object' && parsed.error !== null
+        ? parsed.error as Record<string, unknown>
+        : undefined;
+      const message =
+        (typeof detail?.message === 'string' && detail.message) ||
+        (typeof parsed.error === 'string' && parsed.error) ||
+        'OpenAI-compatible stream returned an error frame';
+      const error = new Error(message) as Error & { status?: number; code?: string };
+      const status = detail?.status ?? detail?.status_code;
+      if (typeof status === 'number') error.status = status;
+      if (typeof detail?.code === 'string') error.code = detail.code;
+      throw error;
+    }
+
     yield* ensureStarted();
 
     // usage 可独立于 choices 出现（OpenAI 尾 chunk choices:[] / DeepSeek 搭末 delta）。

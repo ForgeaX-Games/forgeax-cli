@@ -196,6 +196,20 @@ describe('anthropic: buildRequestBody adaptive thinking', () => {
     expect(body.temperature).toBeUndefined();
   });
 
+  test('adaptive downgrades to capped enabled for non-adaptive-only models (glm-5.2/zaohua-pro)', () => {
+    // adaptive 无 budget 上限 → glm-5.2 单轮思考失控(47K token / 8.7min);非 Opus 一律封顶。
+    const body = buildRequestBody({ ...BASE_REQ, model: 'zaohua-pro', thinking: { type: 'adaptive', display: 'summarized' } });
+    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 });
+    expect(body.temperature).toBeUndefined();
+    const provider = buildRequestBody({ ...BASE_REQ, model: 'glm-5.2', thinking: { type: 'adaptive' } });
+    expect(provider.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 });
+  });
+
+  test('Opus 4.7+ keeps uncapped adaptive thinking', () => {
+    const body = buildRequestBody({ ...BASE_REQ, model: 'claude-opus-4-7', thinking: { type: 'adaptive', display: 'summarized' } });
+    expect(body.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
+  });
+
   test('disabled thinking still passes temperature', () => {
     const body = buildRequestBody({ ...BASE_REQ, temperature: 0.2, thinking: { type: 'disabled' } });
     expect(body.temperature).toBe(0.2);

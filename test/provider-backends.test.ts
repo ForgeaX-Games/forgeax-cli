@@ -156,6 +156,19 @@ describe('openai-compat: normalizeOpenAIStream', () => {
     );
     expect(events.map((e) => e.type)).toContain('assistant');
   });
+
+  test('throws LiteLLM SSE error frames before emitting an empty assistant', async () => {
+    const events = normalizeOpenAIStream(
+      parseSSE(streamFromChunks([
+        sse({ error: { message: 'temporary upstream failure', status: 503, code: 'upstream_error' } }),
+      ])),
+    );
+    await expect(collect(events)).rejects.toMatchObject({
+      message: 'temporary upstream failure',
+      status: 503,
+      code: 'upstream_error',
+    });
+  });
 });
 
 describe('openai-compat: request body', () => {

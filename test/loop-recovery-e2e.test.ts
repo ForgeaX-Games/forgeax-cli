@@ -130,6 +130,10 @@ test('压缩后仍超 blockingLimit → done(blocking_limit)', async () => {
   const agent = new CoreAgent({ context: ctx([], provider, { contextWindow: undefined }), compaction, contextWindow: 30_000 });
   const evs = await run(agent, 'Z'.repeat(40_000));
   expect(lastDone(evs)).toBe('blocking_limit');
+  const done = evs.at(-1);
+  expect(done?.type === 'done' && (done.terminal.error as Error)?.message).toContain(
+    'conversation context is too large',
+  );
 });
 
 // ④ stop-hook ───────────────────────────────────────────────────────────────

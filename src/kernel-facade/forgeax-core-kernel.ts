@@ -527,6 +527,9 @@ export class ForgeaxCoreKernel implements AgentKernel {
         // host 在 ToolSpec.description 给了模型可读描述(compose-turn-request),
         // 必须透传到 AgentTool,否则 wire tools[] 没 description,模型只能靠名字猜。
         ...(spec.description ? { description: spec.description } : {}),
+        // Keep the execution schema unchanged. Provider adapters normalize
+        // only their model-facing wire copy; coercing an empty or scalar schema
+        // here would make the local validator reject otherwise valid inputs.
         inputJSONSchema: spec.inputSchema ?? {},
         // ctx.toolUseId = 本轮工具调用 id(= tool.call/tool.result 的 callId)。透传给 host
         // 桥,让宿主(studio remoteAgentRuntime)能把前端 HITL 卡片的 pending 表 key 钉在
@@ -742,10 +745,27 @@ export class ForgeaxCoreKernel implements AgentKernel {
             const s = subQueue.shift();
             if (s) yield s;
           }
+          const mappedReason = mapReason(ev.terminal.reason);
+          if (ev.terminal.error !== undefined) {
+            const terminalError = ev.terminal.error;
+            let message: string;
+            if (terminalError instanceof Error) message = terminalError.message;
+            else if (typeof terminalError === 'string') message = terminalError;
+            else {
+              try { message = JSON.stringify(terminalError); }
+              catch { message = String(terminalError); }
+            }
+            yield { kind: 'error', error: { code: 'protocol', message: message || ev.terminal.reason } };
+          } else if (mappedReason === 'error') {
+            yield {
+              kind: 'error',
+              error: { code: 'protocol', message: `kernel terminated with ${ev.terminal.reason}` },
+            };
+          }
           // B5 不变量:turn.usage 必在 turn.done 之前。
           yield emitUsage();
           usageEmitted = true;
-          lastReason = mapReason(ev.terminal.reason);
+          lastReason = mappedReason;
           yield { kind: 'turn.done', reason: lastReason };
         }
       }

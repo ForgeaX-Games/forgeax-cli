@@ -198,6 +198,74 @@ describe('buildRequestBody', () => {
     expect(Array.isArray(body.tools)).toBe(true);
   });
 
+  test('normalizes host tool schemas missing top-level type', () => {
+    const body = buildRequestBody({
+      ...baseReq,
+      tools: [{ name: 'host_tool', inputSchema: {} }],
+    });
+    expect((body.tools as Array<{ input_schema: { type?: string } }>)[0].input_schema.type).toBe('object');
+  });
+
+  test('flattens composition schemas rejected by the Anthropic gateway', () => {
+    const body = buildRequestBody({
+      ...baseReq,
+      tools: [{
+        name: 'gameplay',
+        inputSchema: {
+          oneOf: [
+            { type: 'object', properties: { operation: { const: 'play' } } },
+            { type: 'object', properties: { operation: { const: 'capture' } } },
+          ],
+        },
+      }],
+    });
+    const schema = (body.tools as Array<{ input_schema: Record<string, unknown> }>)[0].input_schema;
+    expect(schema.oneOf).toBeUndefined();
+    expect(schema.type).toBe('object');
+    expect((schema.properties as Record<string, { enum?: string[] }>).operation.enum).toEqual(['play', 'capture']);
+  });
+
+  test('normalizes nested composition without changing scalar types', () => {
+    const body = buildRequestBody({
+      ...baseReq,
+      tools: [{
+        name: 'nested',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            choice: {
+              type: ['string', 'null'],
+              oneOf: [{ const: 'play' }, { const: 'capture' }],
+            },
+            multiType: { type: ['string', 'number'] },
+            items: {
+              type: 'array',
+              items: { anyOf: [{ const: 1 }, { const: false }] },
+            },
+            config: {
+              additionalProperties: { oneOf: [{ type: 'string' }, { type: 'number' }] },
+            },
+          },
+        },
+      }],
+    });
+    const schema = (body.tools as Array<{ input_schema: Record<string, unknown> }>)[0].input_schema;
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+    expect(properties.choice).toMatchObject({ type: 'string', nullable: true, enum: ['play', 'capture'] });
+    expect((properties.choice as { oneOf?: unknown }).oneOf).toBeUndefined();
+    expect(properties.multiType.type).toBeUndefined();
+
+    const itemSchema = (properties.items.items ?? {}) as Record<string, unknown>;
+    expect(itemSchema.oneOf).toBeUndefined();
+    expect(itemSchema.anyOf).toBeUndefined();
+    expect(itemSchema.enum).toEqual([1, false]);
+    expect(itemSchema.type).toBeUndefined();
+
+    const additional = (properties.config.additionalProperties ?? {}) as Record<string, unknown>;
+    expect(additional.oneOf).toBeUndefined();
+    expect(additional.type).toBeUndefined();
+  });
+
   test('thinking enabled drops temperature + bumps max_tokens above budget', () => {
     const body = buildRequestBody({
       ...baseReq,

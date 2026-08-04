@@ -51,13 +51,191 @@ export function systemBlocksToAnthropic(blocks: SystemBlock[]): unknown[] {
   });
 }
 
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+const COMPOSITION_KEYS = ['oneOf', 'anyOf', 'allOf'] as const;
+const SCHEMA_MAP_KEYS = new Set([
+  'properties',
+  'patternProperties',
+  'dependentSchemas',
+  '$defs',
+  'definitions',
+]);
+const SCHEMA_VALUE_KEYS = new Set([
+  'additionalProperties',
+  'contains',
+  'contentSchema',
+  'if',
+  'items',
+  'not',
+  'propertyNames',
+  'then',
+  'unevaluatedItems',
+  'unevaluatedProperties',
+  'else',
+]);
+const SCHEMA_ARRAY_KEYS = new Set(['items', 'prefixItems']);
+
+function valueKey(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function uniqueValues(values: unknown[]): unknown[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = valueKey(value);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function inferredType(value: unknown): string | undefined {
+  if (value === null) return undefined;
+  if (Array.isArray(value)) return 'array';
+  switch (typeof value) {
+    case 'string':
+      return 'string';
+    case 'number':
+      return 'number';
+    case 'boolean':
+      return 'boolean';
+    case 'object':
+      return 'object';
+    default:
+      return undefined;
+  }
+}
+
+function normalizeType(value: unknown, out: JsonObject): void {
+  if (typeof value === 'string') {
+    out.type = value;
+    return;
+  }
+  if (!Array.isArray(value)) {
+    delete out.type;
+    return;
+  }
+  const types = value.filter((type): type is string => typeof type === 'string');
+  const nonNullTypes = [...new Set(types.filter((type) => type !== 'null'))];
+  if (nonNullTypes.length === 1) out.type = nonNullTypes[0];
+  else delete out.type;
+  if (types.includes('null')) out.nullable = true;
+}
+
+function normalizeSchemaChildren(out: JsonObject): void {
+  for (const key of SCHEMA_MAP_KEYS) {
+    const raw = out[key];
+    if (!isJsonObject(raw)) continue;
+    const normalized: JsonObject = {};
+    for (const [name, child] of Object.entries(raw)) {
+      normalized[name] = isJsonObject(child) ? normalizeAnthropicSchema(child) : child;
+    }
+    out[key] = normalized;
+  }
+
+  for (const key of SCHEMA_VALUE_KEYS) {
+    const raw = out[key];
+    if (isJsonObject(raw)) out[key] = normalizeAnthropicSchema(raw);
+  }
+
+  for (const key of SCHEMA_ARRAY_KEYS) {
+    const raw = out[key];
+    if (Array.isArray(raw)) {
+      out[key] = raw.map((child) => isJsonObject(child) ? normalizeAnthropicSchema(child) : child);
+    }
+  }
+}
+
+function mergeSchemaVariant(target: JsonObject, variant: JsonObject): void {
+  if (isJsonObject(variant.properties)) {
+    const properties = isJsonObject(target.properties) ? { ...target.properties } : {};
+    for (const [name, raw] of Object.entries(variant.properties)) {
+      const previous = properties[name];
+      if (isJsonObject(previous) && isJsonObject(raw)) {
+        const merged = { ...previous };
+        mergeSchemaVariant(merged, raw);
+        properties[name] = merged;
+      } else {
+        properties[name] = raw;
+      }
+    }
+    target.properties = properties;
+  }
+
+  const enums = [
+    ...(Array.isArray(target.enum) ? target.enum : []),
+    ...(Array.isArray(variant.enum) ? variant.enum : []),
+  ];
+  if (enums.length > 0) target.enum = uniqueValues(enums);
+
+  const targetType = typeof target.type === 'string' ? target.type : undefined;
+  const variantType = typeof variant.type === 'string' ? variant.type : undefined;
+  if (!targetType && variantType) target.type = variantType;
+  else if (targetType && variantType && targetType !== variantType) delete target.type;
+
+  if (target.items === undefined && variant.items !== undefined) target.items = variant.items;
+}
+
+/**
+ * LiteLLM's Anthropic translation accepts ordinary object schemas but rejects
+ * composition keywords (`oneOf`/`anyOf`/`allOf`). Keep the rich schema inside
+ * the tool dispatcher and flatten only the model-facing wire copy. Variants
+ * are merged into one permissive object; the original schema remains the
+ * execution-time validator.
+ */
+function normalizeAnthropicSchema(value: unknown, root = false): JsonObject {
+  const source = isJsonObject(value) ? value : {};
+  const out: JsonObject = { ...source };
+  const variants = COMPOSITION_KEYS
+    .flatMap((key) => Array.isArray(source[key]) ? source[key] : [])
+    .filter(isJsonObject);
+  for (const key of COMPOSITION_KEYS) delete out[key];
+
+  normalizeType(out.type, out);
+  if (Object.prototype.hasOwnProperty.call(out, 'const')) {
+    const constant = out.const;
+    delete out.const;
+    out.enum = uniqueValues([
+      ...(Array.isArray(out.enum) ? out.enum : []),
+      constant,
+    ]);
+    if (typeof out.type !== 'string') {
+      const type = inferredType(constant);
+      if (type) out.type = type;
+    }
+  }
+
+  normalizeSchemaChildren(out);
+  for (const variant of variants) mergeSchemaVariant(out, normalizeAnthropicSchema(variant));
+  normalizeSchemaChildren(out);
+  if (root && typeof out.type !== 'string') out.type = 'object';
+  return out;
+}
+
 export function toolDefsToAnthropic(tools: ProviderToolDef[]): unknown[] | undefined {
   if (!tools.length) return undefined;
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.inputSchema,
-  }));
+  return tools.map((t) => {
+    // Anthropic (and LiteLLM's Anthropic translator) requires every custom
+    // tool schema to declare a top-level JSON-Schema type. Host/MCP tools may
+    // legally arrive with an omitted type or an empty schema; normalize that
+    // at the wire boundary instead of letting one malformed tool reject the
+    // entire turn with `custom.input_schema.type: Field required`.
+    const inputSchema = normalizeAnthropicSchema(t.inputSchema, true);
+    return {
+      name: t.name,
+      description: t.description,
+      input_schema: inputSchema,
+    };
+  });
 }
 
 export function messagesToAnthropic(messages: ProviderMessage[]): unknown[] {
@@ -91,6 +269,19 @@ export function annotateMessageCache(messages: unknown[], skipCacheWrite?: boole
   }
 }
 
+/**
+ * Opus 4.7+ 只支持 thinking.type=adaptive（拒绝 enabled + 采样参数）；其余模型用
+ * enabled+budget_tokens 封顶思考,避免 adaptive 无上限导致单轮思考失控。
+ * 判定与 orchestrator 栈（llm/anthropic.ts 的 isAdaptiveOnlyModel）保持一致。
+ */
+function isAdaptiveOnlyModel(model: string): boolean {
+  const m = model.match(/claude-opus-(\d+)-(\d+)/);
+  if (!m) return false;
+  const major = parseInt(m[1], 10);
+  const minor = parseInt(m[2], 10);
+  return major > 4 || (major === 4 && minor >= 7);
+}
+
 export function buildRequestBody(req: ProviderRequest): Record<string, unknown> {
   const anthropicMessages = messagesToAnthropic(req.messages);
   const body: Record<string, unknown> = {
@@ -111,7 +302,10 @@ export function buildRequestBody(req: ProviderRequest): Record<string, unknown> 
   if (tools) body.tools = tools;
 
   if (req.thinking && req.thinking.type !== 'disabled') {
-    if (req.thinking.type === 'adaptive') {
+    // Opus 4.7+ 保留 adaptive（模型自适应,无预算上限,且 4.7+ 拒绝 enabled）；其余模型
+    // （含 glm-5.2/zaohua-pro）即使请求 adaptive 也降级为封顶 enabled —— adaptive 无 budget
+    // 上限会让单轮思考失控（实测 glm-5.2 单轮 47K thinking token / 8.7min,近乎零产出）。
+    if (req.thinking.type === 'adaptive' && isAdaptiveOnlyModel(req.model)) {
       // display:'summarized' 才会流式吐 thinking 增量(UI 可见)；缺省思考但不显示。
       body.thinking = req.thinking.display
         ? { type: 'adaptive', display: req.thinking.display }
