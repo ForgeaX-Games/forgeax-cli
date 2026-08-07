@@ -1,9 +1,9 @@
 {
   "name": "@forgeax/cli",
-  "version": "0.1.9",
+  "version": "0.1.11",
   "private": false,
   "type": "module",
-  "description": "@forgeax/cli — self-contained single-agent runtime (agent loop, events, history, capability, provider, compaction). Embeddable natively; also implements the AgentKernel contract as a drop-in kernel.",
+  "description": "@forgeax/cli \u2014 self-contained single-agent runtime (agent loop, events, history, capability, provider, compaction). Embeddable natively; also implements the AgentKernel contract as a drop-in kernel.",
   "main": "./dist/index.js",
   "bin": {
     "forgeax": "dist/cli/main.js",
@@ -28,10 +28,10 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build.mjs",
+    "build": "bun build.mjs && node scripts/check-pack-deps.mjs",
     "pack:tgz": "npm pack",
     "check:pack-deps": "node scripts/check-pack-deps.mjs",
-    "prepublishOnly": "bun run build && node scripts/check-pack-deps.mjs",
+    "prepublishOnly": "bun run build",
     "release": "node scripts/publish.mjs",
     "release:dry": "node scripts/publish.mjs --dry-run",
     "typecheck": "tsc --noEmit",

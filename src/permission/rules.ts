@@ -20,4 +20,4 @@ export {
   type PermissionRule,
   type PermissionRuleSet,
   type PermissionRuleBehavior,
-} from '@forgeax/types';
+} from '@forgeax/types/permission-rules';
