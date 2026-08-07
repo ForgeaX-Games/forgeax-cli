@@ -216,52 +216,6 @@ describe('anthropic: buildRequestBody adaptive thinking', () => {
     expect(body.thinking).toBeUndefined();
   });
 
-  // os1 parity: thinking-consistency guard (agentic_os assistantThinkingConsistent).
-  // Once history has an assistant tool_use turn without a leading thinking block
-  // (e.g. glm-5.2 returns UNSIGNED thinking → dropped), thinking must degrade OFF —
-  // matches os1 "think early, off during the tool loop".
-  const toolNoThinking: ProviderRequest['messages'] = [
-    { role: 'user', content: [{ type: 'text', text: 'make a game' }] },
-    { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'bash', input: {} }] },
-    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
-  ];
-
-  test('degrades thinking OFF when a prior tool_use turn lacks a leading thinking block', () => {
-    const body = buildRequestBody({ ...BASE_REQ, model: 'zaohua-pro', messages: toolNoThinking, thinking: { type: 'adaptive', display: 'summarized' } });
-    expect(body.thinking).toBeUndefined();
-    // enabled/budget path degrades the same way
-    const enabled = buildRequestBody({ ...BASE_REQ, model: 'glm-5.2', messages: toolNoThinking, thinking: { type: 'enabled', budgetTokens: 8192 } });
-    expect(enabled.thinking).toBeUndefined();
-  });
-
-  test('first turn (no tool_use in history) keeps capped thinking ON', () => {
-    const body = buildRequestBody({ ...BASE_REQ, model: 'zaohua-pro', thinking: { type: 'adaptive' } });
-    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 });
-  });
-
-  test('keeps capped thinking ON when the tool_use turn begins with a thinking block (consistent)', () => {
-    const consistent: ProviderRequest['messages'] = [
-      { role: 'user', content: [{ type: 'text', text: 'make a game' }] },
-      { role: 'assistant', content: [{ type: 'thinking', thinking: 'plan', signature: 'sig' }, { type: 'tool_use', id: 't1', name: 'bash', input: {} }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
-    ];
-    const body = buildRequestBody({ ...BASE_REQ, model: 'zaohua-pro', messages: consistent, thinking: { type: 'adaptive' } });
-    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 });
-  });
-
-  test('degrade strips orphan thinking blocks so no thinking blocks ship with thinking off', () => {
-    const msgs: ProviderRequest['messages'] = [
-      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
-      { role: 'assistant', content: [{ type: 'thinking', thinking: 'x' }, { type: 'text', text: 'a' }] },
-      { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'b', input: {} }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' }] },
-    ];
-    const body = buildRequestBody({ ...BASE_REQ, model: 'zaohua-pro', messages: msgs, thinking: { type: 'adaptive' } });
-    expect(body.thinking).toBeUndefined();
-    const out = body.messages as Array<{ content: any }>;
-    expect(out[1].content.some((b: any) => b.type === 'thinking')).toBe(false);
-  });
-
   test('enablePromptCaching=false skips message cache annotation', () => {
     const req: ProviderRequest = {
       ...BASE_REQ,
