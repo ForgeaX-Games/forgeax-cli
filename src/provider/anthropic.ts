@@ -282,6 +282,49 @@ function isAdaptiveOnlyModel(model: string): boolean {
   return major > 4 || (major === 4 && minor >= 7);
 }
 
+/**
+ * os1 parity (agentic_os `applyThinkingPolicy` + `assistantThinkingConsistent`).
+ *
+ * Extended thinking requires that every assistant turn carrying a `tool_use`
+ * block begin with the original `thinking` (or `redacted_thinking`) block, or
+ * the request fails `400 invalid_request: ...content.0.type expected 'thinking'`.
+ * Models like glm-5.2/zaohua-pro stream thinking but return it WITHOUT a
+ * (replayable) signature, so those blocks get dropped from history — once the
+ * conversation has a tool_use turn lacking a leading thinking block, keeping
+ * thinking enabled just makes the model re-think from scratch every turn (no
+ * cross-turn continuity, pure latency; observed as os2 being ~2x slower than
+ * os1 with no quality gain).
+ *
+ * Returns false if ANY assistant turn with a tool_use block does not start with
+ * a thinking / redacted_thinking block — the caller then degrades that request
+ * to no-thinking, exactly like os1.
+ */
+function assistantThinkingConsistent(messages: any[]): boolean {
+  for (const m of messages) {
+    if (m?.role !== 'assistant' || !Array.isArray(m.content)) continue;
+    const hasToolUse = m.content.some((b: any) => b?.type === 'tool_use');
+    if (!hasToolUse) continue;
+    const first = m.content[0];
+    if (!first || (first.type !== 'thinking' && first.type !== 'redacted_thinking')) return false;
+  }
+  return true;
+}
+
+/**
+ * Drop `thinking` / `redacted_thinking` blocks from wire messages (os1
+ * `stripThinkingBlocks`). Used whenever the outgoing request will NOT enable
+ * thinking — Anthropic/gateway rejects input thinking blocks when the thinking
+ * channel is off. Reassigns `content` (never mutates the caller's block array)
+ * and never empties a message.
+ */
+function stripThinkingBlocks(messages: any[]): void {
+  for (const m of messages) {
+    if (!Array.isArray(m?.content)) continue;
+    const filtered = m.content.filter((b: any) => b?.type !== 'thinking' && b?.type !== 'redacted_thinking');
+    if (filtered.length > 0 && filtered.length !== m.content.length) m.content = filtered;
+  }
+}
+
 export function buildRequestBody(req: ProviderRequest): Record<string, unknown> {
   const anthropicMessages = messagesToAnthropic(req.messages);
   const body: Record<string, unknown> = {
@@ -301,7 +344,12 @@ export function buildRequestBody(req: ProviderRequest): Record<string, unknown> 
   const tools = toolDefsToAnthropic(req.tools);
   if (tools) body.tools = tools;
 
-  if (req.thinking && req.thinking.type !== 'disabled') {
+  // Thinking channel (os1 parity). Only enable thinking when the model wants it
+  // AND history is thinking-consistent; otherwise degrade this request to
+  // no-thinking + strip orphan thinking blocks (mirrors agentic_os
+  // applyThinkingPolicy). This is what makes os1 "think early, off during the
+  // tool loop" for glm-5.2/zaohua-pro (whose thinking can't be replayed).
+  if (req.thinking && req.thinking.type !== 'disabled' && assistantThinkingConsistent(anthropicMessages)) {
     // Opus 4.7+ 保留 adaptive（模型自适应,无预算上限,且 4.7+ 拒绝 enabled）；其余模型
     // （含 glm-5.2/zaohua-pro）即使请求 adaptive 也降级为封顶 enabled —— adaptive 无 budget
     // 上限会让单轮思考失控（实测 glm-5.2 单轮 47K thinking token / 8.7min,近乎零产出）。
@@ -317,8 +365,12 @@ export function buildRequestBody(req: ProviderRequest): Record<string, unknown> 
       if ((body.max_tokens as number) <= budget) body.max_tokens = budget + 4096;
     }
     // thinking 开启时不发 temperature（API 要求 temp=1，省略即可）。
-  } else if (typeof req.temperature === 'number') {
-    body.temperature = req.temperature;
+  } else {
+    // thinking off — disabled, not requested, or degraded for consistency. Strip
+    // any orphan thinking blocks so we never send thinking blocks with thinking
+    // off (gateway/Anthropic rejects that), then pass temperature.
+    stripThinkingBlocks(anthropicMessages);
+    if (typeof req.temperature === 'number') body.temperature = req.temperature;
   }
 
   return body;
