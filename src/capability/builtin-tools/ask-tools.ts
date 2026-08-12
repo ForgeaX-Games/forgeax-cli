@@ -84,22 +84,123 @@ export interface AskUserQuestionOutput {
  *   - question 缺失/空 但 header 在 → question = header
  *   - header 缺失/空 但 question 在 → header = question(截断,保持「短标签」语义)
  *   - options 不动(由 validateInput 归一裸字符串)
- * 无法兜的(两者皆空、questions 非数组)原样回,交 validateInput loud 报错。
+ * 兼容模型偶发的多选字段变体(`MultiSelect`/`multiple`/`allowMultiple`等)，在
+ * 严格校验前统一成 canonical `multiSelect`。无法兜的(两者皆空、questions 非数组)
+ * 原样回,交 validateInput loud 报错。
  */
+function canonicalKey(key: string): string {
+  return key.toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function coerceBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (['true', '1', 'yes', 'multi', 'multiple'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'single'].includes(normalized)) return false;
+  return undefined;
+}
+
+const MULTI_SELECT_ALIASES = new Set([
+  'multiselect',
+  'allowmultiple',
+  'multiple',
+  'multi',
+  'multiselection',
+  'ismulti',
+  'ismultiselect',
+  'selectmultiple',
+  'allowmultiselect',
+]);
+
+const OPTION_LABEL_ALIASES = ['label', 'text', 'title', 'name', 'value', 'key'];
+const OPTION_DESCRIPTION_ALIASES = ['description', 'desc', 'detail', 'subtitle', 'value'];
+const QUESTION_TEXT_ALIASES = ['question', 'text', 'title', 'prompt', 'query', 'questiontext'];
+const OPTIONS_CONTAINER_ALIASES = ['options', 'choices', 'answers', 'items'];
+
+function canonicalMap(obj: Record<string, unknown>): Record<string, unknown> {
+  const map: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) map[canonicalKey(key)] = value;
+  return map;
+}
+
+function pickString(map: Record<string, unknown>, aliases: string[]): string | undefined {
+  for (const alias of aliases) {
+    const value = map[alias];
+    if (typeof value === 'string' && value.length > 0) return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  }
+  return undefined;
+}
+
+function repairOption(raw: unknown): Record<string, unknown> | null {
+  if (raw == null) return null;
+  if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+    const label = String(raw);
+    return label.length > 0 ? { label } : null;
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  const map = canonicalMap(raw as Record<string, unknown>);
+  const label = pickString(map, OPTION_LABEL_ALIASES);
+  if (label === undefined) return null;
+  const description = pickString(map, OPTION_DESCRIPTION_ALIASES);
+  const option: Record<string, unknown> = { label };
+  if (description !== undefined && description !== label) option.description = description;
+  return option;
+}
+
+function repairQuestion(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const src = raw as Record<string, unknown>;
+  const map = canonicalMap(src);
+  const item = { ...src };
+
+  let rawOptions: unknown;
+  for (const alias of OPTIONS_CONTAINER_ALIASES) {
+    if (Array.isArray(map[alias])) {
+      rawOptions = map[alias];
+      break;
+    }
+  }
+  if (Array.isArray(rawOptions)) {
+    item.options = rawOptions
+      .map(repairOption)
+      .filter((option): option is Record<string, unknown> => option !== null);
+  }
+
+  if (typeof item.question !== 'string' || item.question.length === 0) {
+    const question = pickString(map, QUESTION_TEXT_ALIASES);
+    if (question !== undefined) item.question = question;
+  }
+
+  const question = typeof item.question === 'string' ? item.question : '';
+  const header = typeof item.header === 'string' ? item.header : '';
+  if (question === '' && header !== '') item.question = header;
+  else if (header === '' && question !== '') item.header = question.slice(0, 24);
+
+  let hasCanonicalMultiSelect = Object.prototype.hasOwnProperty.call(item, 'multiSelect');
+  for (const [key, value] of Object.entries(item)) {
+    if (key === 'multiSelect' || !MULTI_SELECT_ALIASES.has(canonicalKey(key))) continue;
+    if (!hasCanonicalMultiSelect) {
+      const coerced = coerceBoolean(value);
+      if (coerced !== undefined) {
+        item.multiSelect = coerced;
+        hasCanonicalMultiSelect = true;
+      }
+    }
+    delete item[key];
+  }
+  return item;
+}
+
 function repairInput(raw: unknown): AskUserQuestionInput {
   if (!raw || typeof raw !== 'object' || !Array.isArray((raw as { questions?: unknown }).questions)) {
     return raw as AskUserQuestionInput; // 不可兜 → 交 validateInput 报错
   }
   const src = raw as Record<string, unknown> & { questions: unknown[] };
-  const questions = src.questions.map((q) => {
-    if (!q || typeof q !== 'object' || Array.isArray(q)) return q;
-    const item = { ...(q as Record<string, unknown>) };
-    const question = typeof item.question === 'string' ? item.question : '';
-    const header = typeof item.header === 'string' ? item.header : '';
-    if (question === '' && header !== '') item.question = header;
-    else if (header === '' && question !== '') item.header = question.slice(0, 24);
-    return item;
-  });
+  const questions = src.questions.map(repairQuestion);
   return { ...src, questions } as AskUserQuestionInput;
 }
 

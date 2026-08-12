@@ -99,6 +99,22 @@ describe('hook allow 不绕过 deny/ask/safetyCheck (P1)', () => {
     expect(r.isError).toBe(false);
   });
 
+  test('hook allow + planning mode → non-read-only tool remains denied', async () => {
+    const { tool, ran } = trackedTool();
+    const [r] = await dispatchTools([use], {
+      tools: [tool],
+      toolContext: {},
+      signal: new AbortController().signal,
+      trusted: false,
+      mode: 'plan',
+      preToolPermission: () => 'allow',
+    });
+    expect(ran()).toBe(false);
+    expect(r.isError).toBe(true);
+    expect(r.errorCategory).toBe('permission_denied');
+    expect((r.result.payload as { message?: string }).message).toContain('plan mode');
+  });
+
   test('hook allow + safetyCheck(受保护路径 .git/)+ enableSafetyCheck → fail-closed 拒绝', async () => {
     let ran = false;
     const writeTool = buildTool({

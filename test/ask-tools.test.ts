@@ -333,4 +333,115 @@ describe('AskUserQuestion via dispatchTools', () => {
     const payload = r.result.payload as Record<string, unknown>;
     expect((payload.answers as Array<{ selected: string[] }>)[0].selected).toEqual(['light']);
   });
+
+  test('MultiSelect casing is normalized before strict validation (TAPD 1070160897162068856)', async () => {
+    const { fn, seen } = stubAskQuestion((qs) =>
+      qs.map((q) => ({ selected: q.options.map((option) => option.label) })),
+    );
+    const tool = askUserQuestionTool();
+    const results = await dispatchTools(
+      [
+        {
+          id: 'tu_multiselect_alias',
+          name: 'AskUserQuestion',
+          input: {
+            questions: [
+              {
+                question: 'Which features should be enabled?',
+                header: 'Features',
+                options: ['audio', 'physics'],
+                MultiSelect: true,
+              },
+            ],
+          },
+        },
+      ],
+      { tools: [tool], toolContext: { askQuestion: fn }, signal: new AbortController().signal, trusted: true },
+    );
+
+    expect(results[0]).toMatchObject({ isError: false });
+    expect(seen[0][0].multiSelect).toBe(true);
+    expect((results[0].result.payload as Record<string, unknown>).answers).toEqual([
+      {
+        question: 'Which features should be enabled?',
+        header: 'Features',
+        selected: ['audio', 'physics'],
+      },
+    ]);
+  });
+
+  test('removes a duplicate MultiSelect alias when canonical multiSelect is present', async () => {
+    const { fn, seen } = stubAskQuestion((qs) =>
+      qs.map((q) => ({ selected: q.options.map((option) => option.label) })),
+    );
+    const tool = askUserQuestionTool();
+    const results = await dispatchTools(
+      [
+        {
+          id: 'tu_multiselect_duplicate',
+          name: 'AskUserQuestion',
+          input: {
+            questions: [
+              {
+                question: 'Which features should be enabled?',
+                header: 'Features',
+                options: ['audio', 'physics'],
+                MultiSelect: true,
+                multiSelect: true,
+              },
+            ],
+          },
+        },
+      ],
+      { tools: [tool], toolContext: { askQuestion: fn }, signal: new AbortController().signal, trusted: true },
+    );
+
+    expect(results[0]).toMatchObject({ isError: false });
+    expect(seen[0][0].multiSelect).toBe(true);
+  });
+
+  test('keeps agentic_os main AskUserQuestion compatibility aliases', async () => {
+    const { fn, seen } = stubAskQuestion((qs) =>
+      qs.map((q) => ({ selected: q.options.map((option) => option.label) })),
+    );
+    const tool = askUserQuestionTool();
+    const results = await dispatchTools(
+      [
+        {
+          id: 'tu_main_compat',
+          name: 'AskUserQuestion',
+          input: {
+            questions: [
+              {
+                prompt: 'Which features should be enabled?',
+                items: [
+                  { text: 'Combo thrill', value: 'combo' },
+                  { title: 'Strategy planning' },
+                  { name: 'Explore' },
+                  { key: 'Trade' },
+                  42,
+                ],
+                allowMultiple: 'yes',
+              },
+            ],
+          },
+        },
+      ],
+      { tools: [tool], toolContext: { askQuestion: fn }, signal: new AbortController().signal, trusted: true },
+    );
+
+    expect(results[0]).toMatchObject({ isError: false });
+    expect(seen[0][0]).toMatchObject({
+      question: 'Which features should be enabled?',
+      header: 'Which features should be',
+      multiSelect: true,
+      options: [
+        { label: 'Combo thrill', description: 'combo' },
+        { label: 'Strategy planning' },
+        { label: 'Explore' },
+        { label: 'Trade' },
+        { label: '42' },
+      ],
+    });
+  });
 });

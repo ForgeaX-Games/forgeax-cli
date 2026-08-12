@@ -10,6 +10,8 @@ import type { CoreEvent } from '../events/types';
 import {
   hasPermissionsToUseTool,
   checkRuleBasedPermissions,
+  isExitPlanTool,
+  safeReadOnly,
   type PermissionMode,
 } from '../permission/engine';
 import type { PermissionRuleSet } from '../permission/rules';
@@ -227,6 +229,18 @@ async function runOne(use: ToolUse, deps: DispatchDeps): Promise<ToolDispatchRes
   // 权限把闸（trust channel 绕过；K5）。
   let callInput: unknown = parsed;
   if (!deps.trusted && hookPerm === 'allow') {
+    // A host hook's positive receipt only suppresses the interactive approval
+    // card. It must not turn a planning turn into an execution turn: the
+    // kernel mode remains authoritative for every non-read-only tool.
+    if (deps.mode === 'plan' && !isExitPlanTool(tool.name) && !safeReadOnly(tool, parsed)) {
+      return {
+        toolUseId: use.id,
+        toolName: use.name,
+        result: errorEvent(use.id, 'In plan mode, only read-only tools are allowed.', 'permission_denied'),
+        isError: true,
+        errorCategory: 'permission_denied',
+      };
+    }
     // hook 'allow' 免「审批卡」,但**不越过** settings deny/ask 与受保护路径 safetyCheck
     //（deny 是 K5 最强不变量,hook 不可削弱）。只跑规则子集 ①deny ②ask ⑤safetyCheck:
     //   deny → 拒;ask → 转 askUser(无回调 fail-closed deny);null → 放行(跳过审批卡)。
