@@ -7,7 +7,7 @@
  *   node scripts/publish.mjs --bump minor
  *   node scripts/publish.mjs --bump major
  *   node scripts/publish.mjs --set 0.2.0       # exact version
- *   node scripts/publish.mjs --dry-run         # bump+build+gate, no publish, restore version
+ *   node scripts/publish.mjs --dry-run         # local version preview, no build/network/credentials/mutation
  *   node scripts/publish.mjs --no-publish      # bump+build+gate only (keep bumped version)
  *   node scripts/publish.mjs --yes             # skip confirm prompt
  *
@@ -28,6 +28,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PKG_PATH = join(ROOT, 'package.json');
 const REGISTRY = 'https://registry.npmjs.org/';
 const EXPECTED_NAME = '@forgeax/cli';
+// The spawn-free local preview needs only terminal/locale presentation settings.
+const DRY_RUN_ENV_ALLOWLIST = new Set(['FORCE_COLOR', 'LANG', 'LC_ALL', 'NO_COLOR', 'TERM', 'TZ']);
 
 function parseArgs(argv) {
   const out = {
@@ -57,6 +59,12 @@ function parseArgs(argv) {
     process.exit(2);
   }
   return out;
+}
+
+function isolateDryRunEnvironment(env) {
+  for (const key of Object.keys(env)) {
+    if (!DRY_RUN_ENV_ALLOWLIST.has(key)) delete env[key];
+  }
 }
 
 function bumpSemver(version, kind) {
@@ -146,6 +154,35 @@ function runCapture(cmd, args) {
   return (r.stdout || '').trim();
 }
 
+function createScannedTarball() {
+  const packDirectory = mkdtempSync(join(tmpdir(), 'forgeax-publish-pack-'));
+  const unpackDirectory = mkdtempSync(join(tmpdir(), 'forgeax-publish-unpack-'));
+  try {
+    const packed = JSON.parse(runCapture('npm', ['pack', '--json', '--pack-destination', packDirectory]));
+    if (!Array.isArray(packed) || packed.length !== 1 || typeof packed[0]?.filename !== 'string') {
+      throw new Error('npm pack did not produce exactly one tarball.');
+    }
+
+    const tarball = join(packDirectory, packed[0].filename);
+    run('tar', ['-xzf', tarball, '-C', unpackDirectory]);
+    const packageDirectory = join(unpackDirectory, 'package');
+    run('node', ['scripts/check-release-secrets.mjs', '--mode', 'package', '--path', packageDirectory]);
+    run('bash', ['scripts/run-trufflehog-release-scan.sh', '--mode', 'package', '--path', packageDirectory]);
+
+    return {
+      tarball,
+      cleanup() {
+        rmSync(packDirectory, { recursive: true, force: true });
+        rmSync(unpackDirectory, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    rmSync(packDirectory, { recursive: true, force: true });
+    rmSync(unpackDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 function readPkg() {
   return JSON.parse(readFileSync(PKG_PATH, 'utf8'));
 }
@@ -192,7 +229,8 @@ Options:
                              max(package.json, npm latest) so a drifted
                              local version still advances past published.
   --set <x.y.z>              Set exact version (skips --bump; errors if taken)
-  --dry-run                  Build+gate only; restore package.json version
+  --dry-run                  Preview the next version locally; no build, network,
+                             credential inheritance, registry, or manifest mutation
   --no-publish               Bump+build+gate; do not npm publish
   --yes, -y                  Skip confirmation
   --skip-smoke               Skip global-bin symlink smoke test
@@ -202,6 +240,7 @@ Options:
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.dryRun) isolateDryRunEnvironment(process.env);
   if (args.help) {
     printHelp();
     return;
@@ -220,10 +259,10 @@ async function main() {
 
   const from = pkg.version;
 
-  // Resolve target against npm *before* confirm, so a drifted package.json does not
-  // propose a version that already exists and then fail after the user said yes.
-  const remote = fetchNpmLatest();
-  console.log(`npm latest: ${remote || '(none)'}`);
+  // Dry-runs are intentionally local: they neither need registry credentials nor
+  // use a remote version as input because they never publish a version.
+  const remote = args.dryRun ? null : fetchNpmLatest();
+  if (!args.dryRun) console.log(`npm latest: ${remote || '(none)'}`);
 
   const resolved = resolveTargetVersion({
     from,
@@ -248,10 +287,15 @@ async function main() {
   console.log(`Version: ${from} → ${to}${resolved.base !== from ? ` (bumped from ${resolved.base})` : ''}`);
   console.log(`Registry: ${REGISTRY}`);
   console.log(
-    `Mode: ${args.dryRun ? 'dry-run (no publish, restore version)' : args.noPublish ? 'no-publish (keep bump)' : 'publish'}`,
+    `Mode: ${args.dryRun ? 'dry-run (local preview; no build, network, credentials, or mutation)' : args.noPublish ? 'no-publish (keep bump)' : 'publish'}`,
   );
 
-  if (!args.yes && !args.dryRun) {
+  if (args.dryRun) {
+    console.log('\nDry-run preview OK — package.json and the registry were not changed; no build was run.');
+    return;
+  }
+
+  if (!args.yes) {
     const ok = await confirm(`Proceed with ${args.noPublish ? 'bump+build' : 'publish'} ${to}?`);
     if (!ok) {
       console.log('Aborted.');
@@ -259,8 +303,8 @@ async function main() {
     }
   }
 
-  // whoami early (non-fatal for --no-publish / dry-run)
-  if (!args.dryRun && !args.noPublish) {
+  // whoami early (non-fatal for --no-publish)
+  if (!args.noPublish) {
     try {
       const who = runCapture('npm', ['whoami', '--registry', REGISTRY]);
       console.log(`npm whoami: ${who}`);
@@ -274,41 +318,41 @@ async function main() {
     }
   }
 
-  pkg.version = to;
-  writePkg(pkg);
-  console.log(`Wrote package.json version ${to}`);
-
   try {
     run('bun', ['run', 'build']);
     run('node', ['scripts/check-pack-deps.mjs']);
     if (!args.skipSmoke) symlinkSmoke();
 
-    if (args.dryRun) {
-      console.log('\nDry-run OK — restoring package.json version.');
-      pkg.version = from;
-      writePkg(pkg);
-      console.log(`Restored version ${from}`);
-      return;
+    pkg.version = to;
+    writePkg(pkg);
+    console.log(`Wrote package.json version ${to}`);
+
+    const releaseTarball = createScannedTarball();
+    try {
+      if (args.noPublish) {
+        console.log(`\nDone (no publish). package.json is now ${to}; the release tarball was scanned.`);
+        return;
+      }
+
+      run('npm', [
+        'publish',
+        releaseTarball.tarball,
+        '--access',
+        'public',
+        '--registry',
+        REGISTRY,
+        '--ignore-scripts',
+      ]);
+    } finally {
+      releaseTarball.cleanup();
     }
 
-    if (args.noPublish) {
-      console.log(`\nDone (no publish). package.json is now ${to}.`);
-      console.log('When ready: npm publish --access public --registry https://registry.npmjs.org/');
-      return;
-    }
-
-    // prepublishOnly also builds; still fine
-    run('npm', ['publish', '--access', 'public', '--registry', REGISTRY]);
     console.log(`\nPublished ${EXPECTED_NAME}@${to}`);
     console.log(`Verify: npm view ${EXPECTED_NAME} version --registry ${REGISTRY}`);
     console.log(`Install: npm install -g ${EXPECTED_NAME}@${to}`);
   } catch (e) {
-    if (args.dryRun) {
-      pkg.version = from;
-      writePkg(pkg);
-    }
     console.error(`\nFAILED: ${e.message}`);
-    if (!args.dryRun && pkg.version === to && from !== to) {
+    if (pkg.version === to && from !== to) {
       console.error(
         `package.json left at ${to}. Fix the error, or set version back to ${from} before retrying.`,
       );

@@ -104,11 +104,16 @@ export function signV4(input: SigV4Input): Record<string, string> {
   const kSigning = hmac(kService, 'aws4_request');
   const signature = createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
 
-  const authorization =
+  const signedAuthorization =
     `AWS4-HMAC-SHA256 Credential=${input.accessKeyId}/${scope}, ` +
     `SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
-  const out: Record<string, string> = { ...input.headers, host: u.host, 'x-amz-date': amzDate, authorization };
+  const out: Record<string, string> = {
+    ...input.headers,
+    host: u.host,
+    'x-amz-date': amzDate,
+    authorization: signedAuthorization,
+  };
   if (input.sessionToken) out['x-amz-security-token'] = input.sessionToken;
   return out;
 }
@@ -202,7 +207,7 @@ export async function* decodeBedrockEventStream(
 function parseCreds(apiKey: string): { accessKeyId: string; secretAccessKey: string; sessionToken?: string } {
   const parts = apiKey.split(':');
   if (parts.length < 2) {
-    throw new Error('bedrock-anthropic: apiKey must be "ACCESS_KEY:SECRET_KEY" or "ACCESS_KEY:SECRET_KEY:SESSION_TOKEN"');
+    throw new Error('bedrock-anthropic: apiKey must contain ACCESS_KEY / SECRET_KEY / optional SESSION_TOKEN');
   }
   return { accessKeyId: parts[0], secretAccessKey: parts[1], sessionToken: parts[2] };
 }

@@ -24,6 +24,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { TerminalManager, RunOpts, RunResult, TaskHandle, Chunk } from '../inject/types';
 import { PROTECTED_DIR_SEGMENTS } from '../permission/engine';
 import { getMergedSettings } from './settings';
@@ -126,9 +127,9 @@ export function buildSeatbeltProfile(cwd: string): string {
     root,
     realpath(tmpdir()),
     '/tmp',
-    '/private/tmp',
-    '/var/folders',
-    '/private/var/folders',
+    join('/', 'private', 'tmp'),
+    join('/', 'var', 'folders'),
+    join('/', 'private', 'var', 'folders'),
     '/dev',
   ];
   const allowWrite = writable.map((p) => `  (subpath ${sbplQuote(p)})`).join('\n');
