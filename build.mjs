@@ -15,21 +15,9 @@ const contractPackageNames = ['@forgeax/types', '@forgeax/agent-runtime'];
 const buildInputs = Object.fromEntries(
   contractPackageNames.map((name) => [name, packageJson.devDependencies[name]]),
 );
+const externalPackageNames = Object.keys(packageJson.dependencies);
 
 rmSync(distDir, { recursive: true, force: true });
-
-/** Bundle ForgeaX npm dependencies; leave third-party and platform imports external. */
-const externalizeNonForgeax = {
-  name: 'externalize-non-forgeax',
-  setup(b) {
-    b.onResolve({ filter: /.*/ }, (a) => {
-      const p = a.path;
-      if (p.startsWith('.') || p.startsWith('/')) return; // relative → bundle
-      if (p.startsWith('@forgeax/')) return; // published ForgeaX package → bundle
-      return { path: p, external: true }; // third-party + node: → external
-    });
-  },
-};
 
 const res = await build({
   entrypoints: [
@@ -45,7 +33,7 @@ const res = await build({
   format: 'esm',
   splitting: false,
   sourcemap: 'linked',
-  plugins: [externalizeNonForgeax],
+  external: externalPackageNames,
 });
 
 for (const l of res.logs) console.log(String(l));
