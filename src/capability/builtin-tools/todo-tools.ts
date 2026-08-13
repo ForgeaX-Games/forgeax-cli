@@ -22,6 +22,8 @@ import type { TeamBoardStore } from '../../agent/team/task-board-tools';
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';
 
 export interface TodoItem {
+  /** Stable task identity, kept unchanged across todo list updates. */
+  id?: string;
   content: string;
   status: TodoStatus;
   /** 进行中态展示文案(activeForm)。 */
@@ -76,6 +78,7 @@ export function todoWriteTool(opts: TodoToolsOptions = {}): AgentTool<TodoWriteI
           items: {
             type: 'object',
             properties: {
+              id: { type: 'string', description: 'Stable id; keep it unchanged across updates for the same task.' },
               content: { type: 'string', description: 'Imperative task description.' },
               status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
               activeForm: { type: 'string', description: 'Present-continuous form shown while in_progress.' },
@@ -95,15 +98,28 @@ export function todoWriteTool(opts: TodoToolsOptions = {}): AgentTool<TodoWriteI
       if (!Array.isArray(input.todos)) {
         throw new Error('todo_write: todos must be an array');
       }
+      const activeCount = input.todos.filter((t) => t.status === 'in_progress').length;
+      if (activeCount > 1) {
+        throw new Error(
+          `todo_write: exactly one item may be in_progress (got ${activeCount}). ` +
+          'Mark the previous item completed before starting the next.',
+        );
+      }
       const items: TodoItem[] = input.todos.map((t) => ({
+        ...(t.id !== undefined ? { id: String(t.id) } : {}),
         content: String(t.content ?? ''),
         status: (t.status ?? 'pending') as TodoStatus,
-        ...(t.activeForm ? { activeForm: String(t.activeForm) } : {}),
+        ...(t.activeForm !== undefined ? { activeForm: String(t.activeForm) } : {}),
       }));
       // team 模式:重定向写共享任务表(单态)。**不**再写 TodoStore —— 绝不双份(D-4)。
       if (teamBoard) {
         teamBoard.reconcileFromTodos(
-          items.map((t) => ({ content: t.content, status: t.status })),
+          items.map((t) => ({
+            ...(t.id !== undefined ? { id: t.id } : {}),
+            content: t.content,
+            status: t.status,
+            ...(t.activeForm !== undefined ? { activeForm: t.activeForm } : {}),
+          })),
           ctx.agentId ?? '',
         );
         return { data: { todos: items, counts: summarize(items) } };

@@ -43,6 +43,7 @@ import type { AgentTool } from '../capability/types';
 import { builtinToolsPack } from '../capability/builtin-tools/index';
 import { notebookToolsPack } from '../capability/builtin-tools/notebook-tools';
 import { webToolsPack } from '../capability/builtin-tools/web-tools';
+import { todoToolsPack } from '../capability/builtin-tools/todo-tools';
 import { NodeSandboxFs, NodeTerminal } from './io';
 import { makeImageDownscaler } from './image-scale';
 import { makeNodeObservability } from './observability';
@@ -94,6 +95,7 @@ export async function startServe(sockPath: string): Promise<Server> {
     ...(builtinToolsPack().tools ?? []),
     ...(notebookToolsPack().tools ?? []),
     ...(webToolsPack({ searchBackend }).tools ?? []),
+    ...(todoToolsPack().tools ?? []),
   ];
   const downscaleImage = makeImageDownscaler();
   const localToolContext: Record<string, unknown> = {

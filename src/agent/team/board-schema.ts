@@ -47,6 +47,8 @@ export interface BoardItem {
   status: TeamTaskStatus;
   blockedBy: string[];
   description?: string;
+  /** Optional running-state label forwarded from todo_write. */
+  activeForm?: string;
 }
 
 /** 一个 team 的共享任务表(落盘 = board.json)。 */
@@ -90,6 +92,10 @@ function validateItemShape(raw: unknown, idx: number, errors: string[]): raw is 
   }
   if (raw.description !== undefined && typeof raw.description !== 'string') {
     errors.push(`${pfx}.description: must be a string when present`);
+    ok = false;
+  }
+  if (raw.activeForm !== undefined && typeof raw.activeForm !== 'string') {
+    errors.push(`${pfx}.activeForm: must be a string when present`);
     ok = false;
   }
   return ok;

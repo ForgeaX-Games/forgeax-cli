@@ -22,6 +22,7 @@ import { assembleCapabilities } from '../src/runtime/assemble';
 import { buildVertexBody, buildVertexUrl } from '../src/provider/vertex';
 import { signV4, decodeBedrockEventStream, buildBedrockBody } from '../src/provider/bedrock';
 import { CoreAgent } from '../src/agent/agent';
+import { TeamBoardStore } from '../src/agent/team/task-board-tools';
 import type { LLMProvider, ProviderRequest, ProviderStreamEvent, Usage, ProviderMessage } from '../src/provider/types';
 import { EMPTY_USAGE } from '../src/provider/types';
 
@@ -120,6 +121,71 @@ describe('todo-tools', () => {
     );
     expect(out.data.counts).toEqual({ pending: 1, in_progress: 0, completed: 1 });
     expect(store.items.length).toBe(2);
+  });
+
+  test('todo_write preserves optional id and activeForm, and exposes id in schema', async () => {
+    const store = {
+      items: [] as {
+        id?: string;
+        content: string;
+        status: 'pending' | 'in_progress' | 'completed';
+        activeForm?: string;
+      }[],
+    };
+    const tool = todoWriteTool({ store });
+    const out = await tool.call(
+      { todos: [{ id: 'stable-a', content: 'a', status: 'in_progress', activeForm: 'Doing a' }] },
+      ctx(),
+    );
+    expect(out.data.todos).toEqual([
+      { id: 'stable-a', content: 'a', status: 'in_progress', activeForm: 'Doing a' },
+    ]);
+    expect(store.items).toEqual(out.data.todos);
+    const itemSchema = (tool.inputJSONSchema?.properties as {
+      todos?: { items?: { properties?: Record<string, unknown> } };
+    }).todos?.items;
+    expect(itemSchema?.properties?.id).toEqual({
+      type: 'string',
+      description: 'Stable id; keep it unchanged across updates for the same task.',
+    });
+  });
+
+  test('todo_write rejects multiple in_progress items before mutating the store', async () => {
+    const store = {
+      items: [{ content: 'existing', status: 'pending' as const }],
+    };
+    const tool = todoWriteTool({ store });
+    await expect(tool.call(
+      {
+        todos: [
+          { content: 'a', status: 'in_progress' },
+          { content: 'b', status: 'in_progress' },
+        ],
+      },
+      ctx(),
+    )).rejects.toThrow(
+      'todo_write: exactly one item may be in_progress (got 2). Mark the previous item completed before starting the next.',
+    );
+    expect(store.items).toEqual([{ content: 'existing', status: 'pending' }]);
+  });
+
+  test('team todo_write forwards id and activeForm into the shared board', async () => {
+    const teamBoard = new TeamBoardStore({ teamId: 'team-forge' });
+    const tool = todoWriteTool({ teamBoard });
+    await tool.call(
+      { todos: [{ id: 'stable-a', content: 'a', status: 'in_progress', activeForm: 'Doing a' }] },
+      ctx({ agentId: 'agent-a' }),
+    );
+    expect(teamBoard.snapshot().items).toEqual([
+      {
+        id: 'team-stable-a',
+        owner: 'agent-a',
+        status: 'in_progress',
+        blockedBy: [],
+        description: 'a',
+        activeForm: 'Doing a',
+      },
+    ]);
   });
 });
 

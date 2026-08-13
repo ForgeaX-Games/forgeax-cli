@@ -213,18 +213,27 @@ export class TeamBoardStore {
   /**
    * team 模式 todo_write 的重定向落点(单态,D-4):把模型提交的整张清单 reconcile 进共享表。
    * 语义对齐 todo_write 的 replace 心智 + claim 单态:
-   *   - 每条 todo → 一个 team 任务项(id 由 content 派生 slug);
+   *   - 每条 todo → 一个 team 任务项(id 由 todo id/content 派生 slug);
    *   - status pending/in_progress/completed → pending/in_progress/done;
    *   - in_progress 项 owner = 调用 agent(自然兑现「谁在跑」);其余 owner=null;
+   *   - activeForm 原样保留给共享任务读端;
    *   - **单 in_progress**:只取首个 in_progress 兑现,余者降级 pending(busy 守恒,不制造重复)。
    * 整体 replace:清空旧表换新表(replace-whole-list 心智在共享面的兑现)。
    */
-  reconcileFromTodos(todos: { content: string; status: 'pending' | 'in_progress' | 'completed' }[], owner: string): Board {
+  reconcileFromTodos(
+    todos: {
+      id?: string;
+      content: string;
+      status: 'pending' | 'in_progress' | 'completed';
+      activeForm?: string;
+    }[],
+    owner: string,
+  ): Board {
     const items: BoardItem[] = [];
     const used = new Set<string>();
     let inProgressTaken = false;
     for (const t of todos) {
-      const id = uniqueTeamId(t.content, used);
+      const id = uniqueTeamId(t.id?.trim() || t.content, used);
       used.add(id);
       let status: TeamTaskStatus = t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'in_progress' : 'pending';
       let itemOwner: string | null = null;
@@ -235,7 +244,14 @@ export class TeamBoardStore {
           itemOwner = owner;
         }
       }
-      items.push({ id, owner: itemOwner, status, blockedBy: [], description: t.content });
+      items.push({
+        id,
+        owner: itemOwner,
+        status,
+        blockedBy: [],
+        description: t.content,
+        ...(t.activeForm !== undefined ? { activeForm: t.activeForm } : {}),
+      });
     }
     this.board = { teamId: this.board.teamId, items };
     this.flush();
