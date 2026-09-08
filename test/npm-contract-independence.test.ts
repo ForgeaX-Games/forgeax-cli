@@ -63,8 +63,8 @@ function writeBuildInputs(dist: string): void {
   writeFileSync(
     join(dist, 'build-inputs.json'),
     `${JSON.stringify({
-      '@forgeax/types': '0.1.1',
-      '@forgeax/agent-runtime': '0.1.1',
+      '@forgeax/types': '0.1.2',
+      '@forgeax/agent-runtime': '0.1.2',
     })}\n`,
   );
 }
@@ -350,8 +350,8 @@ test('release helper blocks a scanner-detectable packed artifact before publish'
 
 test('build consumes the exact published Contracts packages without Studio source paths', () => {
   // This catches a resolver regression that sends CLI back to the Studio checkout.
-  expect(packageJson.devDependencies['@forgeax/types']).toBe('0.1.1');
-  expect(packageJson.devDependencies['@forgeax/agent-runtime']).toBe('0.1.1');
+  expect(packageJson.devDependencies['@forgeax/types']).toBe('0.1.2');
+  expect(packageJson.devDependencies['@forgeax/agent-runtime']).toBe('0.1.2');
   expect(JSON.stringify(tsconfig)).not.toContain(`../..${'/contracts'}`);
 
   const forbiddenSourcePaths = [
@@ -442,8 +442,8 @@ test('build inlines Contracts rather than publishing bare Contracts imports', ()
 
     expect(build.exitCode, processOutput(build)).toBe(0);
     expect(JSON.parse(readFileSync(join(dist, 'build-inputs.json'), 'utf8'))).toEqual({
-      '@forgeax/types': '0.1.1',
-      '@forgeax/agent-runtime': '0.1.1',
+      '@forgeax/types': '0.1.2',
+      '@forgeax/agent-runtime': '0.1.2',
     });
     expect(emittedJavaScript(dist).length).toBeGreaterThan(0);
 

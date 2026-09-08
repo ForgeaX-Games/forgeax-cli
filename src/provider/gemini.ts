@@ -21,6 +21,8 @@
 
 import { parseSSE } from './anthropic';
 import { FORGEAX_USER_AGENT } from './user-agent';
+import { canonicalizeBoundaryContent, isRecord as isHistoryRecord } from '../capability/history-content';
+import { assertProviderWireSafe } from './wire-validator';
 import {
   EMPTY_USAGE,
   mergeUsage,
@@ -66,60 +68,97 @@ export function toolDefsToGemini(tools: ProviderToolDef[]): unknown[] | undefine
 
 /** 中立 content block → Gemini part。 */
 function neutralBlockToGeminiPart(raw: unknown): unknown | undefined {
-  if (typeof raw === 'string') return { text: raw };
-  if (!raw || typeof raw !== 'object') return undefined;
-  const block = raw as Record<string, unknown>;
-  if (block.type === 'text' && typeof block.text === 'string') {
+  if (typeof raw === 'string') return raw.length > 0 ? { text: raw } : undefined;
+  if (!isHistoryRecord(raw)) return { text: '[content unavailable for Gemini]' };
+  const block = raw;
+  if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
     return { text: block.text };
   }
-  if (block.type === 'image' && block.source && typeof block.source === 'object') {
-    const src = block.source as Record<string, unknown>;
-    if (src.type === 'base64' && typeof src.data === 'string') {
-      const media = typeof src.media_type === 'string' ? src.media_type : 'image/png';
+  if (block.type === 'image' || block.type === 'audio' || block.type === 'video' || block.type === 'file' || block.type === 'document') {
+    const src = isHistoryRecord(block.source) ? block.source : block;
+    if (typeof src.data === 'string') {
+      const media = typeof src.media_type === 'string'
+        ? src.media_type
+        : typeof src.mimeType === 'string'
+          ? src.mimeType
+          : isHistoryRecord(block.source) && block.type === 'image'
+            ? 'image/png'
+            : 'application/octet-stream';
       return { inlineData: { data: src.data, mimeType: media } };
     }
+    return { text: '[content unavailable for Gemini]' };
   }
   if (block.type === 'tool_use') {
     return {
       functionCall: {
-        name: typeof block.name === 'string' ? block.name : 'unknown_tool',
-        args: (block.input as Record<string, unknown>) ?? {},
+        name: typeof block.name === 'string' && block.name ? block.name : 'unnamed_tool',
+        // Tool arguments are opaque and are not recursively canonicalized.
+        args: block.input ?? {},
       },
     };
   }
-  return undefined;
+  if (block.type === 'functionCall' && isHistoryRecord(block.functionCall)) return { functionCall: block.functionCall };
+  if (block.type === 'functionResponse' && isHistoryRecord(block.functionResponse)) return { functionResponse: block.functionResponse };
+  if (block.type === 'inlineData') return block;
+  if (block.type === 'thinking' || block.type === 'redacted_thinking') return { text: '[reasoning content omitted]' };
+  return { text: '[content unavailable for Gemini]' };
 }
 
 function toolResultToText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((raw) => {
-      if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).type === 'text') {
-        const t = (raw as Record<string, unknown>).text;
-        return typeof t === 'string' ? t : '';
-      }
-      return '';
-    })
-    .join('');
+  const normalized = canonicalizeBoundaryContent(content);
+  if (typeof normalized === 'string' && normalized.length > 0) return normalized;
+  const values = Array.isArray(normalized) ? normalized : [normalized];
+  const text = values.map((raw) => {
+    if (typeof raw === 'string') return raw;
+    if (!isHistoryRecord(raw)) return '[tool result unavailable]';
+    if (raw.type === 'text' && typeof raw.text === 'string') return raw.text;
+    if (raw.type === 'image') return '[image content]';
+    if (raw.type === 'audio') return '[audio content]';
+    if (raw.type === 'video') return '[video content]';
+    if (raw.type === 'file' || raw.type === 'document') return '[file content]';
+    if (raw.type === 'tool_result') return toolResultToText(raw.content);
+    return '[tool result unavailable]';
+  }).join('');
+  return text || '[tool result unavailable]';
 }
 
 /** 中立 ProviderMessage[] → Gemini `contents`。role: user→user, assistant→model。 */
 export function messagesToGemini(messages: ProviderMessage[]): unknown[] {
   const out: unknown[] = [];
+  const normalizedMessages = messages.map((msg) => ({ ...msg, content: canonicalizeBoundaryContent(msg.content) }));
+  const toolNames = new Map<string, string>();
+  for (const msg of normalizedMessages) {
+    if (msg.role !== 'assistant') continue;
+    const assistantBlocks = Array.isArray(msg.content)
+      ? msg.content
+      : isHistoryRecord(msg.content) && typeof msg.content.type === 'string'
+        ? [msg.content]
+        : undefined;
+    if (!assistantBlocks) continue;
+    for (const raw of assistantBlocks) {
+      if (!isHistoryRecord(raw) || raw.type !== 'tool_use' || typeof raw.id !== 'string') continue;
+      if (typeof raw.name === 'string' && raw.name) toolNames.set(raw.id, raw.name);
+    }
+  }
 
-  for (const msg of messages) {
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
+  for (const msg of normalizedMessages) {
+    const normalizedBlocks = Array.isArray(msg.content)
+      ? msg.content
+      : isHistoryRecord(msg.content) && msg.content.type === 'tool_result'
+        ? [msg.content]
+        : undefined;
+    if (msg.role === 'user' && normalizedBlocks) {
       const parts: unknown[] = [];
-      for (const raw of msg.content) {
-        if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).type === 'tool_result') {
+      for (const raw of normalizedBlocks) {
+        if (isHistoryRecord(raw) && raw.type === 'tool_result') {
           const block = raw as Record<string, unknown>;
-          parts.push({
-            functionResponse: {
-              name: typeof block.name === 'string' ? block.name : 'unknown_tool',
-              response: { result: toolResultToText(block.content) },
-            },
-          });
+          const callId = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
+          const name = typeof block.name === 'string' && block.name ? block.name : toolNames.get(callId);
+          if (name) {
+            parts.push({ functionResponse: { name, response: { result: toolResultToText(block.content) } } });
+          } else {
+            parts.push({ text: '[tool result unavailable: missing tool name]' });
+          }
         } else {
           const p = neutralBlockToGeminiPart(raw);
           if (p) parts.push(p);
@@ -133,8 +172,13 @@ export function messagesToGemini(messages: ProviderMessage[]): unknown[] {
     const parts: unknown[] = [];
     if (typeof msg.content === 'string') {
       if (msg.content) parts.push({ text: msg.content });
-    } else if (Array.isArray(msg.content)) {
-      for (const raw of msg.content) {
+    } else {
+      const blocks = Array.isArray(msg.content)
+        ? msg.content
+        : isHistoryRecord(msg.content) && typeof msg.content.type === 'string'
+          ? [msg.content]
+          : [];
+      for (const raw of blocks) {
         const p = neutralBlockToGeminiPart(raw);
         if (p) parts.push(p);
       }
@@ -168,6 +212,8 @@ export function buildGeminiRequestBody(req: ProviderRequest): Record<string, unk
     genConfig.temperature = req.temperature;
   }
   body.generationConfig = genConfig;
+
+  assertProviderWireSafe(body, 'gemini');
 
   return body;
 }
@@ -291,7 +337,7 @@ export async function* normalizeGeminiStream(
           yield* closeThinking();
           const fc = part.functionCall as Record<string, unknown>;
           const id = genToolCallId();
-          const name = typeof fc.name === 'string' ? fc.name : 'unknown_tool';
+          const name = typeof fc.name === 'string' ? fc.name : 'unnamed_tool';
           const input = (fc.args as Record<string, unknown>) ?? {};
           const idx = nextIndex++;
           yield { type: 'content_block_start', index: idx, blockType: 'tool_use' };

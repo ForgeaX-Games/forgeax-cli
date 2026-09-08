@@ -37,7 +37,7 @@ import { InProcessTeammateExecutor } from '../inject/in-process-teammate-executo
 import { EventBus } from '../events/event-bus';
 import { buildChildSpawnFn } from './peer';
 import { listenRpc, type RpcConnection } from './rpc';
-import { resolveProviderFromEnv } from './provider-env';
+import { resolveProviderEnv, resolveProviderFromEnv } from './provider-env';
 import type { LLMProvider, ProviderRequest } from '../provider/types';
 import type { AgentTool } from '../capability/types';
 import { builtinToolsPack } from '../capability/builtin-tools/index';
@@ -70,9 +70,31 @@ function resolveThinkingConfig(): ProviderRequest['thinking'] | undefined {
   return { type: 'adaptive', display: 'summarized' };
 }
 
-function buildProvider(model: string): LLMProvider {
-  // env 统一解析(provider-env):LiteLLM 代理优先,否则直连(scoped token 经 env 注入)。
-  return resolveProviderFromEnv(model);
+function buildProvider(): LLMProvider {
+  // Provider 配置属于数据面，不属于 serve 控制面。连接建立后必须先允许 ping/能力协商，
+  // 不能让缺失或不完整的模型凭据在 request handler 注册前杀死整个 endpoint。
+  // 真正发起模型请求时再按该请求的 model 解析 env route；配置错误会成为本轮的明确错误，
+  // 而不是上层只能看到的 `connection closed`。
+  return {
+    api: 'env-router',
+    stream(req, opts) {
+      return resolveProviderFromEnv(req.model).stream(req, opts);
+    },
+  };
+}
+
+/**
+ * release20260901 predates the strict provider-tuple parser used on main.
+ * Preserve that branch's routing fallbacks while still failing the data-plane
+ * request explicitly when no credential was selected.
+ */
+function validateProviderForTurn(model: string): void {
+  const config = resolveProviderEnv(model);
+  if (config.apiKey?.trim()) return;
+  const credential = config.api === 'openai-compat'
+    ? 'OPENAI_API_KEY (or ANTHROPIC_API_KEY)'
+    : 'ANTHROPIC_API_KEY';
+  throw new Error(`provider env invalid for ${config.api}: missing ${credential}`);
 }
 
 /** 起 serve:在 sockPath 上 listen,每条连接绑定一个 forgeax-core facade。返回 net.Server。 */
@@ -147,7 +169,8 @@ export async function startServe(sockPath: string): Promise<Server> {
     const teamBus = peerAgents ? new EventBus() : undefined;
 
     const kernel = new ForgeaxCoreKernel({
-      provider: buildProvider('claude-opus-4-8'),
+      provider: buildProvider(),
+      providerBoundaryTrace: process.env.FORGEAX_TURN_TRACE === '1',
       executeTool,
       getTurnSnapshot,
       observability,
@@ -216,6 +239,10 @@ export async function startServe(sockPath: string): Promise<Server> {
           return { ok: true, capabilities: ['hostTurnSnapshot.v1'] };
         case 'runTurn': {
           const req = params as WireTurnRequest;
+          // Fail the data-plane request as JSON-RPC error while keeping the serve endpoint
+          // alive. Without this preflight, provider retries can obscure a deterministic
+          // configuration error and make the host diagnose a generic socket close/timeout.
+          validateProviderForTurn(req.model ?? 'claude-opus-4-8');
           const callId = req.callId ?? req.session?.threadId ?? 'turn';
           const ac = new AbortController();
           inflight.set(callId, ac);

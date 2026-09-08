@@ -102,6 +102,9 @@ export interface CoreEventPayloads {
     coveredFrom: number;
     coveredTo: number;
     replacement: unknown;
+    /** Model-visible messages left outside the covered prefix. The host uses
+     * this count when reconstructing its resident-session context after restart. */
+    keepCount?: number;
     preTokens?: number;
     postTokens?: number;
     trigger?: string;
@@ -130,8 +133,20 @@ export interface CoreEventPayloads {
   [CoreEventType.UserPromptSubmit]: { prompt: string; turn: number; msgId?: string };
   /** 压缩前：触发方式(auto/manual) + 当前 token 数。 */
   [CoreEventType.PreCompact]: { trigger?: 'auto' | 'manual'; tokenCount?: number };
-  /** 压缩后:被压缩覆盖的消息区间。 */
-  [CoreEventType.PostCompact]: { coveredFrom: number; coveredTo: number };
+  /** Post-compaction covered range plus optional rehydration outcome counts. */
+  [CoreEventType.PostCompact]: {
+    coveredFrom: number;
+    coveredTo: number;
+    usedLLM?: boolean;
+    rehydrate?: {
+      requested: number;
+      attempted: number;
+      attached: number;
+      failed: number;
+      skippedByLimit: number;
+      skippedByBudget: number;
+    };
+  };
   /** 压缩被拦:拒绝原因(gate reject reason / hook-blocked / nothing-to-compact)+ 触发上下文。 */
   [CoreEventType.CompactionSkipped]: {
     reason: string;
@@ -145,6 +160,49 @@ export interface CoreEventPayloads {
     trigger?: 'auto' | 'manual';
     type?: string;
     tokenCount?: number;
+    /** Factual disposition selected by the caller for this failure stage. */
+    recovery?:
+      | {
+          action: 'continue_to_emergency_handling';
+          currentTurn: 'continues';
+          providerCompletion: 'pending';
+          history: 'unchanged';
+          retryable: true;
+        }
+      | {
+          action: 'terminate_current_turn';
+          currentTurn: 'terminated';
+          terminalReason: 'prompt_too_long';
+          providerCall: 'not_started';
+          providerCompletion: 'none';
+          history: 'unchanged';
+          retryable: true;
+        };
+    diagnostics?: {
+      code: 'COMPACTION_REDUCTION_FAILED';
+      version: 1;
+      reason:
+        | 'context_window_exceeded'
+        | 'max_tokens'
+        | 'incomplete'
+        | 'empty'
+        | 'aborted'
+        | 'provider_error'
+        | 'ptl_exhausted'
+        | 'split_exhausted'
+        | 'provider_call_budget_exhausted'
+        | 'pipeline_error';
+      inputMessages: number;
+      currentMessages: number;
+      initialSerializedChars: number;
+      currentSerializedChars: number;
+      providerCalls: number;
+      providerCallBudget: number;
+      headTruncations: number;
+      splitCount: number;
+      maxSplitDepthReached: number;
+      maxSplitDepth: number;
+    };
   };
   /** 通知:消息文本 + 可选级别。 */
   [CoreEventType.Notification]: { message: string; level?: string };

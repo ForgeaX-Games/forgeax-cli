@@ -12,6 +12,8 @@ import { test, expect, describe } from 'bun:test';
 import {
   parseSSE,
   normalizeAnthropicStream,
+  createAssistantTextSanitizer,
+  sanitizeAssistantText,
   buildRequestBody,
   systemBlocksToAnthropic,
   annotateMessageCache,
@@ -54,6 +56,10 @@ async function collect<T>(it: AsyncIterable<T>): Promise<T[]> {
   const out: T[] = [];
   for await (const x of it) out.push(x);
   return out;
+}
+
+async function* frameStream(frames: Array<{ event?: string; data: string }>): AsyncGenerator<{ event?: string; data: string }> {
+  yield* frames;
 }
 
 const SAMPLE_SSE = [
@@ -163,6 +169,86 @@ describe('normalizeAnthropicStream', () => {
     const types = events.map((e) => e.type);
     expect(types).toContain('message_stop');
     expect(types).toContain('assistant');
+  });
+
+  test('removes bare phase markers from the assistant stream', async () => {
+    const frames = [
+      { event: 'content_block_start', data: '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}' },
+      { event: 'content_block_delta', data: '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"before<ph"}}' },
+      { event: 'content_block_delta', data: '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ase>hidden</phase>after"}}' },
+      { event: 'content_block_stop', data: '{"type":"content_block_stop","index":0}' },
+      { event: 'message_stop', data: '{"type":"message_stop"}' },
+    ];
+    const events = await collect(normalizeAnthropicStream(frameStream(frames)));
+    const deltas = events
+      .filter((e) => e.type === 'content_block_delta')
+      .map((e) => (e as Extract<ProviderStreamEvent, { type: 'content_block_delta' }>).delta as { text?: string })
+      .map((d) => d.text ?? '')
+      .join('');
+    expect(deltas).toBe('beforeafter');
+    const assistant = events.find((e) => e.type === 'assistant') as Extract<
+      ProviderStreamEvent,
+      { type: 'assistant' }
+    >;
+    expect(assistant.message).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'beforeafter' }] });
+  });
+
+  test('flushes an incomplete ordinary tag at block stop for live/final parity', async () => {
+    const frames = [
+      { event: 'content_block_start', data: '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}' },
+      { event: 'content_block_delta', data: '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"before<phase_name"}}' },
+      { event: 'content_block_stop', data: '{"type":"content_block_stop","index":0}' },
+      { event: 'message_stop', data: '{"type":"message_stop"}' },
+    ];
+    const events = await collect(normalizeAnthropicStream(frameStream(frames)));
+    const deltas = events
+      .filter((e) => e.type === 'content_block_delta')
+      .map((e) => (e as Extract<ProviderStreamEvent, { type: 'content_block_delta' }>).delta as { text?: string })
+      .map((d) => d.text ?? '')
+      .join('');
+    const assistant = events.find((e) => e.type === 'assistant') as Extract<
+      ProviderStreamEvent,
+      { type: 'assistant' }
+    >;
+    expect(deltas).toBe('before<phase_name');
+    expect(assistant.message).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'before<phase_name' }] });
+  });
+
+  test('drops an unclosed phase body consistently from live and final output', async () => {
+    const frames = [
+      { event: 'content_block_start', data: '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}' },
+      { event: 'content_block_delta', data: '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"before<phase>hidden"}}' },
+      { event: 'content_block_stop', data: '{"type":"content_block_stop","index":0}' },
+      { event: 'message_stop', data: '{"type":"message_stop"}' },
+    ];
+    const events = await collect(normalizeAnthropicStream(frameStream(frames)));
+    const deltas = events
+      .filter((e) => e.type === 'content_block_delta')
+      .map((e) => (e as Extract<ProviderStreamEvent, { type: 'content_block_delta' }>).delta as { text?: string })
+      .map((d) => d.text ?? '')
+      .join('');
+    const assistant = events.find((e) => e.type === 'assistant') as Extract<
+      ProviderStreamEvent,
+      { type: 'assistant' }
+    >;
+    expect(deltas).toBe('before');
+    expect(assistant.message).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'before' }] });
+  });
+});
+
+describe('assistant phase sanitizer', () => {
+  test('handles split phaseN markers while preserving ordinary HTML and phase_name', () => {
+    const sanitizer = createAssistantTextSanitizer();
+    const chunks = ['<p>keep</p>', '<phase', '2>hide', '</ph', 'ase2>', '<phase_name>keep</phase_name>', 'after'];
+    const actual = chunks.map((chunk) => sanitizer.push(chunk)).join('') + sanitizer.finish();
+    expect(actual).toBe('<p>keep</p><phase_name>keep</phase_name>after');
+  });
+
+  test('one-shot helper only removes exact phase marker names', () => {
+    expect(sanitizeAssistantText('a<phase>hidden</phase>b')).toBe('ab');
+    expect(sanitizeAssistantText('a<phase_name>visible</phase_name><phaser>x</phaser>b')).toBe(
+      'a<phase_name>visible</phase_name><phaser>x</phaser>b',
+    );
   });
 });
 

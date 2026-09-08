@@ -96,6 +96,52 @@ describe('dispatch — hook isBlocked intercept', () => {
 // ─── 通用 schema + 工具专属语义校验 ─────────────────────────────────────────
 
 describe('dispatch — generic input validation', () => {
+  test('repairs stringified questions only for ask_user_question before schema validation', async () => {
+    const seen: unknown[] = [];
+    const ask = buildTool({
+      name: 'ask_user_question',
+      inputJSONSchema: {
+        type: 'object',
+        properties: { questions: { type: 'array', items: { type: 'object' } } },
+        required: ['questions'],
+      },
+      call: async (input) => { seen.push(input); return { data: input }; },
+      mapResult: okResult,
+      maxResultSizeChars: 100,
+    });
+    const questions = [{ question: 'Continue?', options: [{ label: 'Yes' }] }];
+    const [result] = await dispatchTools([
+      { id: 'ask-string', name: ask.name, input: { questions: JSON.stringify(questions) } },
+    ], deps([ask], { trusted: true }));
+    expect(result.isError).toBe(false);
+    expect(seen).toEqual([{ questions }]);
+  });
+
+  test('does not parse stringified arrays for other tools or invalid ask JSON', async () => {
+    for (const [name, questions] of [
+      ['other_tool', '[{"question":"q?"}]'],
+      ['ask_user_question', '{"question":"q?"}'],
+      ['ask_user_question', 'not-json'],
+    ] as const) {
+      const tool = buildTool({
+        name,
+        inputJSONSchema: {
+          type: 'object',
+          properties: { questions: { type: 'array' } },
+          required: ['questions'],
+        },
+        call: async (input) => ({ data: input }),
+        mapResult: okResult,
+        maxResultSizeChars: 100,
+      });
+      const [result] = await dispatchTools(
+        [{ id: `bad-${name}`, name, input: { questions } }],
+        deps([tool], { trusted: true }),
+      );
+      expect(result).toMatchObject({ isError: true, errorCategory: 'validation', validationPath: '$.questions' });
+    }
+  });
+
   test('inputSchema.safeParse failure → validation error before hook/permission/call', async () => {
     const visited: string[] = [];
     const schemaError = Object.assign(new Error('expected number'), {

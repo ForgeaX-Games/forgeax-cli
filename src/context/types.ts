@@ -83,5 +83,8 @@ export interface CompactionStrategy {
   /** 是否该压缩（按 token 水位）。 */
   shouldCompact(tokenCount: number, marks: Watermarks): boolean;
   /** 执行压缩，产出 CompactionApplied 事件载荷（由 ledger fold 消费）。 */
-  compact(messages: unknown[]): Promise<{ replacement: unknown; coveredFrom: number; coveredTo: number }>;
+  compact(
+    messages: unknown[],
+    signal?: AbortSignal,
+  ): Promise<{ replacement: unknown; coveredFrom: number; coveredTo: number }>;
 }

@@ -89,6 +89,13 @@ export function markCompactFailure(state: CompactionGateState): CompactionGateSt
   return { ...state, isCompressing: false, consecutiveFailures: state.consecutiveFailures + 1 };
 }
 
+/** Compaction cancellation: release the in-flight guard without changing
+ * cooldown or circuit-breaker accounting. Cancellation is user control, not a
+ * failed reduction attempt. */
+export function markCompactCancelled(state: CompactionGateState): CompactionGateState {
+  return { ...state, isCompressing: false };
+}
+
 /** 初始 gate 状态。 */
 export function initialGateState(): CompactionGateState {
   return { isCompressing: false, consecutiveFailures: 0 };

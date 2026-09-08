@@ -27,3 +27,4 @@ export * from './permission/index';
 // dependency-cruiser rule (`facade-serve-internal`) keeps any other src/ module from
 // importing it.
 export * from './runtime/index';
+export { redactBagWith, type RedactProfile } from './observability/redactor';

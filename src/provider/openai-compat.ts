@@ -15,6 +15,8 @@
 
 import { parseSSE } from './anthropic';
 import { FORGEAX_USER_AGENT } from './user-agent';
+import { canonicalizeBoundaryContent, isRecord as isHistoryRecord } from '../capability/history-content';
+import { assertProviderWireSafe } from './wire-validator';
 import {
   EMPTY_USAGE,
   mergeUsage,
@@ -57,26 +59,75 @@ export function toolDefsToOpenAI(tools: ProviderToolDef[]): unknown[] | undefine
   }));
 }
 
+const OPENAI_MEDIA_UNAVAILABLE = '[content unavailable for OpenAI Chat]';
+
+function contentBlocks(content: unknown): unknown[] | undefined {
+  if (Array.isArray(content)) return content;
+  return isHistoryRecord(content) && typeof content.type === 'string' ? [content] : undefined;
+}
+
+function audioFormat(mime: string): string | undefined {
+  if (mime === 'audio/mpeg') return 'mp3';
+  if (mime === 'audio/wav' || mime === 'audio/x-wav') return 'wav';
+  if (mime === 'audio/ogg') return 'ogg';
+  if (mime === 'audio/flac') return 'flac';
+  return undefined;
+}
+
+function openAIBlockToPart(raw: unknown): unknown | undefined {
+  if (typeof raw === 'string') return raw.length > 0 ? { type: 'text', text: raw } : undefined;
+  if (!isHistoryRecord(raw)) return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
+  if (raw.type === 'text') return typeof raw.text === 'string' && raw.text.length > 0 ? { type: 'text', text: raw.text } : undefined;
+  if (raw.type === 'image') {
+    if (isHistoryRecord(raw.source)) {
+      const src = raw.source;
+      if (typeof src.data === 'string') {
+        const media = typeof src.mimeType === 'string'
+          ? src.mimeType
+          : typeof src.media_type === 'string'
+            ? src.media_type
+            : 'image/png';
+        return { type: 'image_url', image_url: { url: `data:${media};base64,${src.data}` } };
+      }
+      if (typeof src.url === 'string') return { type: 'image_url', image_url: { url: src.url } };
+    }
+    if (typeof raw.data === 'string' && typeof raw.mimeType === 'string') {
+      return { type: 'image_url', image_url: { url: `data:${raw.mimeType};base64,${raw.data}` } };
+    }
+    return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
+  }
+  if (raw.type === 'image_url') return raw;
+  if (raw.type === 'audio' && typeof raw.data === 'string' && typeof raw.mimeType === 'string') {
+    const format = audioFormat(raw.mimeType);
+    return format ? { type: 'input_audio', input_audio: { data: raw.data, format } } : { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
+  }
+  if (raw.type === 'file' || raw.type === 'document') {
+    const src = isHistoryRecord(raw.source) ? raw.source : raw;
+    const data = src.data;
+    const mimeType = typeof src.mimeType === 'string' ? src.mimeType : src.media_type;
+    if (typeof data === 'string' && typeof mimeType === 'string') {
+      return { type: 'file', file: { filename: 'history-file', file_data: `data:${mimeType};base64,${data}` } };
+    }
+    return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
+  }
+  if (raw.type === 'video') return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
+  if (raw.type === 'thinking' || raw.type === 'redacted_thinking') return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
+  if (raw.type === 'input_text' && typeof raw.text === 'string') return { type: 'text', text: raw.text };
+  return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
+}
+
 /** 中立 content（string | block[]）→ OpenAI content（string | part[]）。 */
 function neutralContentToOpenAI(content: unknown): unknown {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  const parts: unknown[] = [];
-  for (const raw of content) {
-    if (!raw || typeof raw !== 'object') continue;
-    const block = raw as Record<string, unknown>;
-    if (block.type === 'text' && typeof block.text === 'string') {
-      parts.push({ type: 'text', text: block.text });
-    } else if (block.type === 'image' && block.source && typeof block.source === 'object') {
-      const src = block.source as Record<string, unknown>;
-      if (src.type === 'base64' && typeof src.data === 'string') {
-        const media = typeof src.media_type === 'string' ? src.media_type : 'image/png';
-        parts.push({ type: 'image_url', image_url: { url: `data:${media};base64,${src.data}` } });
-      }
-    }
-  }
+  const normalized = canonicalizeBoundaryContent(content);
+  if (typeof normalized === 'string') return normalized.length > 0 ? normalized : OPENAI_MEDIA_UNAVAILABLE;
+  const values = Array.isArray(normalized) ? normalized : [normalized];
+  const parts = values.flatMap((raw) => {
+    const part = openAIBlockToPart(raw);
+    return part === undefined ? [] : [part];
+  });
+  if (parts.length === 0) return OPENAI_MEDIA_UNAVAILABLE;
   // 纯文本数组退化为 string（多数 OpenAI 兼容端更稳）。
-  if (parts.length > 0 && parts.every((p) => (p as { type?: string }).type === 'text')) {
+  if (parts.every((p) => isHistoryRecord(p) && p.type === 'text')) {
     return parts.map((p) => (p as { text: string }).text).join('');
   }
   return parts;
@@ -84,9 +135,10 @@ function neutralContentToOpenAI(content: unknown): unknown {
 
 /** 从中立 assistant content 抽 tool_use 块 → OpenAI tool_calls。 */
 function extractToolCalls(content: unknown): unknown[] | undefined {
-  if (!Array.isArray(content)) return undefined;
+  const blocks = contentBlocks(content);
+  if (!blocks) return undefined;
   const calls: unknown[] = [];
-  for (const raw of content) {
+  for (const raw of blocks) {
     if (!raw || typeof raw !== 'object') continue;
     const block = raw as Record<string, unknown>;
     if (block.type === 'tool_use') {
@@ -94,7 +146,7 @@ function extractToolCalls(content: unknown): unknown[] | undefined {
         id: typeof block.id === 'string' ? block.id : '_tool',
         type: 'function',
         function: {
-          name: typeof block.name === 'string' ? block.name : 'unknown_tool',
+          name: typeof block.name === 'string' && block.name ? block.name : 'unnamed_tool',
           arguments: JSON.stringify(block.input ?? {}),
         },
       });
@@ -105,8 +157,9 @@ function extractToolCalls(content: unknown): unknown[] | undefined {
 
 /** assistant content 去掉 tool_use 后的可见内容（OpenAI 把 tool_call 拆到 tool_calls 字段）。 */
 function assistantVisibleContent(content: unknown): unknown {
-  if (!Array.isArray(content)) return neutralContentToOpenAI(content);
-  const visible = content.filter((raw) => {
+  const blocks = contentBlocks(content);
+  if (!blocks) return neutralContentToOpenAI(content);
+  const visible = blocks.filter((raw) => {
     if (!raw || typeof raw !== 'object') return false;
     return (raw as Record<string, unknown>).type !== 'tool_use';
   });
@@ -124,11 +177,17 @@ export function messagesToOpenAI(messages: ProviderMessage[], system: SystemBloc
   if (sysText.length > 0) out.push({ role: 'system', content: sysText });
 
   for (const msg of messages) {
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
-      const toolResults = msg.content.filter(
+    const normalizedContent = canonicalizeBoundaryContent(msg.content);
+    const normalizedBlocks = Array.isArray(normalizedContent)
+      ? normalizedContent
+      : isHistoryRecord(normalizedContent) && normalizedContent.type === 'tool_result'
+        ? [normalizedContent]
+        : undefined;
+    if (msg.role === 'user' && normalizedBlocks) {
+      const toolResults = normalizedBlocks.filter(
         (b) => b && typeof b === 'object' && (b as Record<string, unknown>).type === 'tool_result',
       );
-      const rest = msg.content.filter(
+      const rest = normalizedBlocks.filter(
         (b) => !(b && typeof b === 'object' && (b as Record<string, unknown>).type === 'tool_result'),
       );
       for (const tr of toolResults) {
@@ -147,34 +206,38 @@ export function messagesToOpenAI(messages: ProviderMessage[], system: SystemBloc
 
     if (msg.role === 'assistant') {
       const entry: Record<string, unknown> = { role: 'assistant' };
-      const visible = assistantVisibleContent(msg.content);
+      const visible = assistantVisibleContent(normalizedContent);
       if (typeof visible === 'string' ? visible.length > 0 : Array.isArray(visible) && visible.length > 0) {
         entry.content = visible;
       }
-      const toolCalls = extractToolCalls(msg.content);
+      const toolCalls = extractToolCalls(normalizedContent);
       if (toolCalls) entry.tool_calls = toolCalls;
-      out.push(entry);
+      if (Object.keys(entry).length > 1) out.push(entry);
       continue;
     }
 
-    out.push({ role: msg.role, content: neutralContentToOpenAI(msg.content) });
+    out.push({ role: msg.role, content: neutralContentToOpenAI(normalizedContent) });
   }
   return out;
 }
 
 /** tool_result.content（string | block[]）→ 纯文本（OpenAI tool role 只吃 string）。 */
 function toolResultToText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((raw) => {
-      if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).type === 'text') {
-        const t = (raw as Record<string, unknown>).text;
-        return typeof t === 'string' ? t : '';
-      }
-      return '';
-    })
-    .join('');
+  const normalized = canonicalizeBoundaryContent(content);
+  if (typeof normalized === 'string' && normalized.length > 0) return normalized;
+  const values = Array.isArray(normalized) ? normalized : [normalized];
+  const text = values.map((raw) => {
+    if (typeof raw === 'string') return raw;
+    if (!isHistoryRecord(raw)) return OPENAI_MEDIA_UNAVAILABLE;
+    if (raw.type === 'text' && typeof raw.text === 'string') return raw.text;
+    if (raw.type === 'image') return '[image content]';
+    if (raw.type === 'audio') return '[audio content]';
+    if (raw.type === 'video') return '[video content]';
+    if (raw.type === 'file' || raw.type === 'document') return '[file content]';
+    if (raw.type === 'tool_result') return toolResultToText(raw.content);
+    return OPENAI_MEDIA_UNAVAILABLE;
+  }).join('');
+  return text || OPENAI_MEDIA_UNAVAILABLE;
 }
 
 /** GPT-5 / o1 / o3 / o4-mini 系列拒绝 legacy `max_tokens`，要 `max_completion_tokens`。 */
@@ -213,6 +276,8 @@ export function buildOpenAIRequestBody(
 
   const tools = toolDefsToOpenAI(req.tools);
   if (tools) body.tools = tools;
+
+  assertProviderWireSafe(body, 'openai');
 
   return body;
 }
@@ -438,7 +503,7 @@ export async function* normalizeOpenAIStream(
         const block: AssistantBlock = {
           type: 'tool_use',
           id: pc.id || '_tool',
-          name: pc.name || 'unknown_tool',
+          name: pc.name || 'unnamed_tool',
           input,
         };
         blocks.push(block);
@@ -462,7 +527,7 @@ export async function* normalizeOpenAIStream(
     const block: AssistantBlock = {
       type: 'tool_use',
       id: pc.id || '_tool',
-      name: pc.name || 'unknown_tool',
+      name: pc.name || 'unnamed_tool',
       input,
     };
     blocks.push(block);

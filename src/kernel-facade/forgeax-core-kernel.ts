@@ -52,7 +52,11 @@ import type { Observability } from '../observability/contract';
 import { NOOP_OBS, parentContextFromTraceparent } from '../observability/contract';
 import { cacheHitRate, promptTokens } from '../observability/usage';
 import { readFileSync } from 'node:fs';
-import { imageBlockFromAttachment as buildImageBlockFromAttachment, documentBlockFromAttachment } from '../capability/image-block';
+import {
+  imageBlockFromAttachment as buildImageBlockFromAttachment,
+  documentBlockFromAttachment,
+} from '../capability/image-block';
+import { canonicalizeHistory } from '../capability/history-content';
 import {
   needsDownscale,
   base64LengthOfRaw,
@@ -115,6 +119,7 @@ async function buildUserPayload(
     blocks.push(block);
   }
   if (blocks.length === 0) return text; // 附件都无法解析 → 退回纯文本
+  if (text.length === 0) return blocks;
   return [{ type: 'text', text }, ...blocks];
 }
 
@@ -146,6 +151,8 @@ export type ExecuteToolFn = (
 export interface ForgeaxCoreKernelOptions {
   /** 注入 provider(per-session baseUrl+token 经 ConfigSource;支持 M4)。 */
   provider: LLMProvider;
+  /** Enable safe provider-adapter boundary records for this host instance. */
+  providerBoundaryTrace?: boolean;
   /** host-tool 执行桥。 */
   executeTool: ExecuteToolFn;
   /** Live host state for sidecar turns. The callback is invoked immediately
@@ -305,18 +312,7 @@ function mapReason(r: TerminalReason): TurnDoneReason {
 
 /** TurnRequest.history(契约中立形) → ProviderMessage[]。 */
 function mapHistory(history: TurnMessage[] | undefined): ProviderMessage[] {
-  if (!history) return [];
-  const out: ProviderMessage[] = [];
-  for (const m of history) {
-    if (m.role === 'user') out.push({ role: 'user', content: m.content });
-    else if (m.role === 'assistant') out.push({ role: 'assistant', content: m.content });
-    else
-      out.push({
-        role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: m.callId, content: m.result, is_error: !m.ok }],
-      });
-  }
-  return out;
+  return canonicalizeHistory(history);
 }
 
 /** 从 assistant AgentEvent 抽文本(message.delta 用)。 */
@@ -375,25 +371,55 @@ function subEventToKernel(ev: SubEvent): KernelEvent | null {
   }
 }
 
-/**
- * T5:内部 `CompactionApplied` bus 事件 → `compact_boundary` KernelEvent(出墙观测)。
- * 纯映射(loop 已在事件上带 preTokens/postTokens/trigger;老发布方缺这三字段时优雅降级为 undefined)。
- */
-function compactionToKernel(payload: {
+/** Preserve canonical compaction events across the neutral facade. `stored-event`
+ * is the existing extensible contract carrier; the host projects a complete
+ * applied event into its semantic compact boundary only when replacement data is
+ * available. This avoids teaching observational boundaries to truncate history. */
+function compactionAppliedToKernel(payload: {
   coveredFrom: number;
   coveredTo: number;
+  replacement: unknown;
+  keepCount?: number;
   preTokens?: number;
   postTokens?: number;
   trigger?: string;
 }): KernelEvent {
   return {
-    kind: 'compact_boundary',
-    coveredFrom: payload.coveredFrom,
-    coveredTo: payload.coveredTo,
-    ...(payload.trigger !== undefined ? { trigger: payload.trigger } : {}),
-    ...(payload.preTokens !== undefined ? { preTokens: payload.preTokens } : {}),
-    ...(payload.postTokens !== undefined ? { postTokens: payload.postTokens } : {}),
+    kind: 'stored-event',
+    payload: {
+      type: CoreEventType.CompactionApplied,
+      payload: {
+        coveredFrom: payload.coveredFrom,
+        coveredTo: payload.coveredTo,
+        replacement: payload.replacement,
+        ...(payload.keepCount !== undefined ? { keepCount: payload.keepCount } : {}),
+        ...(payload.trigger !== undefined ? { trigger: payload.trigger } : {}),
+        ...(payload.preTokens !== undefined ? { preTokens: payload.preTokens } : {}),
+        ...(payload.postTokens !== undefined ? { postTokens: payload.postTokens } : {}),
+      },
+    },
   };
+}
+
+function compactionFailedToKernel(payload: Record<string, unknown>): KernelEvent {
+  return {
+    kind: 'stored-event',
+    payload: {
+      type: CoreEventType.CompactionFailed,
+      payload: {
+        ...payload,
+      },
+    },
+  };
+}
+
+/** Carry diagnostics over the neutral stored-event arm. Unlike
+ * compact_boundary, these events never instruct the host to rewrite history. */
+function compactionDiagnosticToKernel(
+  type: typeof CoreEventType.CompactionFailed | typeof CoreEventType.PostCompact,
+  payload: Record<string, unknown>,
+): KernelEvent {
+  return { kind: 'stored-event', payload: { type, payload } };
 }
 
 /** T5:内部 `ApiRetry` bus 事件 → `api_retry` KernelEvent(出墙观测)。纯映射。 */
@@ -524,6 +550,9 @@ export class ForgeaxCoreKernel implements AgentKernel {
       // 'host'/缺省 → executeTool 桥回宿主(现状 A;host 复跑 checkKernelTool 把闸)。
       return buildTool({
         name: spec.name,
+        // ToolSpec is host-sourced; do not let buildTool's core-builtin default
+        // promote remote/host tools in the provider budget.
+        providerToolClass: 'non-builtin',
         // host 在 ToolSpec.description 给了模型可读描述(compose-turn-request),
         // 必须透传到 AgentTool,否则 wire tools[] 没 description,模型只能靠名字猜。
         ...(spec.description ? { description: spec.description } : {}),
@@ -564,6 +593,14 @@ export class ForgeaxCoreKernel implements AgentKernel {
       agentId: turnAgentId,
     });
     turnLogger.info('kernel.turn start', { model: this.currentModel ?? req.model });
+    const providerBoundaryTrace = this.o.providerBoundaryTrace
+      ? {
+          callId: req.callId ?? req.session.threadId,
+          threadId: req.session.threadId,
+          emit: (event: import('../provider/types').ProviderBoundaryTraceEvent) =>
+            turnLogger.info('provider.adapter.boundary', event),
+        }
+      : undefined;
     let turnStatus: 'ok' | 'error' = 'ok';
     // 诊断维度(hoist 到外层 finally 可见):token 用量累计 + 本轮结束原因。
     const usage = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreation: 0 };
@@ -591,14 +628,25 @@ export class ForgeaxCoreKernel implements AgentKernel {
     // ★ L5 observability:本轮 FIFO 队列,缓冲子 agent 生命周期回调投射出的 KernelEvent。
     //   onSubagentEvent 在 Task 工具 await 期间(即 agent.run 两次 yield 之间)同步推入,
     //   逐轮 drain 即可保 start→turn→tool→done 顺序排在父 tool.result 之前。
-    //   ★ T5:同一队列也承载 compact_boundary / api_retry —— 它们经内部 bus 订阅在 agent.run
+    //   同一队列也承载 canonical compaction stored-events / api_retry —— 它们经内部 bus 订阅在 agent.run
     //   执行(两次 yield 之间)同步推入,与子事件走同一逐轮 drain,顺序天然对齐本轮进度。
     const subQueue: KernelEvent[] = [];
     // ★ T5:本轮内部事件 bus —— 传给 CoreAgent(替代其自建 bus),订阅两个观测事件后转成
     //   KernelEvent 推进 subQueue。loop 其余事件对这两个订阅者是 no-op(按 type 过滤),零开销。
     const turnBus = new EventBus();
     const unsubCompact = turnBus.subscribe(CoreEventType.CompactionApplied, (e) => {
-      subQueue.push(compactionToKernel(e.payload as Parameters<typeof compactionToKernel>[0]));
+      subQueue.push(compactionAppliedToKernel(e.payload as Parameters<typeof compactionAppliedToKernel>[0]));
+    });
+    const unsubCompactionFailed = turnBus.subscribe(CoreEventType.CompactionFailed, (e) => {
+      subQueue.push(compactionFailedToKernel(e.payload as Record<string, unknown>));
+    });
+    const unsubPostCompact = turnBus.subscribe(CoreEventType.PostCompact, (e) => {
+      subQueue.push(
+        compactionDiagnosticToKernel(
+          CoreEventType.PostCompact,
+          e.payload as Record<string, unknown>,
+        ),
+      );
     });
     const unsubRetry = turnBus.subscribe(CoreEventType.ApiRetry, (e) => {
       subQueue.push(apiRetryToKernel(e.payload as Parameters<typeof apiRetryToKernel>[0]));
@@ -689,7 +737,12 @@ export class ForgeaxCoreKernel implements AgentKernel {
       // ★ ISSUE-1:主轮自压缩走 Compaction V2(替换 legacy makeProviderCompaction)。
       //   D-01:压后重挂最近读文件(recentReadPaths 由 loop 自取内部 read-tracker)。
       compactionV2: {
-        summarize: makeProviderCompactSummarize(this.o.provider, context.config.model),
+        summarize: makeProviderCompactSummarize(
+          this.o.provider,
+          context.config.model,
+          undefined,
+          providerBoundaryTrace,
+        ),
         rehydrate: makeRehydrateInjection(context.toolContext),
       },
       microCompact: (msgs) => microCompact(msgs, { now: Date.now() }),
@@ -702,6 +755,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
       // ★ v3/B 档:把可观测性束 + 本轮 root span 显式下传 —— CoreAgent.run() 把 agent.run span
       //   建成 turnSpan 的 explicit child(并发多轮父子树不串,B2)。缺省 NOOP_OBS → 不出 span。
       observability: obs,
+      ...(providerBoundaryTrace ? { providerBoundaryTrace } : {}),
       parentSpan: turnSpan,
     });
     if (req.callId) this.handles.set(req.callId, agent);
@@ -781,6 +835,8 @@ export class ForgeaxCoreKernel implements AgentKernel {
       if (req.callId) this.handles.delete(req.callId);
       // ★ T5:解订阅本轮 bus 观测事件(本轮结束即释放,不跨轮泄漏)。
       unsubCompact();
+      unsubCompactionFailed();
+      unsubPostCompact();
       unsubRetry();
     }
     // 防御:run 未吐 done(异常路径)也保证 usage-before 缺失不发生。

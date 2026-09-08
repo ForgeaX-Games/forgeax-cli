@@ -149,6 +149,9 @@ export function buildSkillTool(
 
   const tool = buildTool<SkillToolInput, SkillToolOutput>({
     name: SKILL_TOOL_NAME,
+    // The constructor is core-owned, but the commands it exposes come from user,
+    // project, or plugin files; they are non-builtin at the provider boundary.
+    providerToolClass: 'non-builtin',
     searchHint: 'invoke a slash-command skill',
     // inputJSONSchema 不在此设静态值;下方 defineProperty 挂 live getter(动态 available 列表)。
     maxResultSizeChars: 100_000,

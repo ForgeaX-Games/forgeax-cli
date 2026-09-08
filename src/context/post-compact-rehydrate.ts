@@ -55,28 +55,104 @@ function headTruncate(content: string, budgetTokens: number): string {
   return content.slice(0, maxChars) + '\n\n... [truncated for post-compact rehydration] ...';
 }
 
+function throwIfRehydrateAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'rehydration aborted');
+  error.name = 'AbortError';
+  throw error;
+}
+
+/** Race an injected filesystem read against turn cancellation. The read may
+ * not support AbortSignal itself, so cancellation must not wait for it to
+ * settle. Promise handlers remain attached to consume a late rejection. */
+function readFileWithAbort(
+  readFile: RehydrateInput['readFile'],
+  path: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  throwIfRehydrateAborted(signal);
+  if (!signal) return readFile(path);
+
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      finish(() => {
+        try {
+          throwIfRehydrateAborted(signal);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    let pending: Promise<string>;
+    try {
+      pending = readFile(path);
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    pending.then(
+      (content) => finish(() => resolve(content)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
 /**
  * 压后重挂。返回 attachment 消息数组(可能为空)。
  *
  * 取 recentReadPaths 前 maxFiles 个,逐个重读 + head 截断 + token 预算累计(超预算即停)。
  */
 export async function rehydrate(input: RehydrateInput): Promise<RehydrateResult> {
+  throwIfRehydrateAborted(input.signal);
   const maxFiles = Math.max(0, input.maxFiles ?? DEFAULT_REHYDRATE_MAX_FILES);
   const budget = Math.max(0, input.tokenBudget ?? DEFAULT_REHYDRATE_TOKEN_BUDGET);
+  const outcomes = {
+    requested: input.recentReadPaths.length,
+    attempted: 0,
+    attached: 0,
+    failed: 0,
+    skippedByLimit: 0,
+    skippedByBudget: 0,
+  };
   if (maxFiles === 0 || budget === 0 || input.recentReadPaths.length === 0) {
-    return { attachments: [] };
+    if (maxFiles === 0) outcomes.skippedByLimit = outcomes.requested;
+    else if (budget === 0) outcomes.skippedByBudget = outcomes.requested;
+    return { attachments: [], outcomes };
   }
 
   const attachments: ProviderMessage[] = [];
   let spent = 0;
   let used = 0;
 
-  for (const path of input.recentReadPaths) {
-    if (used >= maxFiles || spent >= budget) break;
+  for (let index = 0; index < input.recentReadPaths.length; index++) {
+    throwIfRehydrateAborted(input.signal);
+    if (used >= maxFiles) {
+      outcomes.skippedByLimit = input.recentReadPaths.length - index;
+      break;
+    }
+    if (spent >= budget) {
+      outcomes.skippedByBudget = input.recentReadPaths.length - index;
+      break;
+    }
+    const path = input.recentReadPaths[index]!;
+    outcomes.attempted++;
     let content: string;
     try {
-      content = await input.readFile(path);
-    } catch {
+      content = await readFileWithAbort(input.readFile, path, input.signal);
+      throwIfRehydrateAborted(input.signal);
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      outcomes.failed++;
       continue; // 读失败 → 跳过(降级)
     }
     const remaining = budget - spent;
@@ -92,7 +168,9 @@ export async function rehydrate(input: RehydrateInput): Promise<RehydrateResult>
     } as ProviderMessage);
     spent += estTokens(text);
     used++;
+    outcomes.attached++;
   }
 
-  return { attachments };
+  throwIfRehydrateAborted(input.signal);
+  return { attachments, outcomes };
 }

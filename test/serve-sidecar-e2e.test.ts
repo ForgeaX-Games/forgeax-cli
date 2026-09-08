@@ -106,18 +106,26 @@ async function connectRetry(sock: string, deadlineMs = 10000): Promise<RpcConnec
 }
 
 /** 起 serve,连上,装好反向 hostTool 处理器 + event 收集。 */
-async function startServe(): Promise<Serve> {
+async function startServe(options: { providerCredential?: boolean } = {}): Promise<Serve> {
   const sock = join(tmpdir(), `fxc-serve-e2e-${Date.now()}-${Math.floor(performance.now())}.sock`);
+  const env: Record<string, string> = {
+    ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    ANTHROPIC_API_KEY: 'dummy-serve-e2e',
+    ANTHROPIC_BASE_URL: baseUrl,
+    FORGEAX_THINKING: 'off', // 简化 SSE(不掺 thinking 流)
+    FORGEAX_OTEL: 'off', // 不挂 OTLP exporter
+    FORGEAX_PEER_AGENTS: '0', // 不挂子 agent 调度器
+  };
+  // Hermetic provider route: inherited proxy variables must not change which tuple is selected.
+  delete env.FORGEAX_PROVIDER_API;
+  delete env.OPENAI_API_KEY;
+  delete env.OPENAI_BASE_URL;
+  delete env.LITELLM_PROXY_KEY;
+  delete env.LITELLM_PROXY_BASE_URL;
+  if (options.providerCredential === false) delete env.ANTHROPIC_API_KEY;
   const proc = Bun.spawn(['bun', MAIN, '--serve', '--sock', sock], {
     cwd: join(import.meta.dir, '..'),
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: 'dummy-serve-e2e',
-      ANTHROPIC_BASE_URL: baseUrl,
-      FORGEAX_THINKING: 'off', // 简化 SSE(不掺 thinking 流)
-      FORGEAX_OTEL: 'off', // 不挂 OTLP exporter
-      FORGEAX_PEER_AGENTS: '0', // 不挂子 agent 调度器
-    },
+    env,
     stdout: 'ignore',
     stderr: 'pipe',
   });
@@ -165,6 +173,39 @@ function turnReq(callId: string, prompt: string, withTool: boolean): TurnRequest
 }
 
 describe('serve sidecar e2e (real --serve subprocess, JSON-RPC over unix socket, mock SSE)', () => {
+  test('ping stays available before provider credentials are valid', async () => {
+    const s = await startServe({ providerCredential: false });
+    try {
+      const res = (await s.conn.request('ping')) as { ok?: boolean; capabilities?: string[] };
+      expect(res?.ok).toBe(true);
+      expect(res?.capabilities).toContain('hostTurnSnapshot.v1');
+      expect(s.proc.exitCode).toBeNull();
+    } finally {
+      s.close();
+    }
+  }, 30000);
+
+  test('invalid provider config fails the turn explicitly without closing the control connection', async () => {
+    const s = await startServe({ providerCredential: false });
+    try {
+      let message = '';
+      try {
+        await s.conn.request('runTurn', turnReq('c-invalid-provider', 'say hi', false));
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain('provider env invalid for anthropic-messages');
+      expect(message).toContain('ANTHROPIC_API_KEY');
+      expect(message).not.toContain(baseUrl);
+
+      const pong = (await s.conn.request('ping')) as { ok?: boolean };
+      expect(pong?.ok).toBe(true);
+      expect(s.proc.exitCode).toBeNull();
+    } finally {
+      s.close();
+    }
+  }, 30000);
+
   test('ping → {ok:true}', async () => {
     const s = await startServe();
     try {

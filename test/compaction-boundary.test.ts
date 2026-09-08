@@ -11,6 +11,7 @@ import {
   stripDeterministicHeader,
   isPriorCompactionSummary,
   DETERMINISTIC_SUMMARY_HEADER,
+  CompactionReductionError,
 } from '../src/context/compaction-pipeline';
 import {
   deterministicCompact,
@@ -278,11 +279,17 @@ describe('runCompaction 边界', () => {
 
 // ─── 极小窗口 ─────────────────────────────────────────────────────────────────
 describe('极小窗口', () => {
-  test('window<reserve → effective=0,sufficiency 阈=0,大内容不短路', async () => {
+  test('window<reserve → effective=0 uses a one-token leaf limit and fails closed when split depth is insufficient', async () => {
     const tiny = computeWatermarksFromModel({ contextWindow: 5_000 }); // reserve 20k > 5k → effective 0
     expect(tiny.effectiveWindow).toBe(0);
     const summarize = mock(async () => '<summary>x</summary>');
-    const r = await runCompaction(pin({ marks: tiny, messages: [{ role: 'user', content: 'aaaa' }, { role: 'assistant', content: 'bbbb' }], summarize }));
-    expect(r.usedLLM).toBe(true); // 阈=0,estimatedTokens>0 → 不短路 → 走 LLM
+    let caught: unknown;
+    try {
+      await runCompaction(pin({ marks: tiny, messages: [{ role: 'user', content: 'aaaa' }, { role: 'assistant', content: 'bbbb' }], summarize }));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CompactionReductionError);
+    expect((caught as CompactionReductionError).diagnostics.reason).toBe('split_exhausted');
   });
 });

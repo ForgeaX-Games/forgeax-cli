@@ -32,7 +32,7 @@ describe('子 agent 压缩一致性', () => {
       { provider: oneTurn },
     );
     expect(r.terminalReason).toBe('completed');
-    expect(summarize).toHaveBeenCalledTimes(1); // 子确实压了
+    expect(summarize.mock.calls.length).toBeGreaterThan(0); // 子确实压了;严格叶上限可形成多调用摘要树
   });
 
   test('子上下文小 → sufficiency 短路(与主一致,不调 LLM)', async () => {
@@ -51,10 +51,11 @@ describe('主子隔离:gateState 不互相影响', () => {
     const summarize = mock(async () => '<summary>s</summary>');
     const cfg = v2(summarize); // 同一 config 对象(含同 nowFn 常量)
     await runSubagent({ input: bigText(19_000), model: 'm', tools: [], compactionV2: cfg }, { provider: oneTurn });
-    expect(summarize).toHaveBeenCalledTimes(1);
+    const firstChildCalls = summarize.mock.calls.length;
+    expect(firstChildCalls).toBeGreaterThan(0);
     await runSubagent({ input: bigText(19_000), model: 'm', tools: [], compactionV2: cfg }, { provider: oneTurn });
-    // 第二个子是**独立 CoreAgent 实例** → gate 全新 → 同 now 仍压(共享则会被 cooldown 拦成 1)
-    expect(summarize).toHaveBeenCalledTimes(2);
+    // 第二个子是**独立 CoreAgent 实例** → gate 全新 → 同 now 仍产生新的摘要调用。
+    expect(summarize.mock.calls.length).toBeGreaterThan(firstChildCalls);
   });
 
   test('父压缩后,子用同 now 仍能压(父冷却不影响子)', async () => {
@@ -65,11 +66,12 @@ describe('主子隔离:gateState 不互相影响', () => {
     const parent = new CoreAgent({ context: ctx, compactionV2: cfg });
     const pe: AgentEvent[] = [];
     for await (const e of parent.run({ input: { type: 'user', payload: 'q', ts: 0 }, history: [{ role: 'user', content: bigText(19_000) }] })) pe.push(e);
-    expect(summarize).toHaveBeenCalledTimes(1); // 父压了一次,父 gate 进入 cooldown(now 固定)
+    const parentCalls = summarize.mock.calls.length;
+    expect(parentCalls).toBeGreaterThan(0); // 父压了一次树,父 gate 进入 cooldown(now 固定)
 
     // 子:同 now、同 config → 父冷却不应波及子(独立实例)
     await runSubagent({ input: bigText(19_000), model: 'm', tools: [], compactionV2: cfg }, { provider: oneTurn });
-    expect(summarize).toHaveBeenCalledTimes(2); // 子照常压 → 隔离成立
+    expect(summarize.mock.calls.length).toBeGreaterThan(parentCalls); // 子照常压 → 隔离成立
   });
 
   test('子压缩事件不外溢父 bus(子用独立 bus)', async () => {
@@ -82,7 +84,7 @@ describe('主子隔离:gateState 不互相影响', () => {
       { input: bigText(19_000), model: 'm', tools: [], compactionV2: v2(summarize) },
       { provider: oneTurn, bus: parentBus },
     );
-    expect(summarize).toHaveBeenCalledTimes(1); // 子确实压了
+    expect(summarize.mock.calls.length).toBeGreaterThan(0); // 子确实压了
     expect(parentSawCompaction).toBe(0); // 但父 bus 看不到子的 CompactionApplied(上下文隔离)
   });
 });

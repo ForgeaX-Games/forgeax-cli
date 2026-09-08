@@ -15,7 +15,7 @@
  * 与生产一致的关键(对照 agent.ts:518-540 自压缩路径):
  *   - 水位 = computeWatermarks(contextWindow):autoCompactThreshold = (W-20000)-13000 = W-33000;
  *   - 首轮 tokenCount 用 char/4 估算(lastPromptTokens=0)→ 大输入即可在首轮触发 proactive 压缩;
- *   - summarize 调用由其 system 模板「create a detailed summary」辨识(= 压缩真的发生)。
+ *   - summarize 调用由其 system 模板「compact but complete continuation summary」辨识(= 压缩真的发生)。
  */
 import { test, expect, describe } from 'bun:test';
 import { runSubagent, makeTaskTool } from '../src/agent/subagent';
@@ -56,7 +56,7 @@ function estimateReqTokens(req: ProviderRequest): number {
 }
 /** 用 summarize prompt 模板辨识「这是一次压缩摘要调用」(= 压缩真触发)。 */
 function isSummarizeReq(req: ProviderRequest): boolean {
-  return req.system.some((b) => typeof b.text === 'string' && b.text.includes('create a detailed summary'));
+  return req.system.some((b) => typeof b.text === 'string' && b.text.includes('compact but complete continuation summary'));
 }
 
 interface StubCall {

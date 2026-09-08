@@ -33,7 +33,8 @@ const TABLE: Array<{ match: string; info: ModelContextInfo }> = [
   { match: 'gemini-1.5-pro', info: { contextWindow: 2_000_000, maxOutputTokens: 8_192 } },
   { match: 'gemini', info: { contextWindow: 1_000_000, maxOutputTokens: 8_192 } },
   // DeepSeek
-  { match: 'deepseek', info: { contextWindow: 128_000, maxOutputTokens: 8_192 } },
+  // V4 thinking (serve 默认 adaptive) 会吃光 8192/32768；对齐 GLM-5.2 给 128000。
+  { match: 'deepseek', info: { contextWindow: 128_000, maxOutputTokens: 128_000 } },
   // 造化网关 / GLM-5.2. `zaohua-pro` is the host-facing alias while the
   // gateway may expose the upstream id as `glm-5.2`. Both need an
   // explicit output ceiling: adaptive thinking can consume the whole provider

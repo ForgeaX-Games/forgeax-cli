@@ -65,6 +65,9 @@ export interface ToolResult<T = unknown> {
 
 export type PermissionBehavior = 'allow' | 'deny' | 'ask' | 'passthrough';
 
+/** Internal provider-budget classification; never serialized to a provider wire definition. */
+export type ProviderToolClass = 'builtin' | 'non-builtin';
+
 export interface PermissionResult {
   behavior: PermissionBehavior;
   /** allow/ask 可携带修正后的输入。 */
@@ -84,6 +87,12 @@ export type ValidationResult =
 export interface AgentTool<Input = unknown, Output = unknown> {
   // identity / discovery
   readonly name: string;
+  /**
+   * Internal provider-budget classification. Core built-in constructors set this to
+   * `builtin`; externally sourced tools must use `non-builtin`. This field is read
+   * before the AgentTool is projected to ProviderToolDef and is never sent to a provider.
+   */
+  providerToolClass?: ProviderToolClass;
   /** model-facing 工具描述 → wire `tools[].description`。缺省时 provider 回落 searchHint。 */
   description?: string;
   /** 改名回溯别名。 */
@@ -147,6 +156,9 @@ export type ToolDef<I = unknown, O = unknown> = Omit<
  *  否；checkPermissions 默认 allow（真正的把闸在 PERM 规则引擎前置）。 */
 export function buildTool<I, O>(def: ToolDef<I, O>): AgentTool<I, O> {
   return {
+    // All core capability constructors use buildTool. Adapters for external tools
+    // override this with providerToolClass: 'non-builtin'.
+    providerToolClass: 'builtin',
     isEnabled: () => true,
     isConcurrencySafe: () => false,
     isReadOnly: () => false,

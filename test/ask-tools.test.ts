@@ -45,6 +45,7 @@ describe('AskUserQuestion registration', () => {
     expect(names).toContain('AskUserQuestion');
     const t = askUserQuestionTool();
     expect(t.aliases).toContain('ask_user_question');
+    expect(t.aliases).toContain('ask_user');
     expect(t.isEnabled()).toBe(true);
     expect(t.inputJSONSchema).toBeDefined();
     // 交互式索取输入 → 非只读 / 非并发安全(fail-closed)。

@@ -29,10 +29,10 @@ import { NOOP_LOGGER, NOOP_OBS, type Observability } from '../../observability/c
 import { ForgeaxProcessor } from './processor';
 import { ConsolaCoreLogger } from './logger';
 import { Coalescer, LogRateLimiter } from './coalesce';
-import { redactBagWith, type RedactProfile } from './redactor';
+import { redactBagWith, type RedactProfile } from '../../observability/redactor';
 
-export { redactBagWith, redactStrictValueAtSource, REDACTED } from './redactor';
-export type { RedactProfile } from './redactor';
+export { redactBagWith, redactStrictValueAtSource, REDACTED } from '../../observability/redactor';
+export type { RedactProfile } from '../../observability/redactor';
 export { ForgeaxProcessor, readableSpanToSpanData, hrTimeToMs } from './processor';
 export { ConsolaCoreLogger } from './logger';
 export { Coalescer, LogRateLimiter } from './coalesce';

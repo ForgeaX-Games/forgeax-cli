@@ -248,6 +248,49 @@ describe('ForgeaxCoreKernel — consumes TurnRequest.history (native context own
     const done = events.find((e) => e.kind === 'turn.done') as { reason: string } | undefined;
     expect(done?.reason).toBe('stop');
   });
+
+  test('history preserves assistant toolCalls in provider wire content', async () => {
+    let seen: ProviderRequest | undefined;
+    const provider: LLMProvider = {
+      api: 'stub',
+      async *stream(request) {
+        seen = request;
+        yield asstText('ok');
+      },
+    };
+    const k = new ForgeaxCoreKernel({ provider, executeTool: async () => null });
+
+    await collect(
+      k,
+      req({
+        tools: [],
+        history: [
+          { role: 'user', content: 'earlier' },
+          {
+            role: 'assistant',
+            content: 'calling echo',
+            toolCalls: [{ callId: 'call-1', name: 'echo', args: { value: 1 } }],
+          },
+          { role: 'tool', callId: 'call-1', ok: true, result: 'done' },
+        ],
+      }),
+    );
+
+    expect(seen?.messages.slice(0, 3)).toEqual([
+      { role: 'user', content: 'earlier' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'calling echo' },
+          { type: 'tool_use', id: 'call-1', name: 'echo', input: { value: 1 } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'call-1', name: 'echo', content: 'done', is_error: false }],
+      },
+    ]);
+  });
 });
 
 describe('ForgeaxCoreKernel — translateNeutral (neutral → engine native)', () => {
@@ -466,11 +509,90 @@ describe('ForgeaxCoreKernel — 压后重挂 host 接线(CORE-CTX-004)', () => {
       executeTool: async () => ({ ok: true, content: 'file bytes' }),
       toolContext: { sandboxFs: { readText: async (p: string) => `BODY-OF:${p}` } },
     });
-    await collect(k, req({ callId: 'reh1', tools: [{ name: 'read_file', inputSchema: {} }] }));
+    const events = await collect(k, req({ callId: 'reh1', tools: [{ name: 'read_file', inputSchema: {} }] }));
     const anyReattach = cap.reqs.some((r) => JSON.stringify(r.messages).includes('Re-attached after compaction'));
     const anyBody = cap.reqs.some((r) => JSON.stringify(r.messages).includes('BODY-OF:/x.ts'));
     expect(anyReattach).toBe(true);
     expect(anyBody).toBe(true);
+    expect(events).toContainEqual({
+      kind: 'stored-event',
+      payload: {
+        type: 'compaction.post',
+        payload: expect.objectContaining({
+          rehydrate: expect.objectContaining({ attached: 1 }),
+        }),
+      },
+    });
+  });
+
+  test('summary failure leaves the facade as a neutral non-boundary diagnostic', async () => {
+    const provider: LLMProvider = {
+      api: 'stub',
+      async *stream() {
+        yield {
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'partial summary' }] },
+          usage: EMPTY_USAGE as Usage,
+          stopReason: 'max_tokens',
+        };
+      },
+    };
+    const k = new ForgeaxCoreKernel({
+      provider,
+      executeTool: async () => ({ ok: true, content: 'file bytes' }),
+    });
+    const events = await collect(
+      k,
+      req({
+        callId: 'failure1',
+        tools: [],
+        history: [{ role: 'user', content: 'x'.repeat(700_000) }],
+      }),
+    );
+    const failures = events.filter(
+      (event) => event.kind === 'stored-event' && event.payload.type === 'compaction.failed',
+    );
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toEqual({
+      kind: 'stored-event',
+      payload: {
+        type: 'compaction.failed',
+        payload: expect.objectContaining({
+          error: 'Compaction summary rejected: provider stopped at max_tokens.',
+          trigger: 'auto',
+          tokenCount: expect.any(Number),
+          diagnostics: expect.objectContaining({ reason: 'max_tokens' }),
+          recovery: {
+            action: 'continue_to_emergency_handling',
+            currentTurn: 'continues',
+            providerCompletion: 'pending',
+            history: 'unchanged',
+            retryable: true,
+          },
+        }),
+      },
+    });
+    expect(failures[1]).toEqual({
+      kind: 'stored-event',
+      payload: {
+        type: 'compaction.failed',
+        payload: expect.objectContaining({
+          type: 'emergency-auto',
+          recovery: {
+            action: 'terminate_current_turn',
+            currentTurn: 'terminated',
+            terminalReason: 'prompt_too_long',
+            providerCall: 'not_started',
+            providerCompletion: 'none',
+            history: 'unchanged',
+            retryable: true,
+          },
+        }),
+      },
+    });
+    expect(events.at(-1)).toEqual({ kind: 'turn.done', reason: 'error' });
+    expect(events.some((event) => event.kind === 'message.delta')).toBe(false);
+    expect(events.some((event) => event.kind === 'compact_boundary')).toBe(false);
   });
 
   test('对照:toolContext 无 sandboxFs → rehydrate 不注入,压后无 re-attach(优雅降级)', async () => {

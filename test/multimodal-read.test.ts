@@ -11,6 +11,9 @@
  * 不打真 IO。风格对齐 test/builtin-tools.test.ts。
  */
 import { test, expect, describe } from 'bun:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { SandboxFs, DirEnt, StatResult } from '../src/inject/types';
 import type { ToolContext } from '../src/capability/types';
 import { CoreEventType } from '../src/events/events';
@@ -24,14 +27,29 @@ import {
   imageBlockFromBytes,
   parseDataUrl,
   imageBlockFromAttachment,
+  imageBlockFromFilePart,
+  normalizeImageFileContent,
+  IMAGE_FILE_UNAVAILABLE_TEXT,
+  HISTORY_IMAGE_MAX_RAW_BYTES,
+  readFilePathBounded,
 } from '../src/capability/image-block';
 
 // ─── 测试用图片字节(合法文件头魔数) ────────────────────────────────────────────
 
-const PNG_MAGIC = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x01, 0x02]);
-const JPEG_MAGIC = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xaa, 0xbb]);
-const GIF_MAGIC = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00]);
-const WEBP_MAGIC = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50]);
+// 真实的 1x1 fixtures，而不是“签名 + 任意 junk”；历史 path-backed image 必须至少通过
+// 支持格式的魔数识别，伪 MIME/截断字节不能被包装成 image block。
+const PNG_MAGIC = new Uint8Array(Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+));
+const JPEG_MAGIC = new Uint8Array(Buffer.from(
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AYf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AYf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z',
+  'base64',
+));
+const GIF_MAGIC = new Uint8Array(Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64'));
+// cwebp 1x1 lossless output. The previous constant declared a 42-byte RIFF but contained
+// only 36 bytes, so it was itself a truncated file rather than a complete WebP fixture.
+const WEBP_MAGIC = new Uint8Array(Buffer.from('UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAEAfQm9a3pZiBiOh/AAA=', 'base64'));
 
 // ─── stub SandboxFs(内存 bytes 树,支持 readBytes) ─────────────────────────────
 
@@ -186,6 +204,225 @@ describe('image-block helper', () => {
       },
     );
     expect(block).toBeNull();
+  });
+
+  test('imageBlockFromFilePart: image_file path + mimeType → canonical image block', () => {
+    const block = imageBlockFromFilePart(
+      { type: 'image_file', path: '/history.png', mimeType: 'image/png' },
+      () => PNG_MAGIC,
+      () => ({ size: PNG_MAGIC.length }),
+    );
+    expect(block).toEqual({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: bytesToBase64(PNG_MAGIC) },
+    });
+  });
+
+  test('imageBlockFromFilePart accepts structurally complete real 1x1 fixtures for all formats', () => {
+    const fixtures = [
+      ['png', 'image/png', PNG_MAGIC],
+      ['jpg', 'image/jpeg', JPEG_MAGIC],
+      ['gif', 'image/gif', GIF_MAGIC],
+      ['webp', 'image/webp', WEBP_MAGIC],
+    ] as const;
+    for (const [extension, mediaType, bytes] of fixtures) {
+      const block = imageBlockFromFilePart(
+        { type: 'image_file', path: `/real.${extension}`, mimeType: mediaType },
+        () => bytes,
+        () => ({ size: bytes.length }),
+      );
+      expect(block?.source.media_type).toBe(mediaType);
+      expect(block?.source.data).toBe(bytesToBase64(bytes));
+    }
+  });
+
+  test('imageBlockFromFilePart rejects every proper prefix of each real fixture', () => {
+    const fixtures = [
+      ['png', 'image/png', PNG_MAGIC],
+      ['jpg', 'image/jpeg', JPEG_MAGIC],
+      ['gif', 'image/gif', GIF_MAGIC],
+      ['webp', 'image/webp', WEBP_MAGIC],
+    ] as const;
+    for (const [extension, mediaType, bytes] of fixtures) {
+      const acceptedPrefixLengths: number[] = [];
+      for (let length = 1; length < bytes.length; length++) {
+        const prefix = bytes.slice(0, length);
+        const block = imageBlockFromFilePart(
+          { type: 'image_file', path: `/prefix.${extension}`, mimeType: mediaType },
+          () => prefix,
+          () => ({ size: prefix.length }),
+        );
+        if (block !== null) acceptedPrefixLengths.push(length);
+      }
+      expect(acceptedPrefixLengths).toEqual([]);
+
+      const complete = imageBlockFromFilePart(
+        { type: 'image_file', path: `/complete.${extension}`, mimeType: mediaType },
+        () => bytes,
+        () => ({ size: bytes.length }),
+      );
+      expect(complete?.source.media_type).toBe(mediaType);
+    }
+  });
+
+  test('normalizeImageFileContent: missing or non-image image_file → safe placeholder', () => {
+    const normalized = normalizeImageFileContent(
+      [
+        { type: 'image_file', path: '/missing.png', mimeType: 'image/png' },
+        { type: 'tool_result', content: [{ type: 'image_file', path: '/note.txt', mimeType: 'text/plain' }] },
+      ],
+      () => {
+        throw new Error('ENOENT');
+      },
+      () => ({ size: 1 }),
+    ) as Array<Record<string, unknown>>;
+    expect(normalized[0]).toEqual({ type: 'text', text: IMAGE_FILE_UNAVAILABLE_TEXT });
+    expect((normalized[1].content as Array<Record<string, unknown>>)[0]).toEqual({
+      type: 'text',
+      text: IMAGE_FILE_UNAVAILABLE_TEXT,
+    });
+    expect(JSON.stringify(normalized)).not.toContain('image_file');
+  });
+
+  test('image magic uses each format minimum signature length and rejects truncation', () => {
+    expect(imageMediaTypeFromMagic(PNG_MAGIC.slice(0, 8))).toBe('image/png');
+    expect(imageMediaTypeFromMagic(JPEG_MAGIC.slice(0, 3))).toBe('image/jpeg');
+    expect(imageMediaTypeFromMagic(GIF_MAGIC.slice(0, 6))).toBe('image/gif');
+    expect(imageMediaTypeFromMagic(WEBP_MAGIC.slice(0, 12))).toBe('image/webp');
+    expect(imageMediaTypeFromMagic(PNG_MAGIC.slice(0, 7))).toBeNull();
+    expect(imageMediaTypeFromMagic(JPEG_MAGIC.slice(0, 2))).toBeNull();
+    expect(imageMediaTypeFromMagic(GIF_MAGIC.slice(0, 5))).toBeNull();
+    expect(imageMediaTypeFromMagic(WEBP_MAGIC.slice(0, 11))).toBeNull();
+  });
+
+  test('path-backed history image requires magic, handles MIME conflict, and stats before read', () => {
+    const text = new TextEncoder().encode('plain text that is not a png');
+    expect(
+      imageBlockFromFilePart(
+        { type: 'image_file', path: '/pretend.png', mimeType: 'image/png' },
+        () => text,
+        () => ({ size: text.length }),
+      ),
+    ).toBeNull();
+
+    const truncated = [
+      ['/truncated.png', PNG_MAGIC.slice(0, 32)],
+      ['/truncated.jpg', JPEG_MAGIC.slice(0, 20)],
+      ['/truncated.gif', GIF_MAGIC.slice(0, 6)],
+      ['/truncated.webp', WEBP_MAGIC.slice(0, 19)],
+    ] as const;
+    for (const [path, bytes] of truncated) {
+      expect(
+        imageBlockFromFilePart(
+          { type: 'image_file', path, mimeType: 'image/png' },
+          () => bytes,
+          () => ({ size: bytes.length }),
+        ),
+      ).toBeNull();
+    }
+
+    const order: string[] = [];
+    const block = imageBlockFromFilePart(
+      { type: 'image_file', path: '/conflict.jpg', mimeType: 'image/jpeg' },
+      () => {
+        order.push('read');
+        return PNG_MAGIC;
+      },
+      () => {
+        order.push('stat');
+        return { size: PNG_MAGIC.length };
+      },
+    );
+    expect(order).toEqual(['stat', 'read']);
+    expect(block?.source.media_type).toBe('image/png');
+  });
+
+  test('bounded reader uses one fd and never returns more than its explicit limit', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fx-bounded-image-'));
+    const path = join(dir, 'growing.bin');
+    writeFileSync(path, Buffer.alloc(64, 0x61));
+    const bytes = readFilePathBounded(path, 8);
+    expect(bytes?.length).toBe(8);
+  });
+
+  test('stat-small/read-growing path is bounded at raw budget + 1 before rejection', () => {
+    let requestedMax = 0;
+    const block = imageBlockFromFilePart(
+      { type: 'image_file', path: '/growing.png', mimeType: 'image/png' },
+      (_path, maxBytes) => {
+        requestedMax = maxBytes;
+        const bytes = new Uint8Array(maxBytes);
+        bytes.set(PNG_MAGIC);
+        return bytes;
+      },
+      () => ({ size: PNG_MAGIC.length }),
+    );
+    expect(block).toBeNull();
+    expect(requestedMax).toBe(HISTORY_IMAGE_MAX_RAW_BYTES + 1);
+  });
+
+  test('oversized history image is dropped before read and never base64 encoded', () => {
+    let reads = 0;
+    const block = imageBlockFromFilePart(
+      { type: 'image_file', path: '/too-large.png', mimeType: 'image/png' },
+      () => {
+        reads++;
+        return PNG_MAGIC;
+      },
+      () => ({ size: HISTORY_IMAGE_MAX_RAW_BYTES + 1 }),
+    );
+    expect(block).toBeNull();
+    expect(reads).toBe(0);
+  });
+
+  test('normalizeImageFileContent walks object envelopes and nested result/content arrays', () => {
+    const normalized = normalizeImageFileContent(
+      {
+        type: 'tool_result',
+        result: {
+          envelope: {
+            content: {
+              content: [{ type: 'text', text: 'before' }, { type: 'image_file', path: '/nested.png', mimeType: 'image/png' }],
+            },
+          },
+        },
+      },
+      () => PNG_MAGIC,
+      () => ({ size: PNG_MAGIC.length }),
+    ) as Record<string, unknown>;
+    const serialized = JSON.stringify(normalized);
+    expect(serialized).not.toContain('image_file');
+    expect(serialized).not.toContain('/nested.png');
+    expect(serialized).toContain('"type":"image"');
+  });
+
+  test('tool_use.input is opaque, while tool_use.content still normalizes', () => {
+    const opaqueInput = {
+      nested: { type: 'image_file', path: '/opaque-input.png', mimeType: 'image/png' },
+      path: '/opaque-input.png',
+    };
+    const normalized = normalizeImageFileContent(
+      [{
+        type: 'tool_use',
+        id: 'opaque-1',
+        name: 'inspect',
+        input: opaqueInput,
+        content: [{ type: 'image_file', path: '/content.png', mimeType: 'image/png' }],
+      }],
+      (path) => {
+        if (path === '/opaque-input.png') throw new Error('opaque input must not be read');
+        return PNG_MAGIC;
+      },
+      (path) => {
+        if (path === '/opaque-input.png') throw new Error('opaque input must not be stat-ed');
+        return { size: PNG_MAGIC.length };
+      },
+    ) as Array<Record<string, unknown>>;
+    expect(normalized[0].input).toEqual(opaqueInput);
+    expect((normalized[0].content as Array<Record<string, unknown>>)[0]).toEqual({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: bytesToBase64(PNG_MAGIC) },
+    });
   });
 });
 

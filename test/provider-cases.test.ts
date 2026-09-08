@@ -18,11 +18,15 @@
  * mock,不打真网络。
  */
 import { test, expect, describe, afterEach } from 'bun:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import {
   parseSSE,
   normalizeAnthropicStream,
   buildRequestBody,
+  messagesToAnthropic,
   systemBlocksToAnthropic,
   annotateMessageCache,
 } from '../src/provider/anthropic';
@@ -59,6 +63,13 @@ import {
   type ProviderRequest,
   type ProviderStreamEvent,
 } from '../src/provider/types';
+import {
+  canonicalizeBoundaryContent,
+  canonicalizeContent,
+  canonicalizeHistory,
+  HISTORY_CONTENT_MAX_RAW_BYTES,
+} from '../src/capability/history-content';
+import { assertProviderWireSafe } from '../src/provider/wire-validator';
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
@@ -102,8 +113,262 @@ const BASE_REQ: ProviderRequest = {
   messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
 };
 
+const PNG_FIXTURE = new Uint8Array(Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+));
+const JPEG_FIXTURE = new Uint8Array(Buffer.from(
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AYf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AYf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z',
+  'base64',
+));
+
 const noSleep = async () => {};
 const liveSignal = () => new AbortController().signal;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function stripOpaqueToolValues(value: unknown, depth = 0): unknown {
+  if (Array.isArray(value)) return value.map((child) => stripOpaqueToolValues(child, depth));
+  if (!isRecord(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (depth > 0 && (key === 'input' || key === 'arguments' || key === 'args' || key === 'parameters' || key === 'input_schema')) continue;
+    out[key] = stripOpaqueToolValues(child, depth + 1);
+  }
+  return out;
+}
+
+function findRecords(value: unknown, predicate: (record: Record<string, unknown>) => boolean, out: Record<string, unknown>[] = [], depth = 0): Record<string, unknown>[] {
+  if (Array.isArray(value)) {
+    for (const item of value) findRecords(item, predicate, out, depth);
+  } else if (isRecord(value)) {
+    if (predicate(value)) out.push(value);
+    for (const [key, child] of Object.entries(value)) {
+      if (depth > 0 && (key === 'input' || key === 'arguments' || key === 'args' || key === 'parameters' || key === 'input_schema')) continue;
+      findRecords(child, predicate, out, depth + 1);
+    }
+  }
+  return out;
+}
+
+function expectNoEmptyContentArrays(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) expectNoEmptyContentArrays(item);
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'content' || key === 'parts') {
+      expect(Array.isArray(child) ? child.length : 1).toBeGreaterThan(0);
+    }
+    if (key !== 'input' && key !== 'arguments' && key !== 'args' && key !== 'parameters' && key !== 'input_schema') {
+      expectNoEmptyContentArrays(child);
+    }
+  }
+}
+
+describe('history canonicalization idempotence', () => {
+  test('neutral image/file/audio/document remain media after repeated boundary normalization', () => {
+    const image = Buffer.from(PNG_FIXTURE).toString('base64');
+    const file = Buffer.from('plain history file', 'utf8').toString('base64');
+    const audio = Buffer.from('RIFF\x08\x00\x00\x00WAVE', 'binary').toString('base64');
+    const document = Buffer.from('%PDF-1.4\n', 'utf8').toString('base64');
+    const once = canonicalizeBoundaryContent([
+      { type: 'image', data: image, mimeType: 'image/png' },
+      { type: 'file', data: file, mimeType: 'text/plain' },
+      { type: 'audio', data: audio, mimeType: 'audio/wav' },
+      { type: 'document', data: document, mimeType: 'application/pdf' },
+    ]);
+    const twice = canonicalizeBoundaryContent(once);
+    expect(twice).toEqual(once);
+    expect(twice).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'image', mimeType: 'image/png' }),
+      expect.objectContaining({ type: 'file', mimeType: 'text/plain' }),
+      expect.objectContaining({ type: 'audio', mimeType: 'audio/wav' }),
+      expect.objectContaining({ type: 'document', mimeType: 'application/pdf' }),
+    ]));
+  });
+
+  test('neutral JPEG keeps its MIME through repeated normalization and both OpenAI boundaries', () => {
+    const data = Buffer.from(JPEG_FIXTURE).toString('base64');
+    const neutral = { type: 'image', data, mimeType: 'image/jpeg' };
+    const once = canonicalizeBoundaryContent([neutral]);
+    const twice = canonicalizeBoundaryContent(once);
+    expect(twice).toEqual(once);
+    expect(twice).toEqual([{ type: 'image', data, mimeType: 'image/jpeg' }]);
+
+    const chat = messagesToOpenAI([{ role: 'user', content: [neutral] }], []) as Array<Record<string, unknown>>;
+    expect(chat[0].content).toEqual([{ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${data}` } }]);
+    const responses = messagesToResponseInput([{ role: 'user', content: [neutral] }]) as Array<Record<string, unknown>>;
+    expect((responses[0].content as unknown[])[0]).toEqual({ type: 'input_image', image_url: `data:image/jpeg;base64,${data}` });
+  });
+});
+
+describe('history canonicalizer roles and four-provider final wires', () => {
+  test('canonicalizes the nine producer parts across user/assistant/tool and correlates Gemini tool names', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fx-history-neutral-parts-'));
+    const imagePath = join(dir, 'history.png');
+    const textPath = join(dir, 'history.txt');
+    const audioPath = join(dir, 'history.wav');
+    const videoPath = join(dir, 'history.mp4');
+    const imageBytes = Buffer.from(PNG_FIXTURE);
+    const textBytes = Buffer.from('history text', 'utf8');
+    const audioBytes = Buffer.from('RIFF\x08\x00\x00\x00WAVE', 'binary');
+    const videoBytes = Buffer.from([0, 0, 0, 0, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0]);
+    const pdfBytes = Buffer.from('%PDF-1.7\n', 'utf8');
+    writeFileSync(imagePath, imageBytes);
+    writeFileSync(textPath, textBytes);
+    writeFileSync(audioPath, audioBytes);
+    writeFileSync(videoPath, videoBytes);
+
+    const opaqueArgs = { path: '/opaque/tool-input.secret', nested: { type: 'image_file', path: '/opaque/image.png' } };
+    const rawHistory = [
+      {
+        role: 'user' as const,
+        content: [
+          { type: 'text', text: 'user text' },
+          { type: 'image', data: imageBytes.toString('base64'), mimeType: 'image/png' },
+          { type: 'file', data: textBytes.toString('base64'), mimeType: 'text/plain' },
+          { type: 'text_file', path: textPath, mimeType: 'text/plain' },
+          { type: 'image_file', path: imagePath, mimeType: 'image/png' },
+          { type: 'audio', data: audioBytes.toString('base64'), mimeType: 'audio/wav' },
+          { type: 'audio_file', path: audioPath, mimeType: 'audio/wav' },
+          { type: 'video', data: videoBytes.toString('base64'), mimeType: 'video/mp4' },
+          { type: 'video_file', path: videoPath, mimeType: 'video/mp4' },
+          { type: 'document', data: pdfBytes.toString('base64'), mimeType: 'application/pdf' },
+        ],
+      },
+      {
+        role: 'assistant' as const,
+        content: [{ type: 'text', text: 'assistant text' }],
+        toolCalls: [{ callId: 'call-history-1', name: 'lookup_history', args: opaqueArgs }],
+      },
+      {
+        role: 'tool' as const,
+        callId: 'call-history-1',
+        ok: true,
+        result: {
+          envelope: {
+            content: [
+              { type: 'text', text: 'tool result' },
+              { type: 'audio_file', path: audioPath, mimeType: 'audio/wav' },
+              { type: 'video_file', path: videoPath, mimeType: 'video/mp4' },
+              { type: 'document', data: pdfBytes.toString('base64'), mimeType: 'application/pdf' },
+            ],
+          },
+        },
+      },
+    ];
+
+    const canonical = canonicalizeHistory(rawHistory);
+    expect(canonical.map((message) => message.role)).toEqual(['user', 'assistant', 'user']);
+    const assistant = canonical[1].content as Array<Record<string, unknown>>;
+    const toolUse = assistant.find((part) => part.type === 'tool_use');
+    expect(toolUse).toMatchObject({ id: 'call-history-1', name: 'lookup_history', input: opaqueArgs });
+    const toolResult = (canonical[2].content as Array<Record<string, unknown>>)[0];
+    expect(toolResult).toMatchObject({ type: 'tool_result', tool_use_id: 'call-history-1', name: 'lookup_history' });
+    expect(JSON.stringify(canonical)).not.toContain(imagePath);
+    expect(JSON.stringify(canonical)).not.toContain(audioPath);
+    expect(JSON.stringify(canonical)).not.toContain(videoPath);
+    expect(JSON.stringify(toolUse?.input)).toContain('/opaque/tool-input.secret');
+
+    const base = { ...BASE_REQ, enablePromptCaching: false, messages: canonical };
+    const wires: Array<[string, Record<string, unknown>]> = [
+      ['anthropic', buildRequestBody({ ...base, model: 'claude-3-7-sonnet' })],
+      ['openai', buildOpenAIRequestBody({ ...base, model: 'gpt-4o' })],
+      ['responses', buildResponsesRequestBody({ ...base, model: 'gpt-5' })],
+      ['gemini', buildGeminiRequestBody({ ...base, model: 'gemini-2.0-flash' })],
+    ];
+
+    for (const [provider, body] of wires) {
+      assertProviderWireSafe(body, provider as 'anthropic' | 'openai' | 'responses' | 'gemini');
+      expectNoEmptyContentArrays(body);
+      const visible = JSON.stringify(stripOpaqueToolValues(body));
+      for (const tag of ['image_file', 'text_file', 'audio_file', 'video_file']) expect(visible).not.toContain(tag);
+      expect(visible).not.toContain(imagePath);
+      expect(visible).not.toContain(audioPath);
+      expect(visible).not.toContain(videoPath);
+    }
+
+    const anthropicToolResult = findRecords(wires[0][1], (record) => record.type === 'tool_result')[0];
+    expect(anthropicToolResult?.content).toBeDefined();
+    const openaiFile = findRecords(wires[1][1], (record) => record.type === 'file')[0];
+    expect(openaiFile?.file).toBeDefined();
+    const responsesOutput = findRecords(wires[2][1], (record) => record.type === 'function_call_output')[0];
+    expect(typeof responsesOutput?.output).toBe('string');
+    expect((responsesOutput?.output as string).length).toBeGreaterThan(0);
+    const geminiResponse = findRecords(wires[3][1], (record) => isRecord(record.functionResponse))[0];
+    expect(geminiResponse?.functionResponse).toMatchObject({ name: 'lookup_history' });
+    expect(findRecords(wires[3][1], (record) => isRecord(record.functionCall)).length).toBeGreaterThan(0);
+    expect(JSON.stringify(wires[3][1])).not.toContain('unknown_tool');
+  });
+
+  test('missing, oversized, unknown, and empty content degrade explicitly for every provider', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fx-history-negative-'));
+    const oversizedPath = join(dir, 'oversized.png');
+    writeFileSync(oversizedPath, Buffer.alloc(HISTORY_CONTENT_MAX_RAW_BYTES + 1, 0));
+    const missingPath = join(dir, 'missing.png');
+    const secretPath = '/private/forgeax/history-secret.png';
+    const messages = [{
+      role: 'user' as const,
+      content: [
+        { type: 'image_file', path: missingPath, mimeType: 'image/png' },
+        { type: 'image_file', path: oversizedPath, mimeType: 'image/png' },
+        { type: 'mystery_part', path: secretPath },
+      ],
+    }];
+    const base = { ...BASE_REQ, enablePromptCaching: false, messages };
+    const wires: Array<[string, Record<string, unknown>]> = [
+      ['anthropic', buildRequestBody({ ...base, model: 'claude-3-7-sonnet' })],
+      ['openai', buildOpenAIRequestBody({ ...base, model: 'gpt-4o' })],
+      ['responses', buildResponsesRequestBody({ ...base, model: 'gpt-5' })],
+      ['gemini', buildGeminiRequestBody({ ...base, model: 'gemini-2.0-flash' })],
+    ];
+    for (const [provider, body] of wires) {
+      assertProviderWireSafe(body, provider as 'anthropic' | 'openai' | 'responses' | 'gemini');
+      const visible = JSON.stringify(stripOpaqueToolValues(body));
+      expect(visible).not.toContain(missingPath);
+      expect(visible).not.toContain(oversizedPath);
+      expect(visible).not.toContain(secretPath);
+      expect(visible).toContain('content unavailable');
+    }
+
+    const empty = [
+      { role: 'user' as const, content: [] },
+      { role: 'assistant' as const, content: [] },
+    ];
+    const emptyBodies = [
+      buildRequestBody({ ...base, messages: empty }),
+      buildOpenAIRequestBody({ ...base, messages: empty }),
+      buildResponsesRequestBody({ ...base, messages: empty }),
+      buildGeminiRequestBody({ ...base, messages: empty }),
+    ];
+    for (const body of emptyBodies) expectNoEmptyContentArrays(body);
+  });
+});
+
+describe('wire validator structural boundaries', () => {
+  test('does not inspect metadata/tool schemas as content blocks, but rejects Responses input residue', () => {
+    expect(() => assertProviderWireSafe({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'ok', cache_control: { type: 'ephemeral' } }] }],
+      tools: [{ type: 'function', parameters: { type: 'object' } }],
+    }, 'anthropic')).not.toThrow();
+    expect(() => assertProviderWireSafe({
+      input: [{ type: 'image_file', path: '/secret/image.png' }],
+    }, 'responses')).toThrow();
+    expect(() => assertProviderWireSafe({
+      input: [{ type: 'function_call_output', call_id: 'c1', output: [] }],
+    }, 'responses')).toThrow();
+    expect(() => assertProviderWireSafe({
+      messages: [{ role: 'user', content: [{ type: 'file', file: { file_data: 'data:text/plain;base64,QQ==' } }] }],
+    }, 'openai')).not.toThrow();
+    expect(() => assertProviderWireSafe({
+      messages: [{ role: 'user', content: [{ type: 'file', data: 'QQ==', mimeType: 'text/plain' }] }],
+    }, 'openai')).toThrow();
+  });
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 // Anthropic — thinking / redacted_thinking / tool_use input 累计 / cache 细分
@@ -271,6 +536,29 @@ describe('anthropic: buildRequestBody adaptive thinking', () => {
     const body = buildRequestBody(req);
     const msgs = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
     expect(msgs[0].content[0].cache_control).toBeUndefined();
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools[tools.length - 1].cache_control).toBeUndefined();
+  });
+
+  test('caches tools and stable string history before a dynamic scratchpad suffix', () => {
+    const dynamicSuffix = '<scratchpad_path>/sessions/example/scratchpad</scratchpad_path>';
+    const body = buildRequestBody({
+      ...BASE_REQ,
+      skipCacheWrite: true,
+      messages: [
+        { role: 'user', content: 'stable user history' },
+        { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+        { role: 'user', content: dynamicSuffix },
+      ],
+    });
+
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools[tools.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+    const messages = body.messages as Array<{ content: unknown }>;
+    expect(messages[0].content).toEqual([
+      { type: 'text', text: 'stable user history', cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(messages[2].content).toBe(dynamicSuffix);
   });
 
   test('annotateMessageCache skipCacheWrite targets second-to-last user', () => {
@@ -292,6 +580,129 @@ describe('anthropic: buildRequestBody adaptive thinking', () => {
     // first has a next-with-scope → no marker; second is last scoped → marker
     expect(arr[0].cache_control).toBeUndefined();
     expect(arr[1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+});
+
+describe('anthropic: historical image_file wire normalization', () => {
+  test('final wire removes only empty text blocks and preserves tool pairing', () => {
+    const body = buildRequestBody({
+      ...BASE_REQ,
+      enablePromptCaching: false,
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: '' },
+            { type: 'text', text: ' ' },
+            { type: 'tool_use', id: 'tool-only-1', name: 'send_media', input: { path: '/tmp/example.png' } },
+          ],
+        },
+        {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'tool-only-1',
+            content: [{ type: 'text', text: '' }, { type: 'text', text: 'sent' }],
+            is_error: false,
+          }],
+        },
+      ],
+    });
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+
+    expect(messages[0].content).toEqual([
+      { type: 'text', text: ' ' },
+      { type: 'tool_use', id: 'tool-only-1', name: 'send_media', input: { path: '/tmp/example.png' } },
+    ]);
+    expect(messages[1].content).toEqual([{
+      type: 'tool_result',
+      tool_use_id: 'tool-only-1',
+      content: [{ type: 'text', text: 'sent' }],
+    }]);
+    expect(JSON.stringify(messages)).not.toContain('"text":""');
+  });
+
+  test('converts path-backed history image_file and never emits the host-neutral type', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fx-anthropic-history-img-'));
+    const p = join(dir, 'history.png');
+    const bytes = Buffer.from(PNG_FIXTURE);
+    writeFileSync(p, bytes);
+    const wire = messagesToAnthropic([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'history' },
+          { type: 'image_file', path: p, mimeType: 'image/png' },
+        ],
+      },
+    ]) as Array<{ content: Array<Record<string, unknown>> }>;
+
+    expect(wire[0].content).toEqual([
+      { type: 'text', text: 'history' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: bytes.toString('base64') } },
+    ]);
+    expect(JSON.stringify(wire)).not.toContain('image_file');
+  });
+
+  test('recursively normalizes object envelopes in final Anthropic wire', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fx-anthropic-history-deep-'));
+    const p = join(dir, 'deep.png');
+    writeFileSync(p, PNG_FIXTURE);
+    const wire = messagesToAnthropic([
+      {
+        role: 'user',
+        content: {
+          type: 'tool_result',
+          result: { envelope: { content: { content: [{ type: 'image_file', path: p, mimeType: 'image/png' }] } } },
+        },
+      },
+    ]) as Array<{ content: unknown }>;
+
+    const serialized = JSON.stringify(wire);
+    expect(serialized).not.toContain('image_file');
+    expect(serialized).not.toContain(p);
+    expect(serialized).toContain('"type":"image"');
+  });
+
+  test('preserves tool_use.input deeply while normalizing only its content child', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fx-anthropic-opaque-input-'));
+    const p = join(dir, 'content.png');
+    writeFileSync(p, PNG_FIXTURE);
+    const input = {
+      nested: { type: 'image_file', path: '/opaque-tool-input.png', mimeType: 'image/png' },
+      path: '/opaque-tool-input.png',
+    };
+    const wire = messagesToAnthropic([
+      {
+        role: 'assistant',
+        content: [{
+          type: 'tool_use',
+          id: 'opaque-1',
+          name: 'inspect',
+          input,
+          content: [{ type: 'image_file', path: p, mimeType: 'image/png' }],
+        }],
+      },
+    ]) as Array<{ content: Array<Record<string, unknown>> }>;
+
+    const toolUse = wire[0].content[0];
+    expect(toolUse.input).toEqual(input);
+    expect(toolUse.content).toEqual([{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: Buffer.from(PNG_FIXTURE).toString('base64') } }]);
+    expect(JSON.stringify(toolUse.input)).toContain('image_file');
+  });
+
+  test('missing image_file degrades without leaking its path', () => {
+    const secretPath = '/private/anthropic-history-secret/missing.png';
+    const wire = messagesToAnthropic([
+      {
+        role: 'assistant',
+        content: [{ type: 'image_file', path: secretPath, mimeType: 'image/png' }],
+      },
+    ]) as Array<{ content: unknown }>;
+
+    expect(wire[0].content).toEqual([{ type: 'text', text: '[image unavailable]' }]);
+    expect(JSON.stringify(wire)).not.toContain('image_file');
+    expect(JSON.stringify(wire)).not.toContain(secretPath);
   });
 });
 

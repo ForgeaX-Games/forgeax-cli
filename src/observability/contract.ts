@@ -2,7 +2,7 @@
  * forgeax-core — observability mechanism contract (注入缝的 core 侧契约).
  *
  * 机制层(agent/ kernel-facade/ inject/ capability/)**只认这份契约**;实现(OTel SDK +
- * consola + exporter/redactor)全在 HOST 层(src/cli/observability/),经三层注入缝下发。
+ * consola + exporter)全在 HOST 层(src/cli/observability/),经三层注入缝下发。纯脱敏函数位于同层 redactor.ts。
  * 边界铁律:本文件是 core src/ 里**唯一**允许 import `@opentelemetry/api` 的入口,且仅取
  * 其 `Tracer`/`Span` 类型 + noop `trace`(zero-dep、noop-default)。SDK/consola 绝不进机制层。
  *

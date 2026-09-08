@@ -264,7 +264,9 @@ function toEntries(questions: AskQuestionItem[], answers: AskQuestionAnswer[]): 
 export function askUserQuestionTool(): AgentTool<AskUserQuestionInput, AskUserQuestionOutput> {
   return buildTool<AskUserQuestionInput, AskUserQuestionOutput>({
     name: 'AskUserQuestion',
-    aliases: ['ask_user_question'],
+    // Studio/orchestrator advertises the host-owned interactive tool as
+    // `ask_user`; retain the legacy spelling for older callers as well.
+    aliases: ['ask_user_question', 'ask_user'],
     searchHint: 'ask the user a structured multiple-choice question to disambiguate',
     // 容错入参修复(挂 parse):dispatch 据此跳过通用 schema walker,改走 repairInput 软兜
     // 模型变体(漏 question/header)。下方 inputJSONSchema 仍是严格契约(发给模型),不削弱。

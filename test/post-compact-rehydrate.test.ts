@@ -21,6 +21,14 @@ describe('Stream F — post-compact rehydrate (#13)', () => {
     expect(r.attachments).toHaveLength(1);
     expect(r.attachments[0].content).toContain('/a.ts');
     expect(r.attachments[0].content).toContain('console.log(1)');
+    expect(r.outcomes).toEqual({
+      requested: 1,
+      attempted: 1,
+      attached: 1,
+      failed: 0,
+      skippedByLimit: 0,
+      skippedByBudget: 0,
+    });
   });
 
   test('F-U2 超预算 head 截断', async () => {
@@ -44,6 +52,14 @@ describe('Stream F — post-compact rehydrate (#13)', () => {
       maxFiles: 1,
     });
     expect(r.attachments).toEqual([]);
+    expect(r.outcomes).toEqual({
+      requested: 0,
+      attempted: 0,
+      attached: 0,
+      failed: 0,
+      skippedByLimit: 0,
+      skippedByBudget: 0,
+    });
   });
 
   test('F-U4 读失败降级(不抛)', async () => {
@@ -56,6 +72,7 @@ describe('Stream F — post-compact rehydrate (#13)', () => {
       maxFiles: 1,
     });
     expect(r.attachments).toEqual([]);
+    expect(r.outcomes.failed).toBe(1);
   });
 
   test('F-U5 只取 maxFiles=1(tracker 有多个)', async () => {

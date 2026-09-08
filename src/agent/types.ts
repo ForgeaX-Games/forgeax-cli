@@ -50,6 +50,7 @@ export type TerminalReason =
 export type ContinueReason =
   | 'reactive_compact_retry'
   | 'max_output_tokens_recovery'
+  | 'bracket_tool_recovery'
   | 'stop_hook_blocking'
   | 'token_budget_continuation';
 

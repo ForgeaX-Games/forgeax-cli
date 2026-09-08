@@ -52,10 +52,27 @@ function v2(over: Partial<CompactionV2Options> = {}): CompactionV2Options {
   };
 }
 
-async function drain(agent: CoreAgent, input: string, history: { role: 'user' | 'assistant'; content: unknown }[] = []): Promise<AgentEvent[]> {
+async function drain(
+  agent: CoreAgent,
+  input: string,
+  history: { role: 'user' | 'assistant'; content: unknown }[] = [],
+  signal?: AbortSignal,
+): Promise<AgentEvent[]> {
   const out: AgentEvent[] = [];
-  for await (const e of agent.run({ input: { type: 'user', payload: input, ts: 0 }, history })) out.push(e);
+  for await (const e of agent.run({ input: { type: 'user', payload: input, ts: 0 }, history, signal })) out.push(e);
   return out;
+}
+
+async function settleWithin<T>(pending: Promise<T>, timeoutMs = 1_000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error('operation did not settle after cancellation')), timeoutMs);
+  });
+  try {
+    return await Promise.race([pending, deadline]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 describe('Stream E — compaction V2 loop integration (#5/#8/#6/#11)', () => {
@@ -101,6 +118,91 @@ describe('Stream E — compaction V2 loop integration (#5/#8/#6/#11)', () => {
     const agent = new CoreAgent({ context: ctx(), bus, compactionV2: v2({ preMessage: true }) });
     await drain(agent, 'q', [{ role: 'user', content: big(17_000) }]); // 16000<17000<18400
     expect(types).toContain(CompactType.PRE_MESSAGE_AUTO);
+  });
+
+  test('pre-message failure above blocking limit stops before duplicate emergency or provider request', async () => {
+    const bus = new EventBus();
+    const types: unknown[] = [];
+    const failures: unknown[] = [];
+    let providerCalls = 0;
+    const provider: LLMProvider = {
+      api: 'stub',
+      async *stream() {
+        providerCalls++;
+        yield asstText('must not be reached');
+      },
+    };
+    bus.subscribe(CoreEventType.PreCompact, (e) => { types.push((e.payload as { type?: unknown }).type); });
+    bus.subscribe(CoreEventType.CompactionFailed, (e) => { failures.push(e.payload); });
+    const agent = new CoreAgent({
+      context: ctx(provider),
+      bus,
+      compactionV2: v2({
+        preMessage: true,
+        summarize: async () => { throw new Error('summary output exhausted'); },
+      }),
+    });
+
+    const events = await drain(agent, 'q', [{ role: 'user', content: big(20_000) }]);
+
+    expect(types).toEqual([CompactType.PRE_MESSAGE_AUTO]);
+    expect(failures).toHaveLength(1);
+    expect(providerCalls).toBe(0);
+    const last = events.at(-1)!;
+    expect(last.type === 'done' && last.terminal.reason).toBe('blocking_limit');
+  });
+
+  test('second-turn steering larger than prior provider usage compacts before the next provider request', async () => {
+    const mainRequests: ProviderRequest[] = [];
+    let mainCall = 0;
+    const provider: LLMProvider = {
+      api: 'stub',
+      async *stream(req) {
+        mainRequests.push(req);
+        mainCall++;
+        if (mainCall === 1) {
+          yield {
+            ...asstToolUse('t1'),
+            usage: { ...EMPTY_USAGE, inputTokens: 100 },
+          };
+          return;
+        }
+        yield asstText('done');
+      },
+    };
+    let steeringPoll = 0;
+    let summaryCalls = 0;
+    const agent = new CoreAgent({
+      context: ctx(provider),
+      steeringSource: () => {
+        steeringPoll++;
+        return steeringPoll === 2
+          ? [{ role: 'user', content: `SECOND-TURN-HUGE-${big(19_000)}-TAIL` }]
+          : [];
+      },
+      compactionV2: v2({
+        preMessage: true,
+        summarize: async () => {
+          summaryCalls++;
+          return '<summary>SECOND-TURN-COMPACTED</summary>';
+        },
+      }),
+    });
+
+    const events = await drain(agent, 'start');
+
+    expect(summaryCalls).toBeGreaterThan(0);
+    expect(mainRequests).toHaveLength(2);
+    const secondWire = JSON.stringify(mainRequests[1]?.messages ?? []);
+    expect(secondWire).toContain('SECOND-TURN-COMPACTED');
+    // The lossy LLM summary is supplemented by bounded deterministic anchors,
+    // so the next provider call retains both ends without replaying the body.
+    expect(secondWire).toContain('SECOND-TURN-HUGE');
+    expect(secondWire).toContain('-TAIL');
+    expect(secondWire).not.toContain('x'.repeat(2_048));
+    expect(secondWire.length).toBeLessThan(5_000);
+    const last = events.at(-1)!;
+    expect(last.type === 'done' && last.terminal.reason).toBe('completed');
   });
 
   test('E-I8 CompactionApplied 载荷 + 收尾 completed', async () => {
@@ -151,18 +253,145 @@ describe('Stream E — compaction V2 loop integration (#5/#8/#6/#11)', () => {
   test('重挂集成:压后附最近文件 attachment', async () => {
     const bus = new EventBus();
     let applied = 0;
+    const post: any[] = [];
     bus.subscribe(CoreEventType.CompactionApplied, () => { applied++; });
+    bus.subscribe(CoreEventType.PostCompact, (event) => { post.push(event.payload); });
     const agent = new CoreAgent({
       context: ctx(),
       bus,
       compactionV2: v2({
-        rehydrate: { recentReadPaths: () => ['/a.ts'], readFile: async () => 'recent file body', tokenBudget: 10_000, maxFiles: 1 },
+        rehydrate: {
+          recentReadPaths: () => ['/missing.ts', '/a.ts', '/limited.ts'],
+          readFile: async (path) => {
+            if (path === '/missing.ts') throw new Error('ENOENT');
+            return 'recent file body';
+          },
+          tokenBudget: 10_000,
+          maxFiles: 1,
+        },
       }),
     });
     const ev = await drain(agent, 'q', [{ role: 'user', content: big(19_000) }]);
     expect(applied).toBe(1); // 压缩发生(重挂只在压缩后跑,不抛即通过)
+    expect(post[0].rehydrate).toEqual({
+      requested: 3,
+      attempted: 2,
+      attached: 1,
+      failed: 1,
+      skippedByLimit: 1,
+      skippedByBudget: 0,
+    });
     const last = ev.at(-1)!;
     expect(last.type === 'done' && last.terminal.reason).toBe('completed');
+  });
+
+  test('active turn cancellation aborts the in-flight summary and is not counted as compaction failure', async () => {
+    const bus = new EventBus();
+    const failures: unknown[] = [];
+    bus.subscribe(CoreEventType.CompactionFailed, (event) => { failures.push(event.payload); });
+    const controller = new AbortController();
+    const receivedSignals: AbortSignal[] = [];
+    let summaryCalls = 0;
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const agent = new CoreAgent({
+      context: ctx(),
+      bus,
+      compactionV2: v2({
+        summarize: async (_messages, _scenario, signal) => {
+          if (signal) receivedSignals.push(signal);
+          summaryCalls++;
+          if (summaryCalls > 1) return '<summary>next turn compacted</summary>';
+          notifyStarted();
+          return new Promise<string>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+        },
+      }),
+    });
+
+    const pending = drain(
+      agent,
+      'q',
+      [{ role: 'user', content: big(19_000) }],
+      controller.signal,
+    );
+    await started;
+    controller.abort(new Error('cancel issue 84 compaction'));
+    const events = await pending;
+
+    expect(receivedSignals[0]?.aborted).toBe(true);
+    expect(failures).toEqual([]);
+    expect(events.some((event) => event.type === 'turn_aborted')).toBe(true);
+    const last = events.at(-1)!;
+    expect(last.type === 'done' && last.terminal.reason).toBe('aborted_streaming');
+
+    const callsAfterAbort = summaryCalls;
+    const nextEvents = await drain(agent, 'next', [{ role: 'user', content: big(19_000) }]);
+    expect(summaryCalls).toBeGreaterThan(callsAfterAbort);
+    expect(receivedSignals.slice(callsAfterAbort).every((nextSignal) => !nextSignal.aborted)).toBe(true);
+    expect(failures).toEqual([]);
+    const nextLast = nextEvents.at(-1)!;
+    expect(nextLast.type === 'done' && nextLast.terminal.reason).toBe('completed');
+  });
+
+  test('active turn cancellation escapes a stalled rehydrate read and releases the same agent', async () => {
+    const bus = new EventBus();
+    const failures: unknown[] = [];
+    bus.subscribe(CoreEventType.CompactionFailed, (event) => { failures.push(event.payload); });
+    const controller = new AbortController();
+    let summaryCalls = 0;
+    let readCalls = 0;
+    let notifyReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => { notifyReadStarted = resolve; });
+    const agent = new CoreAgent({
+      context: ctx(),
+      bus,
+      compactionV2: v2({
+        summarize: async () => {
+          summaryCalls++;
+          return '<summary>compacted before rehydrate</summary>';
+        },
+        rehydrate: {
+          recentReadPaths: () => ['/stalled.ts'],
+          readFile: async () => {
+            readCalls++;
+            if (readCalls === 1) {
+              notifyReadStarted();
+              return new Promise<string>(() => {});
+            }
+            return 'next turn file body';
+          },
+          tokenBudget: 10_000,
+          maxFiles: 1,
+        },
+      }),
+    });
+
+    const pending = drain(
+      agent,
+      'q',
+      [{ role: 'user', content: big(19_000) }],
+      controller.signal,
+    );
+    await readStarted;
+    controller.abort(new Error('cancel stalled issue 84 rehydrate'));
+    const events = await settleWithin(pending);
+
+    expect(failures).toEqual([]);
+    expect(events.some((event) => event.type === 'turn_aborted')).toBe(true);
+    const last = events.at(-1)!;
+    expect(last.type === 'done' && last.terminal.reason).toBe('aborted_streaming');
+
+    const callsAfterAbort = summaryCalls;
+    const nextEvents = await settleWithin(
+      drain(agent, 'next', [{ role: 'user', content: big(19_000) }]),
+    );
+    expect(summaryCalls).toBeGreaterThan(callsAfterAbort);
+    expect(readCalls).toBe(2);
+    expect(failures).toEqual([]);
+    const nextLast = nextEvents.at(-1)!;
+    expect(nextLast.type === 'done' && nextLast.terminal.reason).toBe('completed');
   });
 
   test('重挂集成(内容级 · CORE-CTX-004):压后 provider 请求确含 re-attach 消息(仅注入 rehydrate 才有)', async () => {
@@ -221,6 +450,15 @@ describe('04.4 — compaction skipped/failed 事件(skip/失败不再静默)', (
     expect(failed[0].error).toContain('model exploded');
     expect(failed[0].type).toBe(CompactType.EMERGENCY_AUTO);
     expect(failed[0].trigger).toBe('auto');
+    expect(failed[0].diagnostics).toMatchObject({
+      code: 'COMPACTION_REDUCTION_FAILED',
+      version: 1,
+      reason: 'provider_error',
+      inputMessages: 2,
+      providerCalls: 3,
+      headTruncations: 0,
+      splitCount: 2,
+    });
   });
 
   test('熔断(3 连败)后阈值已达 → CompactionSkipped(reason=circuit-open)', async () => {

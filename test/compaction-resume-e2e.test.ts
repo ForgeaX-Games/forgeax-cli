@@ -28,24 +28,28 @@ interface RunResult {
   types: string[];
   /** compaction.applied 事件的 payload(若有)。 */
   applied: Array<{ coveredFrom?: number; coveredTo?: number; replacement?: unknown }>;
+  /** compaction.failed 诊断;demo provider 原样回显时用于验证有界 fail-closed。 */
+  failed: Array<{ diagnostics?: { reason?: string }; type?: string }>;
 }
 
 /** 读 WAL events.jsonl → 投影出 type 列表 + compaction.applied 载荷(坏行跳过)。 */
-function readWal(file: string): Pick<RunResult, 'types' | 'applied'> {
+function readWal(file: string): Pick<RunResult, 'types' | 'applied' | 'failed'> {
   const types: string[] = [];
   const applied: RunResult['applied'] = [];
-  if (!existsSync(file)) return { types, applied };
+  const failed: RunResult['failed'] = [];
+  if (!existsSync(file)) return { types, applied, failed };
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (!line) continue;
     try {
       const e = JSON.parse(line) as { type: string; payload?: unknown };
       types.push(e.type);
       if (e.type === 'compaction.applied') applied.push((e.payload ?? {}) as RunResult['applied'][number]);
+      if (e.type === 'compaction.failed') failed.push((e.payload ?? {}) as RunResult['failed'][number]);
     } catch {
       /* skip corrupt line */
     }
   }
-  return { types, applied };
+  return { types, applied, failed };
 }
 
 /** seed 一段历史 → `--demo --resume <id> -p` 发一条消息 → 读回 WAL。extraEnv 控制窗口钳制。 */
@@ -53,9 +57,10 @@ async function seedAndResume(
   dir: string,
   sessionId: string,
   extraEnv: Record<string, string>,
+  turns = 20,
 ): Promise<RunResult & { estTokens: number }> {
   const sessionsDir = join(dir, 'sessions');
-  const { file, estTokens } = seedSession({ sessionsDir, sessionId, turns: 20 });
+  const { file, estTokens } = seedSession({ sessionsDir, sessionId, turns });
   const proc = Bun.spawn(['bun', MAIN, '--demo', '--no-memory', '--sessions-dir', sessionsDir, '--resume', sessionId, '-p', '继续'], {
     cwd: join(import.meta.dir, '..'),
     env: {
@@ -81,21 +86,21 @@ beforeAll(() => {
 
 describe('compaction trigger on resume (real binary, --demo, no network)', () => {
   test(
-    'clamped window + seeded history → compaction fires (compaction.applied in WAL)',
+    'clamped window + non-compressive demo summary → compaction fires and fails closed at bounded split depth',
     async () => {
-      // effective = 22000 - 20000 = 2000;emergency = 1840。seed ~5200 token ≫ 1840。
-      const r = await seedAndResume(root, 'trigger', { FORGEAX_COMPACT_WINDOW: '22000' });
+      // effective = 29000 - 20000 = 9000;emergency = 8280。40 turns 越线且可在严格 75% 叶上限内收敛。
+      const r = await seedAndResume(root, 'trigger', { FORGEAX_COMPACT_WINDOW: '29000' }, 40);
       expect(r.code).toBe(0);
-      expect(r.estTokens).toBeGreaterThan(1840); // 预置历史确实越过 emergency 水位
-      // 压缩发生:applied 事件落了盘,且 pre/post 也在(完整 PreCompact→Applied→PostCompact)。
-      expect(r.applied.length).toBeGreaterThanOrEqual(1);
+      expect(r.estTokens).toBeGreaterThan(8280); // 预置历史确实越过 emergency 水位
+      // demo provider 原样回显，无法把高于 92% 水位的输入压到严格 75% 叶上限内；
+      // 管线必须在有界深度明确失败，不能放宽上限或把原请求送给主 provider。
+      expect(r.applied).toHaveLength(0);
       expect(r.types).toContain('compaction.pre');
-      expect(r.types).toContain('compaction.post');
-      // 载荷成形:覆盖了历史区间 + 有非空 replacement。
-      const a = r.applied[0];
-      expect(a.coveredFrom).toBe(0);
-      expect(a.coveredTo).toBeGreaterThan(0);
-      expect(a.replacement).toBeTruthy();
+      expect(r.types).toContain('compaction.failed');
+      expect(r.types).not.toContain('compaction.post');
+      expect(r.failed).toHaveLength(1);
+      expect(r.failed[0]?.type).toBe('pre-message-auto');
+      expect(r.failed[0]?.diagnostics?.reason).toBe('split_exhausted');
     },
     60_000,
   );

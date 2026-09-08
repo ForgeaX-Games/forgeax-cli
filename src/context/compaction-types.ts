@@ -102,6 +102,11 @@ export type GateDecision = { compact: true } | { compact: false; reason: GateRej
  *  (曾有 'partial' 但管线从无调用方 → D-01 按闭合 union 删除;未来做 partial compact 再加回。) */
 export type SummaryScenario = 'full' | 'pre-message';
 
+/** A single bounded retry for truncated or malformed summary output. */
+export interface SummaryRequestOptions {
+  outputRecovery?: boolean;
+}
+
 /** host 注入的摘要器(管线版,带 scenario):一段消息 → 摘要文本。core 绝不自调 LLM。
  *  抛 message 以 PROMPT_TOO_LONG 前缀的 Error → 管线 head-truncate 重试;
  *  抛其它 Error → 压缩失败(供 E 回滚 + 熔断计数)。
@@ -109,6 +114,8 @@ export type SummaryScenario = 'full' | 'pre-message';
 export type CompactSummarize = (
   messages: readonly ProviderMessage[],
   scenario: SummaryScenario,
+  signal?: AbortSignal,
+  options?: SummaryRequestOptions,
 ) => Promise<string>;
 
 /** 压缩管线输入。 */
@@ -117,6 +124,8 @@ export interface CompactPipelineInput {
   scenario: SummaryScenario;
   marks: Watermarks;
   summarize: CompactSummarize;
+  /** Active turn cancellation signal. Every provider-backed summary call must receive it. */
+  signal?: AbortSignal;
   /** L1 后估 token ≤ effectiveWindow × 此比例 → 跳过 LLM(决策 #12),默认 0.15。 */
   sufficiencyRatio: number;
   /** 摘要范围外保留的最近消息条数。 */
@@ -153,6 +162,8 @@ export interface RehydrateInput {
   recentReadPaths: readonly string[];
   /** 读文件(注入;失败抛错由实现吞掉降级)。 */
   readFile: (path: string) => Promise<string>;
+  /** Active turn cancellation. Ordinary read failures remain fail-open. */
+  signal?: AbortSignal;
   /** token 预算上限,默认 10_000。 */
   tokenBudget: number;
   /** 最多重挂文件数,默认 1。 */
@@ -162,4 +173,15 @@ export interface RehydrateInput {
 /** 压后重挂结果:附在摘要之后的 attachment 消息(可能为空)。 */
 export interface RehydrateResult {
   attachments: ProviderMessage[];
+  outcomes: RehydrateOutcomeCounts;
+}
+
+/** Stable internal observability for post-compaction file rehydration. */
+export interface RehydrateOutcomeCounts {
+  requested: number;
+  attempted: number;
+  attached: number;
+  failed: number;
+  skippedByLimit: number;
+  skippedByBudget: number;
 }

@@ -21,6 +21,8 @@
 
 import { parseSSE } from './anthropic';
 import { FORGEAX_USER_AGENT } from './user-agent';
+import { canonicalizeBoundaryContent, isRecord as isHistoryRecord } from '../capability/history-content';
+import { assertProviderWireSafe } from './wire-validator';
 import {
   EMPTY_USAGE,
   mergeUsage,
@@ -61,48 +63,96 @@ export function toolDefsToResponses(tools: ProviderToolDef[]): unknown[] | undef
   }));
 }
 
+const RESPONSES_MEDIA_UNAVAILABLE = '[content unavailable for OpenAI Responses]';
+
 /** 中立 content block → Responses `input_*` content part。 */
 function neutralBlockToInputPart(raw: unknown): unknown | undefined {
-  if (typeof raw === 'string') return { type: 'input_text', text: raw };
-  if (!raw || typeof raw !== 'object') return undefined;
-  const block = raw as Record<string, unknown>;
-  if (block.type === 'text' && typeof block.text === 'string') {
+  if (typeof raw === 'string') return raw.length > 0 ? { type: 'input_text', text: raw } : undefined;
+  if (!isHistoryRecord(raw)) return { type: 'input_text', text: RESPONSES_MEDIA_UNAVAILABLE };
+  const block = raw;
+  if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
     return { type: 'input_text', text: block.text };
   }
-  if (block.type === 'image' && block.source && typeof block.source === 'object') {
-    const src = block.source as Record<string, unknown>;
-    if (src.type === 'base64' && typeof src.data === 'string') {
-      const media = typeof src.media_type === 'string' ? src.media_type : 'image/png';
-      return { type: 'input_image', image_url: `data:${media};base64,${src.data}` };
+  if (block.type === 'image') {
+    const src = isHistoryRecord(block.source) ? block.source : block;
+    if (typeof src.data === 'string') {
+      const media = typeof src.mimeType === 'string'
+        ? src.mimeType
+        : typeof src.media_type === 'string'
+          ? src.media_type
+          : 'image/png';
+      const data = src.data;
+      return { type: 'input_image', image_url: `data:${media};base64,${data}` };
     }
+    return { type: 'input_text', text: RESPONSES_MEDIA_UNAVAILABLE };
   }
-  return undefined;
+  if (block.type === 'image_url' || block.type === 'input_image') return block;
+  if (block.type === 'file' || block.type === 'document') {
+    const src = isHistoryRecord(block.source) ? block.source : block;
+    const data = src.data;
+    const mime = typeof src.mimeType === 'string' ? src.mimeType : src.media_type;
+    if (typeof data === 'string' && typeof mime === 'string') {
+      return { type: 'input_file', filename: 'history-file', file_data: `data:${mime};base64,${data}` };
+    }
+    return { type: 'input_text', text: RESPONSES_MEDIA_UNAVAILABLE };
+  }
+  if (block.type === 'input_file') return block;
+  if (block.type === 'audio' || block.type === 'video' || block.type === 'thinking' || block.type === 'redacted_thinking') {
+    return { type: 'input_text', text: RESPONSES_MEDIA_UNAVAILABLE };
+  }
+  if (block.type === 'input_text' && typeof block.text === 'string') return block;
+  if (block.type === 'output_text' && typeof block.text === 'string') return { type: 'input_text', text: block.text };
+  return { type: 'input_text', text: RESPONSES_MEDIA_UNAVAILABLE };
 }
 
 function neutralContentToInputList(content: unknown): unknown[] {
-  if (typeof content === 'string') return [{ type: 'input_text', text: content }];
-  if (!Array.isArray(content)) return [];
-  const parts: unknown[] = [];
-  for (const raw of content) {
-    const p = neutralBlockToInputPart(raw);
-    if (p) parts.push(p);
+  const normalized = canonicalizeBoundaryContent(content);
+  if (typeof normalized === 'string') {
+    return normalized.length > 0 ? [{ type: 'input_text', text: normalized }] : [{ type: 'input_text', text: RESPONSES_MEDIA_UNAVAILABLE }];
   }
-  return parts;
+  const values = Array.isArray(normalized) ? normalized : [normalized];
+  const parts = values.map(neutralBlockToInputPart).filter((part): part is unknown => part !== undefined);
+  return parts.length > 0 ? parts : [{ type: 'input_text', text: RESPONSES_MEDIA_UNAVAILABLE }];
 }
 
-/** tool_result.content → Responses function_call_output.output（string）。 */
+function neutralBlockToOutputPart(raw: unknown): unknown | undefined {
+  if (typeof raw === 'string') return raw.length > 0 ? { type: 'output_text', text: raw } : undefined;
+  if (!isHistoryRecord(raw)) return { type: 'output_text', text: RESPONSES_MEDIA_UNAVAILABLE };
+  if (raw.type === 'text' || raw.type === 'output_text') {
+    return typeof raw.text === 'string' && raw.text.length > 0 ? { type: 'output_text', text: raw.text } : undefined;
+  }
+  if (raw.type === 'thinking' || raw.type === 'redacted_thinking' || raw.type === 'image' || raw.type === 'audio' || raw.type === 'video' || raw.type === 'file' || raw.type === 'document') {
+    return { type: 'output_text', text: RESPONSES_MEDIA_UNAVAILABLE };
+  }
+  return { type: 'output_text', text: RESPONSES_MEDIA_UNAVAILABLE };
+}
+
+function neutralContentToOutputList(content: unknown): unknown[] {
+  const normalized = canonicalizeBoundaryContent(content);
+  const values = Array.isArray(normalized) ? normalized : [normalized];
+  const parts = values.map(neutralBlockToOutputPart).filter((part): part is unknown => part !== undefined);
+  return parts.length > 0 ? parts : [{ type: 'output_text', text: RESPONSES_MEDIA_UNAVAILABLE }];
+}
+
+/** Tool-result output is a string in the Responses contract.  Media is
+ * represented by explicit path-free markers rather than putting input_* parts
+ * into `function_call_output.output`. */
 function toolResultToOutput(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((raw) => {
-      if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).type === 'text') {
-        const t = (raw as Record<string, unknown>).text;
-        return typeof t === 'string' ? t : '';
-      }
-      return '';
-    })
-    .join('');
+  const normalized = canonicalizeBoundaryContent(content);
+  if (typeof normalized === 'string' && normalized.length > 0) return normalized;
+  const values = Array.isArray(normalized) ? normalized : [normalized];
+  const text = values.map((raw) => {
+    if (typeof raw === 'string') return raw;
+    if (!isHistoryRecord(raw)) return RESPONSES_MEDIA_UNAVAILABLE;
+    if (raw.type === 'text' && typeof raw.text === 'string') return raw.text;
+    if (raw.type === 'image') return '[image content]';
+    if (raw.type === 'audio') return '[audio content]';
+    if (raw.type === 'video') return '[video content]';
+    if (raw.type === 'file' || raw.type === 'document') return '[file content]';
+    if (raw.type === 'tool_result') return toolResultToOutput(raw.content);
+    return RESPONSES_MEDIA_UNAVAILABLE;
+  }).join('');
+  return text || RESPONSES_MEDIA_UNAVAILABLE;
 }
 
 /** 中立 ProviderMessage[] → Responses `input` 数组。 */
@@ -110,11 +160,17 @@ export function messagesToResponseInput(messages: ProviderMessage[]): unknown[] 
   const out: unknown[] = [];
 
   for (const msg of messages) {
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
-      const toolResults = msg.content.filter(
+    const normalizedContent = canonicalizeBoundaryContent(msg.content);
+    const normalizedBlocks = Array.isArray(normalizedContent)
+      ? normalizedContent
+      : isHistoryRecord(normalizedContent) && normalizedContent.type === 'tool_result'
+        ? [normalizedContent]
+        : undefined;
+    if (msg.role === 'user' && normalizedBlocks) {
+      const toolResults = normalizedBlocks.filter(
         (b) => b && typeof b === 'object' && (b as Record<string, unknown>).type === 'tool_result',
       );
-      const rest = msg.content.filter(
+      const rest = normalizedBlocks.filter(
         (b) => !(b && typeof b === 'object' && (b as Record<string, unknown>).type === 'tool_result'),
       );
       for (const tr of toolResults) {
@@ -131,10 +187,15 @@ export function messagesToResponseInput(messages: ProviderMessage[]): unknown[] 
       continue;
     }
 
-    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+    const assistantBlocks = Array.isArray(normalizedContent)
+      ? normalizedContent
+      : isHistoryRecord(normalizedContent) && typeof normalizedContent.type === 'string'
+        ? [normalizedContent]
+        : undefined;
+    if (msg.role === 'assistant' && assistantBlocks) {
       const textParts: unknown[] = [];
       const toolCalls: Record<string, unknown>[] = [];
-      for (const raw of msg.content) {
+      for (const raw of assistantBlocks) {
         if (!raw || typeof raw !== 'object') continue;
         const block = raw as Record<string, unknown>;
         if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
@@ -143,9 +204,12 @@ export function messagesToResponseInput(messages: ProviderMessage[]): unknown[] 
           toolCalls.push({
             type: 'function_call',
             call_id: typeof block.id === 'string' ? block.id : '_tool',
-            name: typeof block.name === 'string' ? block.name : 'unknown_tool',
+            name: typeof block.name === 'string' && block.name ? block.name : 'unnamed_tool',
             arguments: JSON.stringify(block.input ?? {}),
           });
+        } else {
+          const output = neutralBlockToOutputPart(raw);
+          if (output) textParts.push(output);
         }
       }
       if (textParts.length > 0) {
@@ -157,10 +221,11 @@ export function messagesToResponseInput(messages: ProviderMessage[]): unknown[] 
 
     // string content 或非数组 → 退化为 input_text user/assistant 消息。
     if (msg.role === 'assistant') {
-      const text = typeof msg.content === 'string' ? msg.content : '';
+      const text = typeof normalizedContent === 'string' ? normalizedContent : '';
       if (text) out.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
+      else out.push({ type: 'message', role: 'assistant', content: neutralContentToOutputList(normalizedContent) });
     } else {
-      out.push({ role: 'user', content: neutralContentToInputList(msg.content) });
+      out.push({ role: 'user', content: neutralContentToInputList(normalizedContent) });
     }
   }
   return out;
@@ -186,6 +251,8 @@ export function buildResponsesRequestBody(req: ProviderRequest): Record<string, 
   } else if (typeof req.temperature === 'number') {
     body.temperature = req.temperature;
   }
+
+  assertProviderWireSafe(body, 'responses');
 
   return body;
 }
@@ -357,7 +424,7 @@ export async function* normalizeResponsesStream(
           const block: AssistantBlock = {
             type: 'tool_use',
             id: pc.callId || '_tool',
-            name: pc.name || 'unknown_tool',
+            name: pc.name || 'unnamed_tool',
             input,
           };
           blocks.push(block);
@@ -426,7 +493,7 @@ export async function* normalizeResponsesStream(
         const block: AssistantBlock = {
           type: 'tool_use',
           id: pc.callId || '_tool',
-          name: pc.name || 'unknown_tool',
+          name: pc.name || 'unnamed_tool',
           input,
         };
         blocks.push(block);

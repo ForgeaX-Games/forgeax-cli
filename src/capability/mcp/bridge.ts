@@ -115,6 +115,8 @@ export function mapMcpToolToAgentTool(
 
   const tool: AgentTool<Record<string, unknown>, unknown> = {
     name: fullName,
+    // MCP is an external provider source even though this bridge lives in core.
+    providerToolClass: 'non-builtin',
     // MCP 工具自带 description → 透传给模型(此前只用于 renderToolUseMessage,wire 上丢了)。
     ...(description ? { description } : {}),
     isMcp: true,

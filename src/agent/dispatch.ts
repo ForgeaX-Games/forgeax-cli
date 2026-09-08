@@ -118,6 +118,26 @@ type InputDecodeResult =
   | { ok: true; value: unknown }
   | { ok: false; path: string; message: string };
 
+/**
+ * Repair one provider variant that has been observed for the Studio-owned
+ * `ask_user_question` host tool: `questions` is emitted as a stringified JSON
+ * array. Keep this deliberately tool- and field-specific. Invalid JSON and
+ * non-array JSON remain untouched so the declared schema still rejects them.
+ */
+function repairKnownToolInput(toolName: string, raw: unknown): unknown {
+  if (toolName !== 'ask_user_question' || !raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return raw;
+  }
+  const input = raw as Record<string, unknown>;
+  if (typeof input.questions !== 'string') return raw;
+  try {
+    const questions = JSON.parse(input.questions) as unknown;
+    return Array.isArray(questions) ? { ...input, questions } : raw;
+  } catch {
+    return raw;
+  }
+}
+
 function parserFailure(error: unknown): { path: string; message: string } {
   if (error && typeof error === 'object') {
     const issues = (error as { issues?: unknown }).issues;
@@ -141,12 +161,13 @@ function parserFailure(error: unknown): { path: string; message: string } {
  * 任一显式契约失配都 fail-fast，绝不把 raw input 继续送进权限或 handler。
  */
 function decodeInput(tool: AgentTool, raw: unknown): InputDecodeResult {
+  const repaired = repairKnownToolInput(tool.name, raw);
   if (tool.inputSchema) {
     try {
-      const parsed = tool.inputSchema.safeParse(raw);
+      const parsed = tool.inputSchema.safeParse(repaired);
       if (parsed.success) {
         // 兼容旧 parser ABI：success 曾允许省略 data，由 parse 承担实际解码。
-        const value = Object.hasOwn(parsed, 'data') ? parsed.data : tool.inputSchema.parse(raw);
+        const value = Object.hasOwn(parsed, 'data') ? parsed.data : tool.inputSchema.parse(repaired);
         return { ok: true, value };
       }
       const failure = parserFailure((parsed as { error?: unknown }).error);
@@ -157,7 +178,7 @@ function decodeInput(tool: AgentTool, raw: unknown): InputDecodeResult {
   }
 
   if (tool.inputJSONSchema) {
-    const value = coerceBySchema(raw, tool.inputJSONSchema);
+    const value = coerceBySchema(repaired, tool.inputJSONSchema);
     const checked = validateAgainstSchema(value, tool.inputJSONSchema);
     if (!checked.ok) return checked;
     return { ok: true, value };

@@ -10,7 +10,7 @@ import type { SpanData, LogRecord, TelemetryRecord } from '@forgeax/types';
 
 import { NOOP_LOGGER, NOOP_OBS, parseTraceparent, parentContextFromTraceparent, toTraceparent } from '../src/observability/contract';
 import { trace as otelTrace } from '@opentelemetry/api';
-import { redactBagWith, redactStrictValueAtSource, REDACTED } from '../src/cli/observability/redactor';
+import { redactBagWith, redactStrictValueAtSource, REDACTED } from '../src/observability/redactor';
 import { Coalescer, LogRateLimiter } from '../src/cli/observability/coalesce';
 import { ForgeaxProcessor, readableSpanToSpanData, hrTimeToMs } from '../src/cli/observability/processor';
 import { ConsolaCoreLogger } from '../src/cli/observability/logger';

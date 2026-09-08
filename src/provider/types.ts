@@ -117,7 +117,7 @@ export type ProviderStreamEvent =
   | { type: 'message_delta'; usage: Partial<Usage>; stopReason: StopReason }
   | { type: 'message_stop' }
   /** provider 规范化后吐出的一条完整 assistant 消息（content_block_stop 时）。 */
-  | { type: 'assistant'; message: unknown; usage: Usage; stopReason: StopReason; requestId?: string };
+  | { type: 'assistant'; message: unknown; usage: Usage; stopReason: StopReason; requestId?: string; httpStatus?: number };
 
 // ─── Provider 接口 ─────────────────────────────────────────────────────────
 
@@ -130,8 +130,44 @@ export interface RetryInfo {
   retryAfterMs?: number;
 }
 
+/** Safe audit record emitted immediately around the resolved provider adapter's
+ * `stream` call. It intentionally contains scale/correlation metadata only —
+ * never request/response text, headers, cookies, or credentials. */
+export type ProviderBoundaryTraceEvent = {
+  phase: 'start' | 'complete' | 'error';
+  sequence: number;
+  callId: string;
+  threadId: string;
+  providerApi: string;
+  endpointOrigin?: string;
+  model: string;
+  startedAtMs: number;
+  completedAtMs?: number;
+  durationMs?: number;
+  requestScale: {
+    systemBlocks: number;
+    messages: number;
+    tools: number;
+    maxOutputTokens?: number;
+  };
+  logicalStatus?: 'completed' | 'error';
+  stopReason?: StopReason;
+  requestId?: string;
+  httpStatus?: number;
+  usage?: Usage;
+  errorClass?: string;
+};
+
+export interface ProviderBoundaryTraceContext {
+  callId: string;
+  threadId: string;
+  emit(event: ProviderBoundaryTraceEvent): void;
+}
+
 export interface ProviderCallOpts {
   signal: AbortSignal;
+  /** Opt-in, caller-gated safe provider-adapter boundary audit. */
+  boundaryTrace?: ProviderBoundaryTraceContext;
   /** 切模型回调（流式 fallback 时 LOOP 决定真正切换）。 */
   onStreamingFallback?: () => void;
   fallbackModel?: string;
@@ -146,6 +182,8 @@ export interface ProviderCallOpts {
 export interface LLMProvider {
   /** backend+model 代际标识（不 fork：差异走 api_base / per-model hook）。 */
   readonly api: string;
+  /** Sanitized HTTP origin (scheme + authority only) when the adapter exposes one. */
+  readonly endpointOrigin?: string;
   /** 流式调用；返回异步事件流。abort 必中断。 */
   stream(req: ProviderRequest, opts: ProviderCallOpts): AsyncIterable<ProviderStreamEvent>;
 }

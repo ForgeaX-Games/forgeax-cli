@@ -69,7 +69,7 @@ function estimateReqTokens(req: ProviderRequest): number {
 /** Detect the LLM-compaction summarize call by its prompt template. */
 function isSummarizeReq(req: ProviderRequest): boolean {
   return req.system.some(
-    (b) => typeof b.text === 'string' && b.text.includes('create a detailed summary'),
+    (b) => typeof b.text === 'string' && b.text.includes('compact but complete continuation summary'),
   );
 }
 
@@ -204,6 +204,20 @@ describe('FAC: compaction through the real ForgeaxCoreKernel facade', () => {
     const mainCalls = calls.filter((c) => !c.isSummary);
     expect(mainCalls.length).toBeGreaterThanOrEqual(1);
     expect(mainCalls.at(-1)!.promptTokens).toBeLessThan(20_000);
+    const applied = out.events.find(
+      (event) => event.kind === 'stored-event' && event.payload.type === 'compaction.applied',
+    );
+    expect(applied).toBeDefined();
+    if (applied?.kind === 'stored-event') {
+      const payload = applied.payload.payload as Record<string, unknown>;
+      expect(payload.replacement).toMatchObject({ role: 'user' });
+      expect(String((payload.replacement as { content?: unknown }).content)).toContain('This session is being continued');
+      // Production facade compacts the complete pre-message history here, so
+      // there is no retained tail. Lock the exact canonical value consumed by
+      // the Orchestrator instead of merely accepting any non-negative number.
+      expect(payload.keepCount).toBe(0);
+      expect(payload.trigger).toBe('auto');
+    }
   });
 
   test('FAC-2 small history → no compaction', async () => {
@@ -250,7 +264,7 @@ describe('FAC: compaction through the real ForgeaxCoreKernel facade', () => {
     expect(summaryCalls.length).toBeGreaterThanOrEqual(2); // initial + ≥1 PTL retry
   });
 
-  test('FAC-5 brute >1M + CANONICAL shape → 0.5 head-drop converges within MAX_PTL_RETRIES', async () => {
+  test('FAC-5 brute >1M history → proactive bounded summaries recover before provider overflow', async () => {
     const { provider, calls } = makeStubProvider({
       defaultWindow: 200_000,
       errorShape: 'canonical',
@@ -258,26 +272,32 @@ describe('FAC: compaction through the real ForgeaxCoreKernel facade', () => {
     const kernel = newKernel(provider);
     const out = await runFacadeTurn(kernel, makeReq(buildHistory(1_050_000)));
 
-    // FIX④: 1.05M · 0.5^3 ≈ 131k < 200k → succeeds on the 3rd retry (was: threw).
+    // The active 200k model yields a 135k proactive summary-input ceiling.
+    // No summary request should depend on the provider's >200k rejection.
     const summaryCalls = calls.filter((c) => c.isSummary);
-    expect(summaryCalls.length).toBe(4); // initial + 3 retries (last succeeds)
+    expect(summaryCalls.length).toBeGreaterThan(1);
+    expect(summaryCalls.length).toBeLessThanOrEqual(32);
+    expect(Math.max(...summaryCalls.map((call) => call.promptTokens))).toBeLessThanOrEqual(200_000);
     expect(out.threw).toBe(false);
     expect(out.doneReason).toBe('stop');
   });
 
-  test('FAC-5b unrecoverable single >1M user message (nothing to head-truncate) → graceful prompt_too_long, NO crash', async () => {
-    const { provider } = makeStubProvider({ defaultWindow: 200_000, errorShape: 'anthropic' });
+  test('FAC-5b single >1M user message → hierarchical compaction recovers the same turn', async () => {
+    const { provider, calls } = makeStubProvider({ defaultWindow: 200_000, errorShape: 'anthropic' });
     const kernel = newKernel(provider);
-    // No history; one ~1.05M-token user input. The summarize prefix is a single
-    // message → truncateHeadForPTLRetry returns null → compact() throws.
+    // No history; one ~1.05M-token user input. There is no old message that can
+    // be dropped, so recovery must split and summarize the content itself.
     const req = makeReq([]);
     req.input = { text: 'x'.repeat(tokensToChars(1_050_000)) };
     const out = await runFacadeTurn(kernel, req);
 
-    // FIX①: proactive compact() is wrapped → graceful terminal instead of a
-    // thrown generator that the host would see as an unhandled rejection.
     expect(out.threw).toBe(false);
-    expect(out.doneReason).toBe('error'); // prompt_too_long → mapReason → 'error'
+    expect(out.doneReason).toBe('stop');
+    const summaryCalls = calls.filter((c) => c.isSummary);
+    expect(summaryCalls.length).toBeGreaterThanOrEqual(3);
+    expect(summaryCalls.length).toBeLessThanOrEqual(32);
+    expect(summaryCalls.some((c) => c.promptTokens > 200_000)).toBe(false);
+    expect(summaryCalls.at(-1)?.promptTokens).toBeLessThanOrEqual(200_000);
   });
 
   test('FAC-6 model switch to a SMALLER-window model: history under 200k watermark but over the switched window → reactive recovery (was model_error)', async () => {

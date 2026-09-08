@@ -1,5 +1,5 @@
 /**
- * forgeax-core — observability HOST 脱敏(S3 / N5 · 安全).
+ * forgeax-core — shared pure observability redaction (S3 / N5).
  *
  * 本仓有 env 泄漏前科(见 memory: old-studio-runtime-split-security):attr/field 里很容易混进
  * 整个 process.env、API key、token。redactor 是出墙前最后一道纵深防御。

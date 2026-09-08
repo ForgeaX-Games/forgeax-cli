@@ -8,6 +8,7 @@ import {
   markCompactStart,
   markCompactSuccess,
   markCompactFailure,
+  markCompactCancelled,
   initialGateState,
   isRecursiveSource,
   triggerThresholdFor,
@@ -154,6 +155,8 @@ describe('Stream B — compaction gate (#7/#9/#10/#3)', () => {
     expect(ok).toEqual({ isCompressing: false, consecutiveFailures: 0, lastCompactAt: 12_345 });
     const failed = markCompactFailure(markCompactStart({ isCompressing: false, consecutiveFailures: 2 }));
     expect(failed).toEqual({ isCompressing: false, consecutiveFailures: 3 });
+    const cancelled = markCompactCancelled(markCompactStart({ isCompressing: false, consecutiveFailures: 2 }));
+    expect(cancelled).toEqual({ isCompressing: false, consecutiveFailures: 2 });
   });
 
   test('B-U11 纯函数:同 input 多次同结果;不改入参', () => {

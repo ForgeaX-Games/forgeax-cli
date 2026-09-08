@@ -25,12 +25,22 @@ import { briefError } from '../observability/usage';
 import { trace, ROOT_CONTEXT, type Span } from '@opentelemetry/api';
 import { EventBus } from '../events/event-bus';
 import { CoreEventType } from '../events/events';
-import type { ProviderMessage, ProviderRequest, ProviderToolDef, SystemBlock, StopReason } from '../provider/types';
+import type { ProviderCallOpts, ProviderMessage, ProviderRequest, ProviderToolDef, ProviderStreamEvent, SystemBlock, StopReason } from '../provider/types';
 import { systemPromptAssembler } from '../context/system-prompt';
 import type { SystemPromptAssembler } from '../context/types';
 import type { PermissionRuleSet } from '../permission/rules';
 import type { PermissionMode } from '../permission/engine';
-import { dispatchTools, type ToolUse, type AskUserFn, type ToolDispatchResult } from './dispatch';
+import { dispatchTools, findTool, type ToolUse, type AskUserFn, type ToolDispatchResult } from './dispatch';
+import {
+  BRACKET_TOOL_REJECT_MESSAGE,
+  BRACKET_TOOL_REPEAT_MESSAGE,
+  MAX_BRACKET_TOOL_TEXT_CHARS,
+  buildBracketToolNudge,
+  findStandaloneBracketToolShape,
+  isPossibleBracketToolPrefix,
+  parseBracketPseudoToolText,
+  type BracketPseudoToolCall,
+} from './bracket-tool-recovery';
 import type { Slot, AgentTool } from '../capability/types';
 import { streamWithRetry, type StreamRetryConfig } from '../provider/stream-retry';
 import { computeWatermarks, computeWatermarksFromModel } from '../context/watermarks';
@@ -38,13 +48,14 @@ import type { CompactionStrategy } from '../context/types';
 import { lookupModelContext } from '../context/model-context-table';
 import {
   evaluateGate,
+  markCompactCancelled,
   markCompactStart,
   markCompactSuccess,
   markCompactFailure,
   initialGateState,
   triggerThresholdFor,
 } from '../context/compaction-gate';
-import { runCompaction } from '../context/compaction-pipeline';
+import { compactionFailureDiagnostics, runCompaction } from '../context/compaction-pipeline';
 import { estimateTokens } from '../context/deterministic-compact';
 import { rehydrate } from '../context/post-compact-rehydrate';
 import {
@@ -58,6 +69,7 @@ import {
   type ModelContextInfo,
   type WatermarkConfig,
   type CompactSummarize,
+  type RehydrateOutcomeCounts,
   type SummaryScenario,
 } from '../context/compaction-types';
 import { ensureToolResultPairing } from '../context/tool-pairing';
@@ -72,10 +84,12 @@ import {
 import { evaluateStopHook, type StopHookPublishResult } from './stop-hook';
 import { isBudgetExhausted, shouldContinueForBudget } from './token-budget';
 import { ReadTracker } from '../capability/read-tracker';
+import { canonicalizeBoundaryContent } from '../capability/history-content';
 import { aggregateErrorCategories, summarizeErrorStats } from '../diagnostics/error-stats';
 import type { HandoffSink, HandoffIntent, HandoffResolution } from '../inject/types';
 import { HANDOFF_INTENT_KEY } from '../capability/builtin-tools/message-tools';
 import { EXIT_PLAN_INTENT_KEY, exitPlanModeTool } from '../capability/builtin-tools/plan-tools';
+import { applyProviderToolBudget } from './tool-budget';
 
 /** 主 agent 单次请求的 LLM↔工具往返防失控上限。host 可显式收紧。 */
 export const DEFAULT_MAIN_MAX_TURNS = 500;
@@ -126,6 +140,8 @@ export interface AutoMemoryHook {
 
 export interface CoreAgentOptions {
   context: AgentContext;
+  /** Safe, caller-gated audit around the resolved upstream provider adapter. */
+  providerBoundaryTrace?: ProviderCallOpts['boundaryTrace'];
   /** Native sidecar seam: refresh host-owned tools and uncached context before
    * every provider call. Absent keeps the in-process/static behavior. */
   refreshTurnContext?: () => Promise<{ tools?: AgentTool[]; dynamicContext?: string }>;
@@ -211,6 +227,16 @@ function stableStringify(v: unknown): string {
     .join(',')}}`;
 }
 
+/** Keep the first definition for every provider-visible callable name. */
+function dedupeToolsByName(tools: AgentTool[]): AgentTool[] {
+  const seen = new Set<string>();
+  return tools.filter((tool) => {
+    if (seen.has(tool.name)) return false;
+    seen.add(tool.name);
+    return true;
+  });
+}
+
 interface AssistantBlock {
   type: string;
   id?: string;
@@ -229,6 +255,48 @@ function extractAssistant(message: unknown): { content: AssistantBlock[]; toolUs
     .filter((b) => b.type === 'tool_use' && typeof b.id === 'string' && typeof b.name === 'string')
     .map((b) => ({ id: b.id as string, name: b.name as string, input: b.input }));
   return { content, toolUses };
+}
+
+/** Only a pure text assistant message can be a legacy bracket pseudo-call. */
+function assistantTextOnly(message: unknown): string | null {
+  const content =
+    message && typeof message === 'object' && Array.isArray((message as { content?: unknown }).content)
+      ? ((message as { content: AssistantBlock[] }).content)
+      : [];
+  if (content.length === 0 || content.some((block) => block.type !== 'text' || typeof block.text !== 'string')) return null;
+  return content.map((block) => block.text as string).join('');
+}
+
+function textDeltaOf(event: ProviderStreamEvent): { index: number; text: string } | null {
+  if (event.type !== 'content_block_delta') return null;
+  const delta = event.delta as { type?: unknown; text?: unknown } | undefined;
+  return delta?.type === 'text_delta' && typeof delta.text === 'string'
+    ? { index: event.index, text: delta.text }
+    : null;
+}
+
+function bufferedTextEvent(index: number, text: string): ProviderStreamEvent {
+  return { type: 'content_block_delta', index, delta: { type: 'text_delta', text } };
+}
+
+function startsBracketToolPrefix(text: string): boolean {
+  return text.trimStart().startsWith('[called ');
+}
+
+interface BufferedBracketText {
+  readonly index: number;
+  text: string;
+  /** Once the candidate exceeds the hard cap, retain no payload and fail closed. */
+  overflowed: boolean;
+}
+
+function isLiveExecutableTool(tool: AgentTool | undefined): tool is AgentTool {
+  if (!tool) return false;
+  try {
+    return tool.isEnabled() && typeof tool.call === 'function';
+  } catch {
+    return false;
+  }
 }
 
 /** read 类工具调用的目标路径(用于 same-file read 计数);非 read / 无路径 → null。
@@ -270,6 +338,33 @@ function toolResultContent(payload: unknown): string {
   } catch {
     return String(payload);
   }
+}
+
+const CANONICAL_TOOL_RESULT_PART_TYPES = new Set(['text', 'image', 'audio', 'video', 'file', 'document']);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+/**
+ * Keep tool-result media as neutral content until the provider boundary.
+ *
+ * The old loop converted every object result to JSON before the adapter saw
+ * it. That made a direct `{type:'image', data, mimeType}` result look like
+ * ordinary text, so Anthropic/Responses/Gemini lost the media semantics on
+ * the very next request. Only accept the bounded canonical content shapes;
+ * arbitrary tool metadata continues through the legacy text path.
+ */
+function canonicalToolResultParts(payload: unknown): Array<Record<string, unknown>> | undefined {
+  const normalized = canonicalizeBoundaryContent(payload);
+  const values = Array.isArray(normalized) ? normalized : [normalized];
+  if (values.length === 0) return undefined;
+  const parts: Array<Record<string, unknown>> = [];
+  for (const value of values) {
+    if (!isRecord(value) || typeof value.type !== 'string' || !CANONICAL_TOOL_RESULT_PART_TYPES.has(value.type)) return undefined;
+    parts.push(value);
+  }
+  return parts.length > 0 ? parts : undefined;
 }
 
 /** 多模态(011):从 tool.result payload 取 image content blocks(read_file 读图时挂在
@@ -406,13 +501,30 @@ function toolResultsToContent(
     const opts = persist
       ? { persist: (raw: string) => persist(raw, { toolUseId: r.toolUseId, toolName: r.toolName }) }
       : undefined;
-    const { output } = applyResultBudget(toolResultContent(r.result.payload), max, opts);
+    const canonicalParts = canonicalToolResultParts(r.result.payload);
+    const canonicalText = canonicalParts
+      ?.filter((part) => part.type === 'text' && typeof part.text === 'string')
+      .map((part) => part.text as string)
+      .join('');
+    const { output } = applyResultBudget(
+      canonicalParts ? canonicalText ?? '' : toolResultContent(r.result.payload),
+      max,
+      opts,
+    );
     // 多模态(011):工具(如 read_file 读图)在 payload 带 imageBlocks → tool_result.content
     //   组成 content 数组 [text, image…]。Anthropic 原样吃图;openai-compat 的
     //   toolResultToText 只取 text 块 → 优雅降级(丢图留文,不 400)。
     const images = imageBlocksFromPayload(r.result.payload);
-    const content =
-      images.length > 0 ? [{ type: 'text', text: output }, ...images] : output;
+    const media = canonicalParts?.filter((part) => part.type !== 'text') ?? images;
+    const content = canonicalParts
+      ? [
+          ...(output ? [{ type: 'text', text: output }] : []),
+          ...media,
+          ...(output || media.length > 0 ? [] : [{ type: 'text', text: '[empty tool result]' }]),
+        ]
+      : images.length > 0
+        ? [{ type: 'text', text: output }, ...images]
+        : output;
     return {
       type: 'tool_result',
       tool_use_id: r.toolUseId,
@@ -507,21 +619,27 @@ export class CoreAgent implements Agent {
    *  就地 splice(skip-and-replace)。返回是否真压缩了(count>0)。compact() 自身抛错
    *  时**向上抛**(由 caller 决定优雅终止,不在此吞,避免异常穿出 generator 崩整轮)。
    *  供 PROMPT_TOO_LONG 与 model_context_window_exceeded 两条反应式恢复路复用。 */
-  private async reactiveCompactOnce(messages: ProviderMessage[], turn: number): Promise<boolean> {
+  private async reactiveCompactOnce(
+    messages: ProviderMessage[],
+    turn: number,
+    signal: AbortSignal,
+  ): Promise<boolean> {
     const strategy = this.o.compaction;
     if (!strategy) return false;
     const preTokens = estimateTokens(messages);
     this.bus.publish(this.ev(CoreEventType.PreCompact, { trigger: 'auto', tokenCount: preTokens }));
     let result: Awaited<ReturnType<typeof strategy.compact>>;
     try {
-      result = await strategy.compact(messages);
+      result = await strategy.compact(messages, signal);
     } catch (e) {
+      if (signal.aborted) throw e;
       // 04.4:失败不再静默(caller 可能吞异常落 prompt_too_long,事件是观测口)。
       this.bus.publish(
         this.ev(CoreEventType.CompactionFailed, {
           error: e instanceof Error ? e.message : String(e),
           trigger: 'auto',
           tokenCount: preTokens,
+          diagnostics: compactionFailureDiagnostics(e, messages),
         }),
       );
       throw e;
@@ -533,8 +651,17 @@ export class CoreAgent implements Agent {
     //   免 splice 依赖 → 保持发布时机不变(零回归)。
     const postTokens =
       preTokens - estimateTokens(messages.slice(coveredFrom, coveredTo + 1)) + estimateTokens([replacement as ProviderMessage]);
+    const keepCount = Math.max(0, messages.length - coveredTo - 1);
     this.bus.publish(
-      this.ev(CoreEventType.CompactionApplied, { coveredFrom, coveredTo, replacement, preTokens, postTokens, trigger: 'auto' }),
+      this.ev(CoreEventType.CompactionApplied, {
+        coveredFrom,
+        coveredTo,
+        replacement,
+        keepCount,
+        preTokens,
+        postTokens,
+        trigger: 'auto',
+      }),
     );
     messages.splice(coveredFrom, count, replacement as ProviderMessage);
     this.bus.publish(this.ev(CoreEventType.PostCompact, { coveredFrom, coveredTo }));
@@ -559,6 +686,7 @@ export class CoreAgent implements Agent {
     messages: ProviderMessage[],
     type: CompactType,
     turn: number,
+    signal: AbortSignal,
     tokenCountHint?: number,
     force = false,
   ): Promise<'compacted' | 'skipped'> {
@@ -629,12 +757,15 @@ export class CoreAgent implements Agent {
         sufficiencyRatio: v2.sufficiencyRatio ?? 0.15,
         messagesToKeep: v2.messagesToKeep ?? 0,
         now,
+        signal,
       });
+      throwIfAborted(signal);
       this.bus.publish(
         this.ev(CoreEventType.CompactionApplied, {
           coveredFrom: result.coveredFrom,
           coveredTo: result.coveredTo,
           replacement: result.replacement,
+          keepCount: Math.max(0, messages.length - result.coveredTo - 1),
           // ★ T5:压缩前后 token + 触发原因(观测,fold 不读)。postTokens 用
           //   「前 − 覆盖区 + replacement」估算,免 splice 依赖 → 发布时机不变(零回归)。
           preTokens: tokenCount,
@@ -649,14 +780,18 @@ export class CoreAgent implements Agent {
       messages.splice(result.coveredFrom, count, result.replacement);
 
       // 压后重挂(#13):取最近文件附在 replacement 之后(replacement 现位于 coveredFrom)。
+      let rehydrateOutcomes: RehydrateOutcomeCounts | undefined;
       if (v2.rehydrate) {
         // D-01:host 未提供 recentReadPaths → loop 自取自己的 read-tracker(host 拿不到内部 tracker)。
         const reh = await rehydrate({
           recentReadPaths: v2.rehydrate.recentReadPaths ? v2.rehydrate.recentReadPaths() : this.readTracker.recentPaths(),
           readFile: v2.rehydrate.readFile,
+          signal,
           tokenBudget: v2.rehydrate.tokenBudget ?? DEFAULT_REHYDRATE_TOKEN_BUDGET,
           maxFiles: v2.rehydrate.maxFiles ?? DEFAULT_REHYDRATE_MAX_FILES,
         });
+        throwIfAborted(signal);
+        rehydrateOutcomes = reh.outcomes;
         if (reh.attachments.length > 0) {
           messages.splice(result.coveredFrom + 1, 0, ...reh.attachments);
         }
@@ -667,12 +802,17 @@ export class CoreAgent implements Agent {
           coveredFrom: result.coveredFrom,
           coveredTo: result.coveredTo,
           usedLLM: result.usedLLM,
+          ...(rehydrateOutcomes ? { rehydrate: rehydrateOutcomes } : {}),
         }),
       );
       this.gateState = markCompactSuccess(this.gateState, now);
       this.bus.publish(this.ev(CoreEventType.TurnAborted, { turn, reason: 'reactive_compact_retry' }));
       return 'compacted';
     } catch (e) {
+      if (signal.aborted) {
+        this.gateState = markCompactCancelled(this.gateState);
+        throw e;
+      }
       // 失败:messages 未 splice(自动回滚)+ 熔断计数 +1;上抛交 caller 处理终态。
       // 04.4:失败不再静默——pre-message 路的 caller 会吞异常,本事件是唯一观测口。
       this.gateState = markCompactFailure(this.gateState);
@@ -682,14 +822,41 @@ export class CoreAgent implements Agent {
           trigger: compactTrigger(type),
           type,
           tokenCount,
+          recovery: type === CompactType.PRE_MESSAGE_AUTO
+            ? {
+                action: 'continue_to_emergency_handling',
+                currentTurn: 'continues',
+                providerCompletion: 'pending',
+                history: 'unchanged',
+                retryable: true,
+              }
+            : {
+                action: 'terminate_current_turn',
+                currentTurn: 'terminated',
+                terminalReason: 'prompt_too_long',
+                providerCall: 'not_started',
+                providerCompletion: 'none',
+                history: 'unchanged',
+                retryable: true,
+              },
+          diagnostics: compactionFailureDiagnostics(e, messages),
         }),
       );
       throw e;
     }
   }
 
-  private buildRequest(system: SystemBlock[], messages: ProviderMessage[], toolset: AgentTool[]): ProviderRequest {
-    const tools: ProviderToolDef[] = toolset.map((t) => {
+  private buildRequest(
+    system: SystemBlock[],
+    messages: ProviderMessage[],
+    toolset: AgentTool[],
+    skipCacheWrite = false,
+  ): ProviderRequest {
+    // Apply the source-aware budget before projecting to the provider wire shape;
+    // ProviderToolDef deliberately carries no internal priority metadata.
+    // Deduplicate first so repeated live definitions cannot consume provider budget
+    // or hide a later distinct tool; the first roster definition remains authoritative.
+    const tools: ProviderToolDef[] = applyProviderToolBudget(dedupeToolsByName(toolset)).map((t) => {
       // model-facing 描述:显式 description 优先,回落 searchHint(总比裸名字强)。
       // 不带 → provider 不发该字段 → 模型只能靠名字猜工具(重构曾整段丢了这条接线)。
       const description = t.description ?? t.searchHint;
@@ -709,6 +876,9 @@ export class CoreAgent implements Agent {
       // 每次发 provider 前兜底 tool 配对(压缩/历史可能留孤儿 → 不修必 400)。
       messages: ensureToolResultPairing(messages),
       enablePromptCaching: true,
+      // The host's dynamic suffix is appended for this provider request only.
+      // Keep it outside the cached prefix and cache the preceding stable turn.
+      ...(skipCacheWrite ? { skipCacheWrite: true } : {}),
       ...(maxOutputTokens ? { maxOutputTokens } : {}),
       ...(this.o.thinking ? { thinking: this.o.thinking } : {}),
     };
@@ -766,6 +936,10 @@ export class CoreAgent implements Agent {
       }
       return { type: 'done', terminal: { reason, ...extra } };
     };
+    const finishAbortedTurn = (turn: number): AgentEvent => {
+      this.bus.publish(this.ev(CoreEventType.TurnAborted, { turn, reason: 'abort' }));
+      return done('aborted_streaming');
+    };
 
     // ★ auto-memory 自动召回:每个 user turn 跑一次(per-turn prefetch),把相关
     //   记忆作 system-reminder 在本 run 各 turn 注入(dynamic slot,cacheScope=null)。
@@ -820,7 +994,7 @@ export class CoreAgent implements Agent {
     // ─── 全局 tool-result 预算兜底(移植 agentic_os 03.B):单 tool 声明 maxResultSizeChars,LOOP 统一裁。
     const budgetMap = new Map<string, number>();
     const rebuildToolState = (nextTools: AgentTool[]): void => {
-      allTools = nextTools;
+      allTools = dedupeToolsByName(nextTools);
       deferred = allTools.filter((t) => t.shouldDefer?.() === true && t.alwaysLoad !== true);
       activeTools = deferred.length > 0 ? allTools.filter((t) => !deferred.includes(t)) : allTools;
       toolSearch =
@@ -855,6 +1029,11 @@ export class CoreAgent implements Agent {
     // ─── 反应式续轮硬上限(max_tokens 续写 / stop-hook prevented / token-budget),防无限循环。
     const maxContinuations = this.o.maxContinuations ?? 4;
     let continuations = 0;
+    // Legacy providers sometimes encode one tool request as visible text. The
+    // recovery is deliberately run-scoped and bounded: one native nudge only;
+    // a later valid pseudo-call is suppressed with a safe terminal message.
+    let bracketNudgeUsed = false;
+    const bracketCallKeys = new Set<string>();
     // ─── 同一文件重复读计数(移植 same_file_read_limit);越线注入 system-reminder(下一轮)。
     //   per-run 重置实例字段(供 runCompactionV2 压后重挂自取 recentPaths);本地别名沿用旧引用。
     this.readTracker.reset();
@@ -884,8 +1063,7 @@ export class CoreAgent implements Agent {
       turnsRun = turn + 1;
       if (signal.aborted) {
         yield { type: 'turn_aborted', turn };
-        this.bus.publish(this.ev(CoreEventType.TurnAborted, { turn, reason: 'abort' }));
-        yield done('aborted_streaming');
+        yield finishAbortedTurn(turn);
         return;
       }
       yield { type: 'turn_start', turn };
@@ -918,10 +1096,22 @@ export class CoreAgent implements Agent {
       // ★ Compaction V2 pre-message 预压(#11):turn 顶部按 preCompactThreshold(0.80)静默预压,
       //   比 emergency(0.92,stage3)更早、更平滑。闸内冷却/熔断兜底,失败不崩(吞 → 留给 stage3/反应式)。
       if (this.o.compactionV2 && this.o.compactionV2.preMessage !== false) {
-        const tokenCount = lastPromptTokens > 0 ? lastPromptTokens : estimateTokens(messages);
+        // The previous provider usage is exact for the previous request, but it
+        // does not include steering/inbox/tool results appended since then.
+        const tokenCount = Math.max(lastPromptTokens, estimateTokens(messages));
         try {
-          await this.runCompactionV2(messages, CompactType.PRE_MESSAGE_AUTO, turn, tokenCount);
-        } catch {
+          await this.runCompactionV2(messages, CompactType.PRE_MESSAGE_AUTO, turn, signal, tokenCount);
+        } catch (e) {
+          if (signal.aborted) {
+            yield { type: 'turn_aborted', turn };
+            yield finishAbortedTurn(turn);
+            return;
+          }
+          const marks = this.v2Watermarks();
+          if (marks.blockingLimit > 0 && isOverBlockingLimit(tokenCount, marks)) {
+            yield done('blocking_limit', { error: e });
+            return;
+          }
           /* 预压失败不致命:交给 stage3 emergency / provider 反应式兜底 */
         }
       }
@@ -968,10 +1158,15 @@ export class CoreAgent implements Agent {
       if (this.o.compactionV2) {
         // ★ Compaction V2(emergency auto):比例水位 + 有序闸 + 三层管线 + 重挂。
         const marks = this.v2Watermarks();
-        const tokenCount = lastPromptTokens > 0 ? lastPromptTokens : estimateTokens(messages);
+        const tokenCount = Math.max(lastPromptTokens, estimateTokens(messages));
         try {
-          await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, tokenCount);
+          await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, signal, tokenCount);
         } catch (e) {
+          if (signal.aborted) {
+            yield { type: 'turn_aborted', turn };
+            yield finishAbortedTurn(turn);
+            return;
+          }
           yield done('prompt_too_long', { error: e });
           return;
         }
@@ -986,19 +1181,29 @@ export class CoreAgent implements Agent {
         }
       } else if (this.o.compaction) {
         const marks = computeWatermarks(this.o.contextWindow ?? 200_000);
-        // 真实 token 优先(上一轮 API 回传的 prompt 规模);首轮无 usage 回退 char/4 估算。
-        const tokenCount = lastPromptTokens > 0 ? lastPromptTokens : estimateTokens(messages);
+        // 上轮真实 usage 与当前完整消息估算取大，防止本轮新增内容被旧 usage 掩盖。
+        const tokenCount = Math.max(lastPromptTokens, estimateTokens(messages));
         if (this.o.compaction.shouldCompact(tokenCount, marks)) {
           // ★ PreCompact hook:压缩真正触发前发(trigger=auto + 当前 token 数)。
           this.bus.publish(this.ev(CoreEventType.PreCompact, { trigger: 'auto', tokenCount }));
           try {
-            const { replacement, coveredFrom, coveredTo } = await this.o.compaction.compact(messages);
-            this.bus.publish(this.ev(CoreEventType.CompactionApplied, { coveredFrom, coveredTo, replacement }));
+            const { replacement, coveredFrom, coveredTo } = await this.o.compaction.compact(messages, signal);
+            this.bus.publish(this.ev(CoreEventType.CompactionApplied, {
+              coveredFrom,
+              coveredTo,
+              replacement,
+              keepCount: Math.max(0, messages.length - coveredTo - 1),
+            }));
             const count = Math.max(0, coveredTo - coveredFrom + 1);
             messages.splice(coveredFrom, count, replacement as ProviderMessage);
             // ★ PostCompact hook:应用压缩后发(被覆盖的消息区间)。
             this.bus.publish(this.ev(CoreEventType.PostCompact, { coveredFrom, coveredTo }));
           } catch (e) {
+            if (signal.aborted) {
+              yield { type: 'turn_aborted', turn };
+              yield finishAbortedTurn(turn);
+              return;
+            }
             // 压缩自身失败(如 summarize 仍超长且无法再头部截断、provider 报错)→ 优雅终止,
             //   绝不让异常穿出 generator 崩掉整轮(>1M resume 的兜底:host 拿到 prompt_too_long)。
             // 04.4:失败不再静默,发 CompactionFailed 供离线统计。
@@ -1007,6 +1212,7 @@ export class CoreAgent implements Agent {
                 error: e instanceof Error ? e.message : String(e),
                 trigger: 'auto',
                 tokenCount,
+                diagnostics: compactionFailureDiagnostics(e, messages),
               }),
             );
             yield done('prompt_too_long', { error: e });
@@ -1037,16 +1243,22 @@ export class CoreAgent implements Agent {
       const providerMessages = liveDynamicContext
         ? [...messages, { role: 'user' as const, content: liveDynamicContext }]
         : messages;
-      const req = this.buildRequest(system, providerMessages, tools);
+      const req = this.buildRequest(system, providerMessages, tools, Boolean(liveDynamicContext));
       let assistantMessage: unknown = null;
       let stopReason: StopReason = null;
       let turnOutputTokens = 0;
+      let bracketRecovery:
+        | { call: BracketPseudoToolCall; action: 'nudge' | 'repeat' }
+        | { action: 'reject' }
+        | null = null;
+      let bufferedBracketText: BufferedBracketText | null = null;
       try {
         for await (const sev of streamWithRetry(
           this.o.context.provider,
           req,
           {
             signal,
+            ...(this.o.providerBoundaryTrace ? { boundaryTrace: this.o.providerBoundaryTrace } : {}),
             fallbackModel: this.o.context.config.fallbackModel,
             // ★ T5:每次上游重试前把观测信息投射到 bus → facade 映射成 api_retry 出墙。
             //   纯观测,不改重试行为(缺省无订阅者时是一次空 publish)。
@@ -1058,7 +1270,12 @@ export class CoreAgent implements Agent {
                     const retryMessages = liveDynamicContext
                       ? [...messages, { role: 'user' as const, content: liveDynamicContext }]
                       : messages;
-                    return this.buildRequest(system, retryMessages, resolveEffectiveTools());
+                    return this.buildRequest(
+                      system,
+                      retryMessages,
+                      resolveEffectiveTools(),
+                      Boolean(liveDynamicContext),
+                    );
                   },
                 }
               : {}),
@@ -1068,7 +1285,107 @@ export class CoreAgent implements Agent {
           // Provider 合同要求响应 signal，但 loop 仍在消费边界 fail-closed：即使错误实现
           // 在 abort 后继续 yield，也绝不把该结果提交为 stream/assistant/tool call。
           if (signal.aborted) break;
-          yield { type: 'stream', event: sev };
+
+          let streamEvent: ProviderStreamEvent | null = sev;
+          let pendingTextEvent: ProviderStreamEvent | null = null;
+          const textDelta = textDeltaOf(sev);
+
+          if (sev.type === 'assistant') {
+            const extracted = extractAssistant(sev.message);
+            const text = assistantTextOnly(sev.message);
+            const standalone = text !== null ? findStandaloneBracketToolShape(text) : null;
+            const candidate =
+              sev.stopReason === 'end_turn' && extracted.toolUses.length === 0 && text !== null
+                ? parseBracketPseudoToolText(text)
+                : null;
+            const liveTool = candidate ? findTool(tools, candidate.name) : undefined;
+            if (candidate && isLiveExecutableTool(liveTool) && !signal.aborted) {
+              const repeated = bracketNudgeUsed || bracketCallKeys.has(candidate.key);
+              bracketRecovery = { call: candidate, action: repeated ? 'repeat' : 'nudge' };
+              if (!repeated) {
+                bracketNudgeUsed = true;
+                bracketCallKeys.add(candidate.key);
+              }
+              // The complete assistant event is withheld along with any
+              // buffered text; the native continuation is the only recovery.
+              streamEvent = null;
+              bufferedBracketText = null;
+            } else if (
+              standalone ||
+              (extracted.toolUses.length === 0 &&
+                (bufferedBracketText?.overflowed || (text !== null && startsBracketToolPrefix(text))))
+            ) {
+              // A complete bracket envelope that is malformed, unavailable,
+              // disabled, or attached to a non-clean stop is never ordinary
+              // assistant output; do not leak the attempted syntax to history/UI.
+              bracketRecovery = { action: 'reject' };
+              streamEvent = null;
+              bufferedBracketText = null;
+            } else if (bufferedBracketText) {
+              // Invalid/prose/non-bracket output is ordinary text. Release it
+              // only after the complete assistant shape is known.
+              if (!bufferedBracketText.overflowed) {
+                pendingTextEvent = bufferedTextEvent(bufferedBracketText.index, bufferedBracketText.text);
+              }
+              bufferedBracketText = null;
+            }
+          } else if (textDelta) {
+            // Provider streams may split one assistant message across several
+            // text-block indexes. Keep a possible pseudo-call buffered across
+            // those boundaries; flushing on index change would leak a fragment.
+            if (bufferedBracketText) {
+              if (bufferedBracketText.overflowed) {
+                // The payload is already over the hard cap. Drop all further
+                // deltas until aggregate classification returns model_error.
+                streamEvent = null;
+              } else {
+                const combined = bufferedBracketText.text + textDelta.text;
+                if (combined.length > MAX_BRACKET_TOOL_TEXT_CHARS) {
+                  bufferedBracketText.text = '';
+                  bufferedBracketText.overflowed = true;
+                  streamEvent = null;
+                } else if (isPossibleBracketToolPrefix(combined)) {
+                  bufferedBracketText.text = combined;
+                  streamEvent = null;
+                } else {
+                  pendingTextEvent = bufferedTextEvent(bufferedBracketText.index, bufferedBracketText.text);
+                  bufferedBracketText = null;
+                  if (
+                    textDelta.text.length > MAX_BRACKET_TOOL_TEXT_CHARS &&
+                    startsBracketToolPrefix(textDelta.text)
+                  ) {
+                    bufferedBracketText = { index: textDelta.index, text: '', overflowed: true };
+                    streamEvent = null;
+                  } else if (isPossibleBracketToolPrefix(textDelta.text)) {
+                    bufferedBracketText = { ...textDelta, overflowed: false };
+                    streamEvent = null;
+                  }
+                }
+              }
+            } else if (
+              textDelta.text.length > MAX_BRACKET_TOOL_TEXT_CHARS &&
+              startsBracketToolPrefix(textDelta.text)
+            ) {
+              bufferedBracketText = { index: textDelta.index, text: '', overflowed: true };
+              streamEvent = null;
+            } else if (isPossibleBracketToolPrefix(textDelta.text)) {
+              bufferedBracketText = { ...textDelta, overflowed: false };
+              streamEvent = null;
+            }
+          } else if (
+            bufferedBracketText &&
+            sev.type !== 'message_delta' &&
+            sev.type !== 'message_stop'
+          ) {
+            // Never use provider framing as evidence that a bracket-prefixed
+            // candidate is ordinary text. Suppress block stops until aggregate.
+            if (sev.type === 'content_block_stop') {
+              streamEvent = null;
+            }
+          }
+
+          if (pendingTextEvent) yield { type: 'stream', event: pendingTextEvent };
+          if (streamEvent) yield { type: 'stream', event: streamEvent };
           if (sev.type === 'assistant') {
             assistantMessage = sev.message;
             stopReason = sev.stopReason;
@@ -1086,10 +1403,17 @@ export class CoreAgent implements Agent {
             if (sev.usage?.outputTokens) turnOutputTokens = sev.usage.outputTokens;
           }
         }
+        // An abnormal EOF cannot prove that a bracket-prefixed candidate was
+        // ordinary prose. Drop it and surface the same explicit model_error as
+        // every other incomplete/invalid pseudo-call.
+        if (!signal.aborted && assistantMessage === null && bufferedBracketText) {
+          bracketRecovery = { action: 'reject' };
+          bufferedBracketText = null;
+        }
       } catch (e) {
         if (signal.aborted) {
           yield { type: 'turn_aborted', turn };
-          yield done('aborted_streaming');
+          yield finishAbortedTurn(turn);
           return;
         }
         // PROMPT_TOO_LONG 反应式压缩(autoCompact reactive 路):
@@ -1099,13 +1423,18 @@ export class CoreAgent implements Agent {
         if (!signal.aborted && isPromptTooLong(e) && (this.o.compactionV2 || this.o.compaction)) {
           try {
             const compacted = this.o.compactionV2
-              ? (await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, undefined, true)) === 'compacted'
-              : await this.reactiveCompactOnce(messages, turn);
+              ? (await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, signal, undefined, true)) === 'compacted'
+              : await this.reactiveCompactOnce(messages, turn, signal);
             if (compacted) {
               turn--; // 重试同一 turn(for-loop ++ 抵消);maxTurns 仍兜底
               continue;
             }
           } catch {
+            if (signal.aborted) {
+              yield { type: 'turn_aborted', turn };
+              yield finishAbortedTurn(turn);
+              return;
+            }
             // 压缩自身也失败(summarize 仍超长且无法再截断)→ 落 prompt_too_long(下方),不崩。
           }
           yield done('prompt_too_long', { error: e });
@@ -1118,7 +1447,7 @@ export class CoreAgent implements Agent {
       // 再次检查，维持当前 streaming 阶段的终态语义。
       if (signal.aborted) {
         yield { type: 'turn_aborted', turn };
-        yield done('aborted_streaming');
+        yield finishAbortedTurn(turn);
         return;
       }
       // token 预算:累加本轮 output token(taskBudget 缺省 → spentTokens 仅记账不参与判定)。
@@ -1132,19 +1461,58 @@ export class CoreAgent implements Agent {
         if (this.o.compactionV2 || this.o.compaction) {
           try {
             const compacted = this.o.compactionV2
-              ? (await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, undefined, true)) === 'compacted'
-              : await this.reactiveCompactOnce(messages, turn);
+              ? (await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, signal, undefined, true)) === 'compacted'
+              : await this.reactiveCompactOnce(messages, turn, signal);
             if (compacted) {
               turn--;
               continue;
             }
           } catch {
+            if (signal.aborted) {
+              yield { type: 'turn_aborted', turn };
+              yield finishAbortedTurn(turn);
+              return;
+            }
             // 压缩失败 → 落 prompt_too_long(下方),不崩。
           }
         }
         yield done('prompt_too_long', {
           error: new Error('model context window exceeded and the conversation could not be compacted further'),
         });
+        return;
+      }
+
+      if (bracketRecovery?.action === 'nudge') {
+        // Do not append the assistant pseudo-call. The nudge is ephemeral;
+        // only a subsequent native tool_use may enter dispatch/history.
+        messages.push({ role: 'user', content: buildBracketToolNudge(bracketRecovery.call) });
+        this.bus.publish(this.ev(CoreEventType.TurnAborted, { turn, reason: 'bracket_tool_recovery' }));
+        yield { type: 'turn_end', turn, usageContextRatio: ctxRatio() };
+        this.bus.publish(this.ev(CoreEventType.TurnEnd, { turn, usageContextRatio: ctxRatio() }));
+        continue;
+      }
+
+      if (bracketRecovery?.action === 'repeat') {
+        const safeContent = [{ type: 'text', text: BRACKET_TOOL_REPEAT_MESSAGE }];
+        const safeEvent = this.ev('assistant.message', { role: 'assistant', content: safeContent });
+        this.bus.publish(safeEvent);
+        yield { type: 'assistant', message: safeEvent };
+        messages.push({ role: 'assistant', content: safeContent });
+        yield { type: 'turn_end', turn, usageContextRatio: ctxRatio() };
+        this.bus.publish(this.ev(CoreEventType.TurnEnd, { turn, usageContextRatio: ctxRatio() }));
+        yield done('model_error', { error: new Error(BRACKET_TOOL_REPEAT_MESSAGE) });
+        return;
+      }
+
+      if (bracketRecovery?.action === 'reject') {
+        const safeContent = [{ type: 'text', text: BRACKET_TOOL_REJECT_MESSAGE }];
+        const safeEvent = this.ev('assistant.message', { role: 'assistant', content: safeContent });
+        this.bus.publish(safeEvent);
+        yield { type: 'assistant', message: safeEvent };
+        messages.push({ role: 'assistant', content: safeContent });
+        yield { type: 'turn_end', turn, usageContextRatio: ctxRatio() };
+        this.bus.publish(this.ev(CoreEventType.TurnEnd, { turn, usageContextRatio: ctxRatio() }));
+        yield done('model_error', { error: new Error(BRACKET_TOOL_REJECT_MESSAGE) });
         return;
       }
 
@@ -1509,6 +1877,14 @@ export class CoreAgent implements Agent {
 function resolveLeading(leading: string | (() => string | null) | undefined): string | null {
   if (leading == null) return null;
   return typeof leading === 'function' ? leading() : leading;
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'aborted');
+  error.name = 'AbortError';
+  throw error;
 }
 
 /** 合并外部 signal 与内部 abort：任一 abort 即 abort。 */

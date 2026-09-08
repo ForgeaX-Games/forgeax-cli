@@ -47,6 +47,9 @@ export function buildContinuationMessage(): ProviderMessage {
 const PTL_KEYWORDS = [
   'prompt is too long',
   'prompt too long',
+  // LiteLLM may wrap the upstream Anthropic overflow as
+  // {"error":{"message":"Input is too long."}} inside its own HTTP 400.
+  'input is too long',
   'context length exceeded',
   'maximum context length',
   'context_length_exceeded',

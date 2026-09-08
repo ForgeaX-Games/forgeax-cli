@@ -15,7 +15,7 @@ import { test, expect, describe } from 'bun:test';
 import { ROOT_CONTEXT, trace } from '@opentelemetry/api';
 import type { TelemetryRecord, SpanData, LogRecord } from '@forgeax/types';
 import { makeNodeObservability } from '../src/cli/observability/index';
-import { redactBagWith, redactStrictValueAtSource } from '../src/cli/observability/redactor';
+import { redactBagWith, redactStrictValueAtSource } from '../src/observability/redactor';
 import { readableSpanToSpanData } from '../src/cli/observability/processor';
 import { Coalescer } from '../src/cli/observability/coalesce';
 

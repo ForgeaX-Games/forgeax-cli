@@ -48,6 +48,14 @@ describe('isPromptTooLong', () => {
     expect(isPromptTooLong(new Error(`${PROMPT_TOO_LONG_MESSAGE} (tokens: 250000)`))).toBe(true);
   });
 
+  test('真实 LiteLLM 包装的 Anthropic input-too-long HTTP 400 → true', () => {
+    const error = new Error(
+      'anthropic API error 400: {"error":{"message":"{\\"error\\":{\\"message\\":\\"Input is too long.\\"}}. Received Model Group=claude-opus-4-8"}}',
+    ) as Error & { status: number };
+    error.status = 400;
+    expect(isPromptTooLong(error)).toBe(true);
+  });
+
   test('不以该串开头(出现在中间)→ false', () => {
     expect(isPromptTooLong(new Error(`wrapped: ${PROMPT_TOO_LONG_MESSAGE}`))).toBe(false);
   });

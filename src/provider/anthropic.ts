@@ -13,6 +13,8 @@
  */
 
 import { FORGEAX_USER_AGENT } from './user-agent';
+import { canonicalizeBoundaryContent, isRecord as isHistoryRecord } from '../capability/history-content';
+import { assertProviderWireSafe } from './wire-validator';
 import {
   EMPTY_USAGE,
   mergeUsage,
@@ -221,9 +223,12 @@ function normalizeAnthropicSchema(value: unknown, root = false): JsonObject {
   return out;
 }
 
-export function toolDefsToAnthropic(tools: ProviderToolDef[]): unknown[] | undefined {
+export function toolDefsToAnthropic(
+  tools: ProviderToolDef[],
+  enablePromptCaching = false,
+): unknown[] | undefined {
   if (!tools.length) return undefined;
-  return tools.map((t) => {
+  const mapped = tools.map((t) => {
     // Anthropic (and LiteLLM's Anthropic translator) requires every custom
     // tool schema to declare a top-level JSON-Schema type. Host/MCP tools may
     // legally arrive with an omitted type or an empty schema; normalize that
@@ -236,11 +241,153 @@ export function toolDefsToAnthropic(tools: ProviderToolDef[]): unknown[] | undef
       input_schema: inputSchema,
     };
   });
+  if (enablePromptCaching) {
+    (mapped[mapped.length - 1] as Record<string, unknown>).cache_control = { type: 'ephemeral' };
+  }
+  return mapped;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+const ANTHROPIC_MEDIA_UNAVAILABLE = '[content unavailable for Anthropic]';
+const ANTHROPIC_EMPTY_CONTENT = '[empty content omitted]';
+
+function anthropicContentBlock(raw: unknown): unknown | undefined {
+  if (typeof raw === 'string') return raw.length > 0 ? { type: 'text', text: raw } : undefined;
+  if (!isHistoryRecord(raw)) return undefined;
+
+  switch (raw.type) {
+    case 'text':
+      return typeof raw.text === 'string' && raw.text.length > 0 ? { type: 'text', text: raw.text } : undefined;
+    case 'image': {
+      if (isRecord(raw.source)) return raw;
+      if (typeof raw.data === 'string' && typeof raw.mimeType === 'string') {
+        return { type: 'image', source: { type: 'base64', media_type: raw.mimeType, data: raw.data } };
+      }
+      return { type: 'text', text: ANTHROPIC_MEDIA_UNAVAILABLE };
+    }
+    case 'document': {
+      if (isRecord(raw.source)) return raw;
+      if (typeof raw.data === 'string' && typeof raw.mimeType === 'string') {
+        return { type: 'document', source: { type: 'base64', media_type: raw.mimeType, data: raw.data } };
+      }
+      return { type: 'text', text: ANTHROPIC_MEDIA_UNAVAILABLE };
+    }
+    case 'file':
+      if (typeof raw.data === 'string' && typeof raw.mimeType === 'string' && raw.mimeType === 'application/pdf') {
+        return { type: 'document', source: { type: 'base64', media_type: raw.mimeType, data: raw.data } };
+      }
+      return { type: 'text', text: ANTHROPIC_MEDIA_UNAVAILABLE };
+    case 'audio':
+    case 'video':
+      return { type: 'text', text: ANTHROPIC_MEDIA_UNAVAILABLE };
+    case 'tool_use': {
+      const out: Record<string, unknown> = {
+        type: 'tool_use',
+        id: typeof raw.id === 'string' ? raw.id : 'unnamed-call',
+        name: typeof raw.name === 'string' && raw.name ? raw.name : 'unnamed_tool',
+        // Opaque by contract: no recursive traversal of input.
+        input: raw.input ?? {},
+      };
+      if (Object.prototype.hasOwnProperty.call(raw, 'content')) {
+        const nested = anthropicContent(raw.content);
+        if (nested.length > 0) out.content = nested;
+      }
+      return out;
+    }
+    case 'tool_result': {
+      const nested = anthropicContent(raw.content);
+      const out: Record<string, unknown> = {
+        type: 'tool_result',
+        tool_use_id: typeof raw.tool_use_id === 'string' ? raw.tool_use_id : '',
+        content: nested.length > 0 ? nested : [{ type: 'text', text: '[empty tool result]' }],
+      };
+      if (raw.is_error === true) out.is_error = true;
+      // Anthropic does not need the Gemini-only name field.
+      return out;
+    }
+    case 'thinking':
+      return typeof raw.thinking === 'string' ? raw : undefined;
+    case 'redacted_thinking':
+      return typeof raw.data === 'string' ? raw : undefined;
+    case 'server_tool_use':
+      return raw;
+    default:
+      // Current-turn provider-shaped blocks are kept only when they are already
+      // Anthropic wire blocks; anything else becomes an explicit safe marker.
+      if (raw.type === 'input_text' && typeof raw.text === 'string') return { type: 'text', text: raw.text };
+      return { type: 'text', text: ANTHROPIC_MEDIA_UNAVAILABLE };
+  }
+}
+
+function anthropicContent(content: unknown): unknown[] {
+  if (typeof content === 'string') return content.length > 0 ? [{ type: 'text', text: content }] : [];
+  if (!Array.isArray(content)) {
+    const block = anthropicContentBlock(content);
+    return block === undefined ? [] : [block];
+  }
+  return content.map(anthropicContentBlock).filter((block): block is unknown => block !== undefined);
+}
+
+function mapContentToAnthropic(content: unknown): unknown {
+  const normalized = canonicalizeBoundaryContent(content);
+  if (typeof normalized === 'string') return normalized.length > 0 ? normalized : [{ type: 'text', text: ANTHROPIC_EMPTY_CONTENT }];
+  const blocks = anthropicContent(normalized);
+  return blocks.length > 0 ? blocks : [{ type: 'text', text: ANTHROPIC_EMPTY_CONTENT }];
+}
+
+/**
+ * Anthropic rejects zero-length text blocks anywhere in message content. Remove only
+ * `{type:'text', text:''}` while preserving whitespace text, tool_use/tool_result blocks,
+ * opaque tool input, and every other wire value.
+ */
+function filterEmptyTextBlocks(content: unknown): unknown {
+  if (Array.isArray(content)) {
+    let changed = false;
+    const filtered: unknown[] = [];
+    for (const block of content) {
+      if (isRecord(block) && block.type === 'text' && block.text === '') {
+        changed = true;
+        continue;
+      }
+      const next = filterEmptyTextBlocks(block);
+      if (next !== block) changed = true;
+      filtered.push(next);
+    }
+    return changed ? filtered : content;
+  }
+  if (!isRecord(content) || content.type === 'image') return content;
+
+  // These are the same content-bearing envelopes accepted by history normalization.
+  // In particular, tool_use.input is opaque and must never be traversed or rewritten.
+  const contentKeys = content.type === 'tool_use' ? ['content'] : ['content', 'result', 'envelope'];
+  let filtered: Record<string, unknown> | undefined;
+  for (const key of contentKeys) {
+    if (!Object.prototype.hasOwnProperty.call(content, key)) continue;
+    const value = content[key];
+    const next = filterEmptyTextBlocks(value);
+    if (next !== value) {
+      filtered ??= { ...content };
+      filtered[key] = next;
+    }
+  }
+  return filtered ?? content;
 }
 
 export function messagesToAnthropic(messages: ProviderMessage[]): unknown[] {
-  // content 已是 backend 中立形（string | ContentBlock[]）——直接透传，由调用方规范化。
-  return messages.map((m) => ({ role: m.role, content: m.content }));
+  // 正常的 forgeax-core facade 已在 mapHistory() 读时完成转换；这里再做一次边界兜底，
+  // 保护直接调用 provider 的路径和旧的 ProviderMessage seed。失败项只落无路径占位文本，
+  // 绝不把 host-neutral image_file 形状或敏感路径透传给 Anthropic。
+  return messages.map((m) => {
+    const normalized = mapContentToAnthropic(m.content);
+    const filtered = filterEmptyTextBlocks(normalized);
+    return {
+      role: m.role,
+      content: Array.isArray(filtered) && filtered.length === 0 ? [{ type: 'text', text: ANTHROPIC_EMPTY_CONTENT }] : filtered,
+    };
+  });
 }
 
 /**
@@ -262,6 +409,11 @@ export function annotateMessageCache(messages: unknown[], skipCacheWrite?: boole
 
   const msg = messages[targetUserIdx] as { content?: unknown };
   const content = msg.content;
+  if (typeof content === 'string') {
+    if (content.length === 0) return;
+    msg.content = [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }];
+    return;
+  }
   if (!Array.isArray(content) || content.length === 0) return;
   const last = content[content.length - 1] as Record<string, unknown> | undefined;
   if (last && typeof last === 'object') {
@@ -341,7 +493,7 @@ export function buildRequestBody(req: ProviderRequest): Record<string, unknown> 
     annotateMessageCache(anthropicMessages, req.skipCacheWrite);
   }
 
-  const tools = toolDefsToAnthropic(req.tools);
+  const tools = toolDefsToAnthropic(req.tools, req.enablePromptCaching !== false);
   if (tools) body.tools = tools;
 
   // Thinking channel (os1 parity). Only enable thinking when the model wants it
@@ -372,6 +524,8 @@ export function buildRequestBody(req: ProviderRequest): Record<string, unknown> 
     stripThinkingBlocks(anthropicMessages);
     if (typeof req.temperature === 'number') body.temperature = req.temperature;
   }
+
+  assertProviderWireSafe(body, 'anthropic');
 
   return body;
 }
@@ -488,12 +642,111 @@ type AssistantBlock =
 interface CurrentBlock {
   blockType: 'text' | 'thinking' | 'tool_use' | 'server_tool_use';
   text?: string;
+  textSanitizer?: AssistantTextSanitizer;
   thinking?: string;
   signature?: string;
   data?: string;
   toolId?: string;
   toolName?: string;
   toolArgs?: string;
+}
+
+/**
+ * Remove the provider's bare phase markers from assistant text without treating
+ * ordinary HTML as markup to discard.
+ *
+ * The zaohua personal-9 regression delivered `<phase>...</phase>` in text
+ * blocks. Anthropic may split a marker at any SSE boundary, so this scanner
+ * keeps an incomplete `<...` candidate between calls. Only `phase` and a
+ * numeric suffix (`phase2`, `phase10`, ...) are control markers; names such as
+ * `phase_name`, `phaser`, and ordinary HTML remain visible.
+ */
+export interface AssistantTextSanitizer {
+  push(text: string): string;
+  finish(): string;
+}
+
+const PHASE_OPEN_RE = /^<\s*phase\d*\s*>$/i;
+const PHASE_CLOSE_RE = /^<\s*\/\s*phase\d*\s*>$/i;
+
+function isPhaseOpenTag(token: string): boolean {
+  return PHASE_OPEN_RE.test(token);
+}
+
+function isPhaseCloseTag(token: string): boolean {
+  return PHASE_CLOSE_RE.test(token);
+}
+
+/** Create a stateful sanitizer for one assistant text block. */
+export function createAssistantTextSanitizer(): AssistantTextSanitizer {
+  let mode: 'visible' | 'phase' = 'visible';
+  let pending = '';
+
+  const scan = (text: string, final: boolean): string => {
+    let source = pending + text;
+    pending = '';
+    let out = '';
+
+    while (source.length > 0) {
+      if (mode === 'phase') {
+        // Everything inside a phase marker is provider control text. Keep only
+        // a possible partial closing tag so a split `</phase>` is recognized.
+        const lt = source.indexOf('<');
+        if (lt < 0) return out;
+        source = source.slice(lt);
+        const gt = source.indexOf('>');
+        if (gt < 0) {
+          if (!final) pending = source;
+          return out;
+        }
+        const token = source.slice(0, gt + 1);
+        source = source.slice(gt + 1);
+        if (isPhaseCloseTag(token)) mode = 'visible';
+        continue;
+      }
+
+      const lt = source.indexOf('<');
+      if (lt < 0) {
+        out += source;
+        return out;
+      }
+      out += source.slice(0, lt);
+      source = source.slice(lt);
+      const gt = source.indexOf('>');
+      if (gt < 0) {
+        if (!final) pending = source;
+        else out += source;
+        return out;
+      }
+      const token = source.slice(0, gt + 1);
+      source = source.slice(gt + 1);
+      if (isPhaseOpenTag(token)) {
+        mode = 'phase';
+      } else {
+        // Not a control marker: preserve the complete token verbatim. This is
+        // what keeps `<phase_name>` and ordinary HTML unchanged.
+        out += token;
+      }
+    }
+    return out;
+  };
+
+  return {
+    push(text: string): string {
+      return scan(text, false);
+    },
+    finish(): string {
+      // A visible, incomplete token is ordinary text until proven otherwise;
+      // an incomplete token while suppressing a phase body is discarded.
+      return scan('', true);
+    },
+  };
+}
+
+/** One-shot helper used by callers/tests that have an already assembled block. */
+export function sanitizeAssistantText(text: string): string {
+  const sanitizer = createAssistantTextSanitizer();
+  return sanitizer.push(text) + sanitizer.finish();
 }
 
 function rawUsageToPartial(raw: Record<string, unknown> | undefined): Partial<Usage> {
@@ -540,7 +793,7 @@ function normalizeStopReason(raw: unknown): StopReason {
  */
 export async function* normalizeAnthropicStream(
   frames: AsyncIterable<{ event?: string; data: string }>,
-  opts?: { requestId?: string; signal?: AbortSignal },
+  opts?: { requestId?: string; httpStatus?: number; signal?: AbortSignal },
 ): AsyncGenerator<ProviderStreamEvent> {
   let usage: Usage = { ...EMPTY_USAGE };
   let stopReason: StopReason = null;
@@ -595,7 +848,9 @@ export async function* normalizeAnthropicStream(
           };
           yield { type: 'content_block_start', index, blockType: 'thinking' };
         } else {
-          current = { blockType: 'text', text: typeof block?.text === 'string' ? block.text : '' };
+          const textSanitizer = createAssistantTextSanitizer();
+          const initialText = typeof block?.text === 'string' ? textSanitizer.push(block.text) : '';
+          current = { blockType: 'text', text: initialText, textSanitizer };
           yield { type: 'content_block_start', index, blockType: 'text' };
         }
         break;
@@ -607,7 +862,13 @@ export async function* normalizeAnthropicStream(
         if (!delta) break;
         if (firstTokenAt === undefined) firstTokenAt = Date.now();
         if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-          if (current?.blockType === 'text') current.text = (current.text ?? '') + delta.text;
+          if (current?.blockType === 'text') {
+            const cleanText = current.textSanitizer?.push(delta.text) ?? delta.text;
+            current.text = (current.text ?? '') + cleanText;
+            // The kernel facade maps this provider delta directly to the
+            // assistant `message.delta` stream consumed by the UI.
+            delta.text = cleanText;
+          }
         } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
           if (current?.blockType === 'thinking')
             current.thinking = (current.thinking ?? '') + delta.thinking;
@@ -635,7 +896,7 @@ export async function* normalizeAnthropicStream(
             finished = {
               type: 'tool_use',
               id: current.toolId ?? '_tool',
-              name: current.toolName ?? 'unknown_tool',
+              name: current.toolName ?? 'unnamed_tool',
               input,
             };
           } else if (current.blockType === 'thinking') {
@@ -648,8 +909,17 @@ export async function* normalizeAnthropicStream(
                 ...(current.signature ? { signature: current.signature } : {}),
               };
             }
-          } else if (current.blockType === 'text' && current.text) {
-            finished = { type: 'text', text: current.text };
+          } else if (current.blockType === 'text') {
+            const trailing = current.textSanitizer?.finish() ?? '';
+            if (trailing) {
+              // A visible incomplete token is held until the block boundary so
+              // it can be classified with the next delta. Flush it as a final
+              // live delta before the stop event, keeping streamed and
+              // aggregated assistant bytes identical.
+              current.text = (current.text ?? '') + trailing;
+              yield { type: 'content_block_delta', index, delta: { type: 'text_delta', text: trailing } };
+            }
+            if (current.text) finished = { type: 'text', text: current.text };
           }
         }
         if (finished) blocks.push(finished);
@@ -675,6 +945,7 @@ export async function* normalizeAnthropicStream(
           usage,
           stopReason,
           ...(opts?.requestId ? { requestId: opts.requestId } : {}),
+          ...(opts?.httpStatus !== undefined ? { httpStatus: opts.httpStatus } : {}),
         };
         break;
       }
@@ -726,6 +997,7 @@ export const createAnthropicProvider: ProviderFactory = (
 
   return {
     api: 'anthropic-messages',
+    endpointOrigin: new URL(url).origin,
     async *stream(
       req: ProviderRequest,
       callOpts: ProviderCallOpts,
@@ -744,6 +1016,7 @@ export const createAnthropicProvider: ProviderFactory = (
       const requestId = res.headers.get('request-id') ?? res.headers.get('x-request-id') ?? undefined;
       yield* normalizeAnthropicStream(parseSSE(res.body, providerStreamIdleMs(), callOpts.signal), {
         requestId,
+        httpStatus: res.status,
         signal: callOpts.signal,
       });
     },
