@@ -222,6 +222,49 @@ describe('openai-compat: request body', () => {
     expect(toolMsg).toEqual({ role: 'tool', tool_call_id: 'tc_1', content: 'result text' });
   });
 
+  test('tool-only and reasoning-only assistant history never invents visible content', () => {
+    const call = { type: 'tool_use', id: 'tc-empty', name: 'read_file', input: { path: 'SKILL.md' } };
+    for (const content of [
+      [call],
+      [{ type: 'thinking', thinking: 'private reasoning' }, call],
+      [{ type: 'redacted_thinking', data: 'opaque' }, call],
+      [{ type: 'text', text: '' }, call],
+    ]) {
+      const wire = messagesToOpenAI([{ role: 'assistant', content }], []) as Array<Record<string, unknown>>;
+      expect(wire[0].content).toBeUndefined();
+      expect(wire[0].tool_calls).toHaveLength(1);
+      expect(JSON.stringify(wire)).not.toContain('content unavailable');
+      expect(JSON.stringify(wire)).not.toContain('private reasoning');
+    }
+    for (const content of ['', [], null, [{ type: 'thinking', thinking: 'private' }]]) {
+      expect(messagesToOpenAI([{ role: 'assistant', content }], [])).toEqual([]);
+    }
+  });
+
+  test('thinking does not prefix visible prose and unsupported media stays explicit', () => {
+    const messages = messagesToOpenAI([{ role: 'assistant', content: [
+      { type: 'thinking', thinking: 'private' }, { type: 'text', text: 'Visible reply' },
+    ] }], []) as Array<Record<string, unknown>>;
+    expect(messages[0].content).toBe('Visible reply');
+    const unsupported = messagesToOpenAI([{ role: 'user', content: [{ type: 'video' }] }], []);
+    expect(JSON.stringify(unsupported)).toContain('content unavailable');
+  });
+
+  test('DeepSeek follow-up preserves tool pairing without synthetic assistant prose', () => {
+    const body = buildDeepSeekRequestBody({ ...BASE_REQ, model: 'deepseek-v4-flash', messages: [
+      { role: 'assistant', content: [
+        { type: 'thinking', thinking: 'private' },
+        { type: 'tool_use', id: 'tc-followup', name: 'read_file', input: {} },
+      ] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tc-followup', content: 'file contents' }] },
+    ] });
+    const wire = body.messages as Array<Record<string, unknown>>;
+    const assistant = wire.find(m => m.role === 'assistant')!;
+    expect(assistant.content).toBeUndefined();
+    expect(wire.find(m => m.role === 'tool')).toMatchObject({ tool_call_id: 'tc-followup', content: 'file contents' });
+    expect(JSON.stringify(body)).not.toContain('content unavailable');
+  });
+
   test('openAIUsageToPartial reads deepseek top-level cache hit', () => {
     expect(openAIUsageToPartial({ prompt_tokens: 10, completion_tokens: 5, prompt_cache_hit_tokens: 7 })).toEqual({
       inputTokens: 3,

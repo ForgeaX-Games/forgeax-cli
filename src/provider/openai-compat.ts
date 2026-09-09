@@ -111,7 +111,8 @@ function openAIBlockToPart(raw: unknown): unknown | undefined {
     return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
   }
   if (raw.type === 'video') return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
-  if (raw.type === 'thinking' || raw.type === 'redacted_thinking') return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
+  // Reasoning is not visible content. Never replay it as a media-error marker.
+  if (raw.type === 'thinking' || raw.type === 'redacted_thinking') return undefined;
   if (raw.type === 'input_text' && typeof raw.text === 'string') return { type: 'text', text: raw.text };
   return { type: 'text', text: OPENAI_MEDIA_UNAVAILABLE };
 }
@@ -157,13 +158,18 @@ function extractToolCalls(content: unknown): unknown[] | undefined {
 
 /** assistant content 去掉 tool_use 后的可见内容（OpenAI 把 tool_call 拆到 tool_calls 字段）。 */
 function assistantVisibleContent(content: unknown): unknown {
+  if (content == null || content === '') return '';
   const blocks = contentBlocks(content);
   if (!blocks) return neutralContentToOpenAI(content);
   const visible = blocks.filter((raw) => {
-    if (!raw || typeof raw !== 'object') return false;
-    return (raw as Record<string, unknown>).type !== 'tool_use';
+    if (typeof raw === 'string') return raw.length > 0;
+    if (!isHistoryRecord(raw)) return false;
+    return raw.type !== 'tool_use' && raw.type !== 'thinking' && raw.type !== 'redacted_thinking'
+      && !(raw.type === 'text' && raw.text === '');
   });
-  return neutralContentToOpenAI(visible);
+  // Tool-only assistant turns are valid: tool_calls carries their content.
+  // Do not turn an intentionally empty visible part into a fabricated utterance.
+  return visible.length === 0 ? '' : neutralContentToOpenAI(visible);
 }
 
 /**
