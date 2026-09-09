@@ -3,7 +3,7 @@
  *
  * 压缩管线第一层:对**待压缩范围**无条件做确定性瘦身,不花 token、不联网:
  *   - **剥图片/多媒体**(#4):image/audio/video/binary block → 占位文字 block。
- *   - **omit tool 结果**(#4):tool_result block 的 content / `role:'tool'` 消息 content → 占位。
+ *   - **tool 结果**(#4):默认占位;摘要管线可指定有界文本摘录预算。
  *   - **omit 大参数**(#4):tool_use 的 input 大字段(content/code/widget_code…)→ `<omitted>`。
  *   - **保护区**:最近 keepRecent 条消息整条不动(默认 0 —— 管线已在外层切走保留尾)。
  * 然后 `estimateTokens` + `isSufficient` 给管线判 sufficiency 短路(#12):L1 后若已够小,跳过 LLM。
@@ -108,6 +108,8 @@ export function isSufficient(estimatedTokens: number, effectiveWindow: number, r
 export interface DeterministicCompactOptions {
   /** 保护最近 N 条消息整条不剥(默认 0)。 */
   keepRecent?: number;
+  /** Bounded textual evidence for summary input; omitted keeps legacy stripping. */
+  toolResultBudgetChars?: number;
   /** 仅剥这些工具名的 tool_result(omit/空 = 全部)。 */
   compactableToolNames?: readonly string[];
   /** 额外 omit 的大参数字段(并入默认集)。 */
@@ -135,7 +137,40 @@ export function deterministicCompact<M>(
       : null;
   const largeFields = new Set<string>([...DEFAULT_LARGE_ARG_FIELDS, ...(options.largeArgFields ?? [])]);
 
+  let remaining = Number.isFinite(options.toolResultBudgetChars) ? Math.max(0, options.toolResultBudgetChars!) : 0;
+  const excerpt = (value: unknown): string => {
+    if (remaining < 80) return OMIT_TOOL_RESULT;
+    // Keep only text: never stringify embedded images or binary payloads.
+    const text = typeof value === 'string' ? value : Array.isArray(value)
+      ? value.filter((b) => asRecord(b)?.type === 'text').map((b) => String(asRecord(b)?.text ?? '')).join('\n')
+      : '';
+    if (!text || text === OMIT_TOOL_RESULT) return OMIT_TOOL_RESULT;
+    const limit = Math.min(1600, remaining);
+    const marker = '\n[excerpt truncated]\n';
+    const head = Math.floor((limit - marker.length) * 0.7);
+    const result = text.length <= limit ? text : text.slice(0, head) + marker + text.slice(-(limit - marker.length - head));
+    remaining -= result.length;
+    return result;
+  };
   const protectFrom = messages.length - keepRecent; // 此下标(含)之后受保护
+  // Allocate the shared budget to failures first, then newest observations.
+  // Mapping separately preserves original message order and tool pairing.
+  const results: Record<string, unknown>[] = [];
+  for (const msg of messages.slice(0, Math.max(0, protectFrom))) {
+    const rec = asRecord(msg);
+    if (!rec) continue;
+    if (rec.role === 'tool') {
+      if (!allowed || allowed.has(strOrUndef(rec.toolName) ?? '')) results.push(rec);
+    } else if (Array.isArray(rec.content)) {
+      for (const block of rec.content) {
+        const b = asRecord(block);
+        if (b?.type === 'tool_result' && (!allowed || allowed.has(strOrUndef(b.name) ?? ''))) results.push(b);
+      }
+    }
+  }
+  const excerpts = new Map<Record<string, unknown>, string>();
+  results.reverse().sort((a, b) => Number(b.is_error === true) - Number(a.is_error === true));
+  for (const result of results) excerpts.set(result, excerpt(result.content));
   let stripped = 0;
 
   const out = messages.map((msg, i) => {
@@ -148,7 +183,7 @@ export function deterministicCompact<M>(
       if (rec.content === OMIT_TOOL_RESULT) return msg;
       if (allowed && !allowed.has(strOrUndef(rec.toolName) ?? '')) return msg;
       stripped++;
-      return { ...rec, content: OMIT_TOOL_RESULT } as unknown as M;
+      return { ...rec, content: excerpts.get(rec) ?? OMIT_TOOL_RESULT } as unknown as M;
     }
 
     if (!Array.isArray(rec.content)) return msg;
@@ -171,7 +206,7 @@ export function deterministicCompact<M>(
         if (b.content === OMIT_TOOL_RESULT) return block;
         if (allowed && !allowed.has(strOrUndef(b.name) ?? '')) return block;
         touched = true;
-        return { ...b, content: OMIT_TOOL_RESULT };
+        return { ...b, content: excerpts.get(b) ?? OMIT_TOOL_RESULT };
       }
       if (b.type === 'tool_use') {
         const input = asRecord(b.input);

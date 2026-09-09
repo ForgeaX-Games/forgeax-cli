@@ -1,3 +1,4 @@
+import { inclusiveInputUsage, tokenCounter } from './inclusive-usage';
 /**
  * OpenAI Responses API provider (C4) — POST `${baseUrl}/responses`，SSE 流式，api='openai-responses'。
  *
@@ -25,7 +26,6 @@ import { canonicalizeBoundaryContent, isRecord as isHistoryRecord } from '../cap
 import { assertProviderWireSafe } from './wire-validator';
 import {
   EMPTY_USAGE,
-  mergeUsage,
   type LLMProvider,
   type ProviderCallOpts,
   type ProviderFactory,
@@ -261,13 +261,9 @@ export function buildResponsesRequestBody(req: ProviderRequest): Record<string, 
 
 export function responsesUsageToPartial(raw: Record<string, unknown> | undefined): Partial<Usage> {
   if (!raw) return {};
-  const out: Partial<Usage> = {};
-  if (typeof raw.input_tokens === 'number') out.inputTokens = raw.input_tokens;
-  if (typeof raw.output_tokens === 'number') out.outputTokens = raw.output_tokens;
-  const details = raw.input_tokens_details as Record<string, unknown> | undefined;
-  if (details && typeof details.cached_tokens === 'number') {
-    out.cacheReadInputTokens = details.cached_tokens;
-  }
+  const out = inclusiveInputUsage(raw.input_tokens, (raw.input_tokens_details as Record<string, unknown> | undefined)?.cached_tokens);
+  const output = tokenCounter(raw.output_tokens);
+  if (output !== undefined) out.outputTokens = output;
   return out;
 }
 
@@ -479,7 +475,7 @@ export async function* normalizeResponsesStream(
     if (type === 'response.completed') {
       const r = (parsed.response ?? {}) as Record<string, unknown>;
       const rawUsage = r.usage as Record<string, unknown> | undefined;
-      if (rawUsage) usage = mergeUsage(usage, responsesUsageToPartial(rawUsage));
+      if (rawUsage) usage = { ...usage, ...responsesUsageToPartial(rawUsage) };
       yield* closeText();
       yield* closeThinking();
       // 收口未显式 .done 的 tool call（防御）。

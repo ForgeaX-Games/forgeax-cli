@@ -113,6 +113,7 @@ export interface SubagentSpec {
    *  子 agent 用**自己独立**的 CoreAgent 实例 → gateState/熔断/冷却天然隔离,不影响父。 */
   compactionV2?: CompactionV2Options;
   contextWindow?: number;
+  contextWindowForModel?: (model: string) => number | undefined;
   /** 子 loop 的 token 预算(由父预算切片而来;详见 splitBudget)。 */
   taskBudget?: { total: number };
   /**
@@ -238,6 +239,7 @@ export async function runSubagent(spec: SubagentSpec, deps: SubagentDeps): Promi
     compaction: spec.compaction,
     compactionV2: spec.compactionV2,
     contextWindow: spec.contextWindow,
+    contextWindowForModel: spec.contextWindowForModel,
     rules: deps.rules,
     mode: deps.mode,
     // T6:resume seed —— 上一次子 loop 的历史(由 resumeSubagent 从 eventStore fold 得),
@@ -441,6 +443,7 @@ export interface TaskToolDeps {
   /** ★ subagent 自压缩 V2(透传给每个子 loop;各子实例 gateState 独立)。 */
   compactionV2?: CompactionV2Options;
   contextWindow?: number;
+  contextWindowForModel?: (model: string) => number | undefined;
   maxTurns?: number;
   /**
    * 可选:subagent 类型注册表(S1)。提供后:
@@ -645,6 +648,7 @@ export function makeTaskTool(deps: TaskToolDeps): AgentTool<TaskInput, SubagentR
         compaction: deps.compaction,
         compactionV2: deps.compactionV2,
         contextWindow: deps.contextWindow,
+        contextWindowForModel: deps.contextWindowForModel,
         taskBudget: childBudget,
         // 010:单次 input.schema 优先,否则退回 deps.schema 缺省;两者皆无 ⇒ 不挂 StructuredOutput。
         schema: input.schema ?? deps.schema,

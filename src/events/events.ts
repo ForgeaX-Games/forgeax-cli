@@ -132,12 +132,15 @@ export interface CoreEventPayloads {
    *  可用。旧 WAL 无此字段 → rehydrate 走 ordinal fallback)。 */
   [CoreEventType.UserPromptSubmit]: { prompt: string; turn: number; msgId?: string };
   /** 压缩前：触发方式(auto/manual) + 当前 token 数。 */
-  [CoreEventType.PreCompact]: { trigger?: 'auto' | 'manual'; tokenCount?: number };
+  [CoreEventType.PreCompact]: { trigger?: 'auto' | 'manual'; tokenCount?: number; type?: string; threshold?: number; forced?: boolean };
   /** Post-compaction covered range plus optional rehydration outcome counts. */
   [CoreEventType.PostCompact]: {
     coveredFrom: number;
     coveredTo: number;
     usedLLM?: boolean;
+    preTokens?: number;
+    postTokens?: number;
+    tokenBasis?: 'estimate';
     rehydrate?: {
       requested: number;
       attempted: number;

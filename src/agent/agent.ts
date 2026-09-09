@@ -165,6 +165,8 @@ export interface CoreAgentOptions {
   compactionV2?: CompactionV2Options;
   /** 上下文窗口 token 数(算水位用),默认 200k。 */
   contextWindow?: number;
+  /** Explicit host capacities, resolved for the model active at each gate. */
+  contextWindowForModel?: (model: string) => number | undefined;
   /** stage4 流式重试/fallback 配置。 */
   retry?: StreamRetryConfig;
   /** auto-memory:开箱即自动召回 + 自动抽取。 */
@@ -672,7 +674,11 @@ export class CoreAgent implements Agent {
   /** Compaction V2 水位(比例 + per-model)。 */
   private v2Watermarks() {
     const v2 = this.o.compactionV2!;
-    const modelInfo = v2.modelInfo ?? lookupModelContext(this.o.context.config.model);
+    const baseInfo = v2.modelInfo ?? lookupModelContext(this.currentModel);
+    const configuredWindow = this.o.contextWindowForModel?.(this.currentModel);
+    const modelInfo = configuredWindow === undefined
+      ? baseInfo
+      : { ...baseInfo, contextWindow: configuredWindow };
     return computeWatermarksFromModel(modelInfo, v2.watermarkConfig);
   }
 
@@ -731,7 +737,7 @@ export class CoreAgent implements Agent {
 
     // PreCompact(可阻断):hook 回执 blocked===true → 跳过本次压缩(E-I5)。
     const pre = this.bus.publish(
-      this.ev(CoreEventType.PreCompact, { trigger: compactTrigger(type), tokenCount, type }),
+      this.ev(CoreEventType.PreCompact, { trigger: compactTrigger(type), tokenCount, type, threshold: triggerThresholdFor(type, marks), forced: force }),
     ) as CoreEvent & { blocked?: boolean };
     if (pre.blocked === true) {
       this.bus.publish(
@@ -767,12 +773,12 @@ export class CoreAgent implements Agent {
           replacement: result.replacement,
           keepCount: Math.max(0, messages.length - result.coveredTo - 1),
           // ★ T5:压缩前后 token + 触发原因(观测,fold 不读)。postTokens 用
-          //   「前 − 覆盖区 + replacement」估算,免 splice 依赖 → 发布时机不变(零回归)。
+          //   replacement + 未覆盖消息统一估算,不将 provider usage 与字符估算相减。
           preTokens: tokenCount,
-          postTokens:
-            tokenCount -
-            estimateTokens(messages.slice(result.coveredFrom, result.coveredTo + 1)) +
-            estimateTokens([result.replacement]),
+          postTokens: estimateTokens([
+            ...messages.slice(0, result.coveredFrom), result.replacement,
+            ...messages.slice(result.coveredTo + 1),
+          ]),
           trigger: compactTrigger(type),
         }),
       );
@@ -803,6 +809,9 @@ export class CoreAgent implements Agent {
           coveredTo: result.coveredTo,
           usedLLM: result.usedLLM,
           ...(rehydrateOutcomes ? { rehydrate: rehydrateOutcomes } : {}),
+          preTokens: tokenCount,
+          postTokens: estimateTokens(messages),
+          tokenBasis: 'estimate',
         }),
       );
       this.gateState = markCompactSuccess(this.gateState, now);
@@ -1017,7 +1026,7 @@ export class CoreAgent implements Agent {
     let lastPromptTokens = 0;
     const ctxRatio = (): number | undefined => {
       if (lastPromptTokens <= 0) return undefined;
-      const cw = this.o.contextWindow ?? lookupModelContext(this.currentModel).contextWindow ?? 200_000;
+      const cw = this.o.contextWindowForModel?.(this.currentModel) ?? this.o.contextWindow ?? lookupModelContext(this.currentModel).contextWindow ?? 200_000;
       return cw > 0 ? Math.min(1, lastPromptTokens / cw) : undefined;
     };
     // ─── token 预算(taskBudget):累计本 run 已花 token(output 增量累加)。
@@ -1100,7 +1109,9 @@ export class CoreAgent implements Agent {
         // does not include steering/inbox/tool results appended since then.
         const tokenCount = Math.max(lastPromptTokens, estimateTokens(messages));
         try {
-          await this.runCompactionV2(messages, CompactType.PRE_MESSAGE_AUTO, turn, signal, tokenCount);
+          if (await this.runCompactionV2(messages, CompactType.PRE_MESSAGE_AUTO, turn, signal, tokenCount) === 'compacted') {
+            lastPromptTokens = 0; // Usage described the replaced history.
+          }
         } catch (e) {
           if (signal.aborted) {
             yield { type: 'turn_aborted', turn };
@@ -1160,7 +1171,9 @@ export class CoreAgent implements Agent {
         const marks = this.v2Watermarks();
         const tokenCount = Math.max(lastPromptTokens, estimateTokens(messages));
         try {
-          await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, signal, tokenCount);
+          if (await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, signal, tokenCount) === 'compacted') {
+            lastPromptTokens = 0; // Usage described the replaced history.
+          }
         } catch (e) {
           if (signal.aborted) {
             yield { type: 'turn_aborted', turn };
@@ -1180,7 +1193,7 @@ export class CoreAgent implements Agent {
           }
         }
       } else if (this.o.compaction) {
-        const marks = computeWatermarks(this.o.contextWindow ?? 200_000);
+        const marks = computeWatermarks(this.o.contextWindowForModel?.(this.currentModel) ?? this.o.contextWindow ?? 200_000);
         // 上轮真实 usage 与当前完整消息估算取大，防止本轮新增内容被旧 usage 掩盖。
         const tokenCount = Math.max(lastPromptTokens, estimateTokens(messages));
         if (this.o.compaction.shouldCompact(tokenCount, marks)) {
@@ -1196,6 +1209,7 @@ export class CoreAgent implements Agent {
             }));
             const count = Math.max(0, coveredTo - coveredFrom + 1);
             messages.splice(coveredFrom, count, replacement as ProviderMessage);
+            lastPromptTokens = 0;
             // ★ PostCompact hook:应用压缩后发(被覆盖的消息区间)。
             this.bus.publish(this.ev(CoreEventType.PostCompact, { coveredFrom, coveredTo }));
           } catch (e) {
@@ -1426,6 +1440,7 @@ export class CoreAgent implements Agent {
               ? (await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, signal, undefined, true)) === 'compacted'
               : await this.reactiveCompactOnce(messages, turn, signal);
             if (compacted) {
+              lastPromptTokens = 0;
               turn--; // 重试同一 turn(for-loop ++ 抵消);maxTurns 仍兜底
               continue;
             }
@@ -1464,6 +1479,7 @@ export class CoreAgent implements Agent {
               ? (await this.runCompactionV2(messages, CompactType.EMERGENCY_AUTO, turn, signal, undefined, true)) === 'compacted'
               : await this.reactiveCompactOnce(messages, turn, signal);
             if (compacted) {
+              lastPromptTokens = 0;
               turn--;
               continue;
             }

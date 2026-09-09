@@ -1,3 +1,4 @@
+import { inclusiveInputUsage, tokenCounter } from './inclusive-usage';
 /**
  * Google Gemini provider (C4) — generateContent (streamGenerateContent)，api='gemini'。
  *
@@ -25,7 +26,6 @@ import { canonicalizeBoundaryContent, isRecord as isHistoryRecord } from '../cap
 import { assertProviderWireSafe } from './wire-validator';
 import {
   EMPTY_USAGE,
-  mergeUsage,
   type LLMProvider,
   type ProviderCallOpts,
   type ProviderFactory,
@@ -223,17 +223,10 @@ export function buildGeminiRequestBody(req: ProviderRequest): Record<string, unk
 /** Gemini usageMetadata → C4 Usage（output = candidates + thoughts，cacheRead = cachedContent）。 */
 export function geminiUsageToPartial(raw: Record<string, unknown> | undefined): Partial<Usage> {
   if (!raw) return {};
-  const out: Partial<Usage> = {};
-  const prompt = typeof raw.promptTokenCount === 'number' ? raw.promptTokenCount : undefined;
-  if (prompt !== undefined) out.inputTokens = prompt;
-  const candidates = typeof raw.candidatesTokenCount === 'number' ? raw.candidatesTokenCount : 0;
-  const thoughts = typeof raw.thoughtsTokenCount === 'number' ? raw.thoughtsTokenCount : 0;
-  if (typeof raw.candidatesTokenCount === 'number' || typeof raw.thoughtsTokenCount === 'number') {
-    out.outputTokens = candidates + thoughts;
-  }
-  if (typeof raw.cachedContentTokenCount === 'number') {
-    out.cacheReadInputTokens = raw.cachedContentTokenCount;
-  }
+  const out = inclusiveInputUsage(raw.promptTokenCount, raw.cachedContentTokenCount);
+  const candidates = tokenCounter(raw.candidatesTokenCount);
+  const thoughts = tokenCounter(raw.thoughtsTokenCount);
+  if (candidates !== undefined || thoughts !== undefined) out.outputTokens = (candidates ?? 0) + (thoughts ?? 0);
   return out;
 }
 
@@ -379,7 +372,7 @@ export async function* normalizeGeminiStream(
     }
 
     const meta = parsed.usageMetadata as Record<string, unknown> | undefined;
-    if (meta) usage = mergeUsage(usage, geminiUsageToPartial(meta));
+    if (meta) usage = { ...usage, ...geminiUsageToPartial(meta) };
 
     if (candidate?.finishReason != null) {
       stopReason = normalizeFinishReason(candidate.finishReason);

@@ -4,7 +4,8 @@
  * 见 docs/features/compaction-overhaul-verification.md §子agent。
  */
 import { describe, test, expect, mock } from 'bun:test';
-import { runSubagent } from '../src/agent/subagent';
+import { runSubagent, makeTaskTool } from '../src/agent/subagent';
+import { SubagentRegistry } from '../src/agent/subagent-registry';
 import { CoreAgent, type CompactionV2Options } from '../src/agent/agent';
 import { EventBus } from '../src/events/event-bus';
 import { CoreEventType } from '../src/events/events';
@@ -25,6 +26,24 @@ function v2(summarize: CompactionV2Options['summarize'], over: Partial<Compactio
 }
 
 describe('子 agent 压缩一致性', () => {
+  test('registry child resolves its own configured window instead of inheriting the parent capacity', async () => {
+    const registry = new SubagentRegistry();
+    registry.register({ name: 'worker', description: 'worker', systemPrompt: 'work', model: 'child-model' });
+    const seen: string[] = [];
+    const summarize = mock(async () => '<summary>child</summary>');
+    const task = makeTaskTool({
+      provider: oneTurn, model: 'parent-model', registry, allTools: [],
+      compactionV2: { summarize },
+      contextWindow: 512000,
+      contextWindowForModel: (model) => { seen.push(model); return model === 'child-model' ? 64000 : 512000; },
+    });
+    const result = await task.call({ prompt: bigText(50000), subagent_type: 'worker' }, { signal: new AbortController().signal });
+    expect(result.data.terminalReason).toBe('completed');
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((model) => model === 'child-model')).toBe(true);
+    expect(summarize.mock.calls.length).toBeGreaterThan(0);
+  });
+
   test('子上下文越线 → 子自压缩(走同一管线,summarize 被调)', async () => {
     const summarize = mock(async () => '<summary>child</summary>');
     const r = await runSubagent(

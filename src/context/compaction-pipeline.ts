@@ -272,7 +272,7 @@ export function renderDeterministicSummary(messages: readonly ProviderMessage[])
     if (!text.trim()) continue;
     if (role === 'user') lines.push(`<previous_user_message>\n${text}\n</previous_user_message>`);
     else if (role === 'assistant') lines.push(`<previous_assistant_message>\n${text}\n</previous_assistant_message>`);
-    else lines.push(text);
+    else lines.push(role === 'tool' ? `[tool_result id=${String(rec.tool_call_id ?? '')} is_error=${rec.is_error === true}: ${text}]` : text);
   }
   return lines.join('\n');
 }
@@ -285,7 +285,7 @@ function renderBlocks(content: unknown): string {
     if (!b || typeof b !== 'object') continue;
     if (b.type === 'text' && typeof b.text === 'string') out.push(b.text);
     else if (b.type === 'tool_use') out.push(`[tool_call ${String(b.name ?? 'unknown')} ${jsonish(b.input)}]`);
-    else if (b.type === 'tool_result') out.push(`[tool_result: ${truncate(String((b as any).content ?? ''), 200)}]`);
+    else if (b.type === 'tool_result') out.push(`[tool_result id=${String(b.tool_use_id ?? '')} is_error=${b.is_error === true}: ${String(b.content ?? '')}]`);
   }
   return out.join('\n');
 }
@@ -687,7 +687,7 @@ export async function runCompaction(input: CompactPipelineInput): Promise<Compac
   if (prefix.length === 0) throw new Error('Not enough messages to compact.');
 
   // L1 确定性瘦身
-  const l1 = deterministicCompact(prefix);
+  const l1 = deterministicCompact(prefix, { toolResultBudgetChars: 24_000 });
   const coveredTo = upTo - 1;
 
   // sufficiency 短路 → 确定性骨架,不调 LLM

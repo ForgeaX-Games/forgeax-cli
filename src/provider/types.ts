@@ -65,6 +65,7 @@ export interface ProviderRequest {
 // ─── 用量（累计语义）──────────────────
 
 export interface Usage {
+  /** Uncached input; total prompt = input + cache creation + cache read. */
   inputTokens: number;
   outputTokens: number;
   cacheCreationInputTokens: number;

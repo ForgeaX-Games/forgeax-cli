@@ -1,3 +1,4 @@
+import { inclusiveInputUsage, tokenCounter } from './inclusive-usage';
 /**
  * OpenAI Chat Completions 兼容 provider (C4) — 原生 fetch + SSE 流式。
  *
@@ -19,7 +20,6 @@ import { canonicalizeBoundaryContent, isRecord as isHistoryRecord } from '../cap
 import { assertProviderWireSafe } from './wire-validator';
 import {
   EMPTY_USAGE,
-  mergeUsage,
   type LLMProvider,
   type ProviderCallOpts,
   type ProviderFactory,
@@ -287,16 +287,9 @@ export function buildOpenAIRequestBody(
 /** OpenAI usage → C4 Usage 部分形（prompt→input、completion→output、cached→cacheRead）。 */
 export function openAIUsageToPartial(raw: Record<string, unknown> | undefined): Partial<Usage> {
   if (!raw) return {};
-  const out: Partial<Usage> = {};
-  if (typeof raw.prompt_tokens === 'number') out.inputTokens = raw.prompt_tokens;
-  if (typeof raw.completion_tokens === 'number') out.outputTokens = raw.completion_tokens;
-  const details = raw.prompt_tokens_details as Record<string, unknown> | undefined;
-  if (details && typeof details.cached_tokens === 'number') {
-    out.cacheReadInputTokens = details.cached_tokens;
-  } else if (typeof raw.prompt_cache_hit_tokens === 'number') {
-    // DeepSeek 顶层字段
-    out.cacheReadInputTokens = raw.prompt_cache_hit_tokens;
-  }
+  const out = inclusiveInputUsage(raw.prompt_tokens, (raw.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens ?? raw.prompt_cache_hit_tokens);
+  const output = tokenCounter(raw.completion_tokens);
+  if (output !== undefined) out.outputTokens = output;
   return out;
 }
 
@@ -419,7 +412,7 @@ export async function* normalizeOpenAIStream(
     // usage 可独立于 choices 出现（OpenAI 尾 chunk choices:[] / DeepSeek 搭末 delta）。
     if (parsed.usage && typeof parsed.usage === 'object') {
       const partial = openAIUsageToPartial(parsed.usage as Record<string, unknown>);
-      usage = mergeUsage(usage, partial);
+      usage = { ...usage, ...partial };
     }
 
     const choice = (parsed.choices as Array<Record<string, unknown>> | undefined)?.[0];

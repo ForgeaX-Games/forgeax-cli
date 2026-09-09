@@ -25,6 +25,7 @@ import type {
   ForkExtractResult,
 } from '@forgeax/agent-runtime/contract';
 import { CoreAgent, DEFAULT_MAIN_MAX_TURNS } from '../agent/agent';
+import { QueuedEvents } from './queued-events';
 import { EventBus } from '../events/event-bus';
 import { CoreEventType } from '../events/events';
 import { runForkedAgent } from '../agent/forked-agent';
@@ -35,7 +36,7 @@ import type { LLMProvider, ProviderMessage, ProviderRequest, ProviderStreamEvent
 import { makeProviderCompactSummarize } from '../context/compaction-llm';
 import { makeRehydrateInjection } from '../context/post-compact-rehydrate';
 import { microCompact } from '../context/micro-compaction';
-import { contextWindowForModel } from '../context/model-window';
+import { configuredContextWindowForModel, contextWindowForModel } from '../context/model-window';
 import { DEFAULT_SUBAGENT_MAX_TURNS, makeTaskTool, runSubagent } from '../agent/subagent';
 import type { SubagentRegistry } from '../agent/subagent-registry';
 import { handoffTool } from '../capability/builtin-tools/message-tools';
@@ -454,7 +455,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
    */
   private readonly resumeCtx = new Map<
     string,
-    { model: string; tools: AgentTool[]; toolContext: Record<string, unknown> }
+    { model: string; tools: AgentTool[]; toolContext: Record<string, unknown>; modelContextWindows?: unknown }
   >();
 
   /**
@@ -630,7 +631,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
     //   逐轮 drain 即可保 start→turn→tool→done 顺序排在父 tool.result 之前。
     //   同一队列也承载 canonical compaction stored-events / api_retry —— 它们经内部 bus 订阅在 agent.run
     //   执行(两次 yield 之间)同步推入,与子事件走同一逐轮 drain,顺序天然对齐本轮进度。
-    const subQueue: KernelEvent[] = [];
+    const subQueue = new QueuedEvents<KernelEvent>();
     // ★ T5:本轮内部事件 bus —— 传给 CoreAgent(替代其自建 bus),订阅两个观测事件后转成
     //   KernelEvent 推进 subQueue。loop 其余事件对这两个订阅者是 no-op(按 type 过滤),零开销。
     const turnBus = new EventBus();
@@ -648,6 +649,26 @@ export class ForgeaxCoreKernel implements AgentKernel {
         ),
       );
     });
+    let compactCount = 0;
+    let compactStartedAt: number | undefined;
+    const compactId = req.callId ?? `${req.session.threadId}:${Date.now()}`;
+    const publishCompactStatus = (phase: 'started' | 'completed' | 'failed') => {
+      const now = Date.now();
+      if (phase === 'started') { compactCount++; compactStartedAt = now; }
+      // Failed emergency compactions may not have emitted a pre event.
+      if (compactCount === 0) compactCount = 1;
+      subQueue.push({ kind: 'stored-event', payload: {
+        type: 'compaction.status', ts: now,
+        payload: { id: compactId, phase, count: compactCount,
+          ...(phase !== 'started' && compactStartedAt !== undefined
+            ? { durationMs: Math.max(0, now - compactStartedAt) } : {}),
+        },
+      } });
+      if (phase !== 'started') compactStartedAt = undefined;
+    };
+    const unsubPreCompact = turnBus.subscribe(CoreEventType.PreCompact, () => publishCompactStatus('started'));
+    const unsubPostCompactStatus = turnBus.subscribe(CoreEventType.PostCompact, () => publishCompactStatus('completed'));
+    const unsubFailedCompact = turnBus.subscribe(CoreEventType.CompactionFailed, () => publishCompactStatus('failed'));
     const unsubRetry = turnBus.subscribe(CoreEventType.ApiRetry, (e) => {
       subQueue.push(apiRetryToKernel(e.payload as Parameters<typeof apiRetryToKernel>[0]));
     });
@@ -749,6 +770,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
       // CORE-CTX-005:大结果落盘钩子(HOST 层经 options 注入;缺省不落盘=旧行为)。
       ...(this.o.persistToolResult ? { persistToolResult: this.o.persistToolResult } : {}),
       contextWindow: contextWindowForModel(context.config.model),
+      contextWindowForModel: (activeModel) => configuredContextWindowForModel(activeModel, 'modelContextWindows' in req ? req.modelContextWindows : undefined),
       ...(this.o.thinking ? { thinking: this.o.thinking } : {}),
       // ★ peer 多 agent:解析出 sink 才接;缺省 → handoff_decision 维持 no-op(单 agent)。
       ...(handoffSink ? { handoff: handoffSink } : {}),
@@ -779,26 +801,16 @@ export class ForgeaxCoreKernel implements AgentKernel {
     });
 
     try {
-      for await (const ev of agent.run({
+      for await (const item of subQueue.interleave(agent.run({
         input: { type: 'user', payload: userPayload, ts: 0 },
         history: mapHistory(req.history),
         signal,
-      })) {
+      }))) {
+        if ('queued' in item) { yield item.queued; continue; }
+        const ev = item.native;
         const k = this.translate(ev, usage, streamed);
         if (k) yield k;
-        // ★ L5:逐轮 drain 子 agent 事件队列。子事件在父 Task 工具 await 期间同步推入
-        //   (即两次 agent.run yield 之间),逐轮 drain 保 start→turn→tool→done 顺序排在
-        //   父 tool.result 之前。
-        while (subQueue.length) {
-          const s = subQueue.shift();
-          if (s) yield s;
-        }
         if (ev.type === 'done') {
-          // 收尾前再 drain 一次,确保 done 阶段才推入的子事件不被漏掉。
-          while (subQueue.length) {
-            const s = subQueue.shift();
-            if (s) yield s;
-          }
           const mappedReason = mapReason(ev.terminal.reason);
           if (ev.terminal.error !== undefined) {
             const terminalError = ev.terminal.error;
@@ -823,11 +835,6 @@ export class ForgeaxCoreKernel implements AgentKernel {
           yield { kind: 'turn.done', reason: lastReason };
         }
       }
-      // ★ L5:loop 结束后兜底 drain,防最后一批子事件随循环退出被丢弃。
-      while (subQueue.length) {
-        const s = subQueue.shift();
-        if (s) yield s;
-      }
     } finally {
       // 007:轮终回读 agent 模式(ExitPlanMode 可能已在轮内恢复模式;不回读则下一轮
       //   仍按 plan 构造新 agent,退出形同虚设——既有失同步 bug,顺带修复)。
@@ -837,6 +844,9 @@ export class ForgeaxCoreKernel implements AgentKernel {
       unsubCompact();
       unsubCompactionFailed();
       unsubPostCompact();
+      unsubPreCompact();
+      unsubPostCompactStatus();
+      unsubFailedCompact();
       unsubRetry();
     }
     // 防御:run 未吐 done(异常路径)也保证 usage-before 缺失不发生。
@@ -895,7 +905,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
     //   缺省 undefined ⇒ makeTaskTool 不启用持久化,零回归。
     const subStore: ((agentId: string) => EventStore | undefined) | undefined = this.o.subagentStore
       ? (agentId: string) => {
-          this.resumeCtx.set(agentId, { model, tools: hostTools, toolContext });
+          this.resumeCtx.set(agentId, { model, tools: hostTools, toolContext, modelContextWindows: 'modelContextWindows' in req ? req.modelContextWindows : undefined });
           return this.o.subagentStore!(agentId);
         }
       : undefined;
@@ -913,6 +923,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
       // subagent 自压缩(V2)+ 压后重挂(D-01)。
       compactionV2: { summarize: makeProviderCompactSummarize(this.o.provider, model), rehydrate: makeRehydrateInjection(toolContext) },
       contextWindow: contextWindowForModel(model),
+      contextWindowForModel: (activeModel) => configuredContextWindowForModel(activeModel, 'modelContextWindows' in req ? req.modelContextWindows : undefined),
       maxTurns: req.budget.maxTurns ?? DEFAULT_SUBAGENT_MAX_TURNS,
       onSubagentEvent: (ev) => {
         const k = subEventToKernel(ev);
@@ -1023,6 +1034,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
           rehydrate: makeRehydrateInjection(toolContext),
         },
         contextWindow: contextWindowForModel(model),
+        contextWindowForModel: (activeModel) => configuredContextWindowForModel(activeModel, ctx?.modelContextWindows),
       },
       {
         provider: this.o.provider,

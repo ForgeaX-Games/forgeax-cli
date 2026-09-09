@@ -71,11 +71,18 @@ describe('CoreAgent.setModel — mid-turn(同一 run 内 provider 调用间切�
         for (const ev of scripts[Math.min(i, scripts.length - 1)]) yield ev;
       },
     };
-    agentRef = new CoreAgent({ context: ctx([noopTool], provider) });
+    const windowModels: string[] = [];
+    agentRef = new CoreAgent({
+      context: ctx([noopTool], provider),
+      compactionV2: { summarize: async () => 'unused' },
+      contextWindowForModel: (model) => { windowModels.push(model); return 512000; },
+    });
     await drain(agentRef, { input: { type: 'user', payload: 'go', ts: 0 } });
 
     // 初值 = context.config.model;切换后下一次请求即新模型(mid-turn live)。
     expect(seenModels).toEqual(['model-A', 'model-B']);
+    expect(windowModels).toContain('model-A');
+    expect(windowModels.at(-1)).toBe('model-B');
   });
 
   test('不调 setModel → 全程用初始模型(零行为变化回归)', async () => {

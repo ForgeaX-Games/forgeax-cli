@@ -501,3 +501,27 @@ describe('04.4 — compaction skipped/failed 事件(skip/失败不再静默)', (
     expect(skipped.length).toBe(0);
   });
 });
+
+test('successful precompact clears old usage before emergency gate and reports final rehydrated estimate', async () => {
+  let calls = 0;
+  const provider: LLMProvider = { api: 'stub', async *stream() {
+    if (calls++ === 0) yield { ...asstToolUse('t1'), usage: { ...EMPTY_USAGE, inputTokens: 19500 } };
+    else yield asstText('done');
+  } };
+  const bus = new EventBus();
+  const pre: any[] = [], post: any[] = [];
+  bus.subscribe(CoreEventType.PreCompact, (e) => { pre.push(e.payload); });
+  bus.subscribe(CoreEventType.PostCompact, (e) => { post.push(e.payload); });
+  const agent = new CoreAgent({ context: ctx(provider), bus, compactionV2: v2({
+    preMessage: true, gateConfig: { cooldownMs: 0, maxConsecutiveFailures: 3 },
+    rehydrate: { recentReadPaths: () => ['src/api.ts'], readFile: async () => 'API fact', maxFiles: 1, tokenBudget: 100 },
+  }) });
+  await drain(agent, 'q');
+  expect(pre).toHaveLength(1);
+  expect(pre[0].tokenCount).toBe(19500);
+  expect(pre[0].threshold).toBe(16000);
+  expect(post).toHaveLength(1);
+  expect(post[0].postTokens).toBeGreaterThan(0);
+  expect(post[0].postTokens).toBeLessThan(1000);
+  expect(post[0].tokenBasis).toBe('estimate');
+});

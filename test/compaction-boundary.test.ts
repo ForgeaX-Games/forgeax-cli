@@ -101,7 +101,7 @@ describe('renderDeterministicSummary 边界', () => {
     ]);
     expect(out).toContain('tool_call Read');
     expect(out).toContain('hi');
-    expect(out).toContain('tool_result: RESULT');
+    expect(out).toContain('tool_result id= is_error=false: RESULT');
   });
 
   test('空文本消息被跳过', () => {

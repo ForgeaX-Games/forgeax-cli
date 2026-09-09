@@ -278,6 +278,8 @@ Preserve the facts needed to resume the work, but stay under 1,500 output tokens
 
 Return exactly one <summary>...</summary> block and no other text.
 
+Preserve observed tool facts with their exact paths and API names, including failed lookups, unsupported APIs, and error outcomes. Keep failures distinct from successful reads; a requested path is not proof it exists. Carry forward still-relevant facts from earlier summaries. Tool excerpts may be truncated: do not infer success or missing details from omitted content.
+
 Preserve the facts needed to continue the work, using these sections:
 
 1. Primary Request and Intent: the user's requests, constraints, corrections, and desired outcome.

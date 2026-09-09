@@ -482,7 +482,7 @@ describe('ForgeaxCoreKernel — 压后重挂 host 接线(CORE-CTX-004)', () => {
     message: { role: 'assistant', content: [{ type: 'tool_use', id: 'r1', name: 'read_file', input: { file_path: '/x.ts' } }] },
     usage: { ...EMPTY_USAGE, inputTokens: 190_000 } as Usage, // > emergency(opus 200k → 165600)
     stopReason: 'tool_use',
-  } as ProviderStreamEvent;
+  } satisfies ProviderStreamEvent;
 
   /** 记录每次 provider 请求的 capturing + 按调用序脚本化 provider。 */
   function capturing(scripts: ProviderStreamEvent[][]): { provider: LLMProvider; reqs: ProviderRequest[] } {
@@ -502,6 +502,18 @@ describe('ForgeaxCoreKernel — 压后重挂 host 接线(CORE-CTX-004)', () => {
     };
   }
 
+  test.each([[64000, true], [512000, false]])('configured capacity %s drives V2 compaction', async (capacity, shouldCompact) => {
+    const cap = capturing([[{ ...readBig, usage: { ...EMPTY_USAGE, inputTokens: 70000 } }], [asstText('done')]]);
+    const k = new ForgeaxCoreKernel({ provider: cap.provider, executeTool: async () => ({ ok: true, content: 'bytes' }) });
+    const events = await collect(k, req({
+      callId: `window-${capacity}`, model: 'configured-model',
+      ...{ modelContextWindows: { 'configured-model': capacity } },
+      tools: [{ name: 'read_file', inputSchema: {} }],
+    }));
+    const statuses = events.filter((e) => e.kind === 'stored-event' && e.payload.type === 'compaction.status');
+    expect(statuses.length > 0).toBe(shouldCompact);
+  });
+
   test('toolContext 带 sandboxFs → 压后请求含 re-attach + 文件正文(接线生效)', async () => {
     const cap = capturing([[readBig], [asstText('SUMMARY')], [asstText('done')]]);
     const k = new ForgeaxCoreKernel({
@@ -510,6 +522,11 @@ describe('ForgeaxCoreKernel — 压后重挂 host 接线(CORE-CTX-004)', () => {
       toolContext: { sandboxFs: { readText: async (p: string) => `BODY-OF:${p}` } },
     });
     const events = await collect(k, req({ callId: 'reh1', tools: [{ name: 'read_file', inputSchema: {} }] }));
+    const statuses = events.filter(e => e.kind === 'stored-event' && e.payload.type === 'compaction.status').map(e => e.kind === 'stored-event' ? e.payload : {});
+    expect(statuses.map(e => (e.payload as Record<string, unknown>).phase)).toEqual(['started', 'completed']);
+    expect(statuses.every(e => e.type === 'compaction.status')).toBe(true);
+    expect(JSON.stringify(statuses)).not.toContain('SUMMARY');
+    expect(events.findIndex(e => e.kind === 'stored-event')).toBeLessThan(events.findIndex(e => e.kind === 'stored-event' && e.payload.type === 'compaction.applied'));
     const anyReattach = cap.reqs.some((r) => JSON.stringify(r.messages).includes('Re-attached after compaction'));
     const anyBody = cap.reqs.some((r) => JSON.stringify(r.messages).includes('BODY-OF:/x.ts'));
     expect(anyReattach).toBe(true);

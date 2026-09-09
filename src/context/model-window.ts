@@ -34,3 +34,18 @@ export function contextWindowForModel(model: string | undefined): number {
   if (/(^|[^a-z0-9])1m([^a-z0-9]|$)/.test(m)) return LONG_CONTEXT_WINDOW;
   return DEFAULT_CONTEXT_WINDOW;
 }
+
+/** A host-configured capacity applies only to that exact model id. Unknown or
+ * invalid configuration retains the kernel's established fallback. */
+export function configuredContextWindowForModel(
+  model: string | undefined,
+  windows?: unknown,
+): number | undefined {
+  if (!model || !windows || typeof windows !== 'object' || Array.isArray(windows)) return undefined;
+  const capacity: unknown = Object.prototype.hasOwnProperty.call(windows, model)
+    ? Reflect.get(windows, model)
+    : undefined;
+  return typeof capacity === 'number' && Number.isSafeInteger(capacity) && capacity > 0
+    ? capacity
+    : undefined;
+}

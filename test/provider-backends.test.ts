@@ -124,7 +124,7 @@ describe('openai-compat: normalizeOpenAIStream', () => {
   test('maps usage prompt/completion/cached → input/output/cacheRead', async () => {
     const events = await collect(normalizeOpenAIStream(parseSSE(streamFromChunks(TEXT_THEN_TOOL))));
     const a = assistantOf(events);
-    expect(a.usage.inputTokens).toBe(100);
+    expect(a.usage.inputTokens).toBe(50);
     expect(a.usage.outputTokens).toBe(42);
     expect(a.usage.cacheReadInputTokens).toBe(50);
   });
@@ -224,7 +224,7 @@ describe('openai-compat: request body', () => {
 
   test('openAIUsageToPartial reads deepseek top-level cache hit', () => {
     expect(openAIUsageToPartial({ prompt_tokens: 10, completion_tokens: 5, prompt_cache_hit_tokens: 7 })).toEqual({
-      inputTokens: 10,
+      inputTokens: 3,
       outputTokens: 5,
       cacheReadInputTokens: 7,
     });
@@ -297,7 +297,7 @@ describe('openai-responses: normalizeResponsesStream', () => {
     const msg = a.message as { content: Array<Record<string, unknown>> };
     expect(msg.content[0]).toEqual({ type: 'text', text: 'Hello' });
     expect(msg.content[1]).toEqual({ type: 'tool_use', id: 'call_1', name: 'do_thing', input: { a: 1 } });
-    expect(a.usage.inputTokens).toBe(100);
+    expect(a.usage.inputTokens).toBe(70);
     expect(a.usage.outputTokens).toBe(42);
     expect(a.usage.cacheReadInputTokens).toBe(30);
   });
@@ -370,7 +370,7 @@ describe('openai-responses: request body + input mapping', () => {
   test('responsesUsageToPartial maps input/output/cached', () => {
     expect(
       responsesUsageToPartial({ input_tokens: 9, output_tokens: 3, input_tokens_details: { cached_tokens: 4 } }),
-    ).toEqual({ inputTokens: 9, outputTokens: 3, cacheReadInputTokens: 4 });
+    ).toEqual({ inputTokens: 5, outputTokens: 3, cacheReadInputTokens: 4 });
   });
 });
 
@@ -399,7 +399,7 @@ describe('gemini: normalizeGeminiStream', () => {
     // finishReason STOP but has tool_use → corrected to tool_use
     expect(a.stopReason).toBe('tool_use');
     // output = candidates(40) + thoughts(2)
-    expect(a.usage.inputTokens).toBe(100);
+    expect(a.usage.inputTokens).toBe(90);
     expect(a.usage.outputTokens).toBe(42);
     expect(a.usage.cacheReadInputTokens).toBe(10);
   });
@@ -460,7 +460,7 @@ describe('gemini: request body + mapping', () => {
   test('geminiUsageToPartial sums candidates + thoughts', () => {
     expect(
       geminiUsageToPartial({ promptTokenCount: 5, candidatesTokenCount: 3, thoughtsTokenCount: 2, cachedContentTokenCount: 1 }),
-    ).toEqual({ inputTokens: 5, outputTokens: 5, cacheReadInputTokens: 1 });
+    ).toEqual({ inputTokens: 4, outputTokens: 5, cacheReadInputTokens: 1 });
   });
 });
 
@@ -522,4 +522,19 @@ describe('fake-fetch e2e', () => {
       collect(provider.stream({ ...BASE_REQ, model: 'gemini-2.0-flash' }, { signal: new AbortController().signal })),
     ).rejects.toMatchObject({ status: 429, retryAfterMs: 2000 });
   });
+});
+
+test('OpenAI streaming usage clears prior uncached/cache values at zero and ignores cache-only frames', async () => {
+  for (const cache of [0, 100]) {
+    const chunks = [
+      sse({ choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, prompt_cache_hit_tokens: 50 } }),
+      sse({ choices: [], usage: { prompt_tokens: 100, prompt_cache_hit_tokens: cache } }),
+      sse({ choices: [], usage: { prompt_cache_hit_tokens: 90, completion_tokens: 2 } }),
+      'data: [DONE]\n\n',
+    ];
+    const a = assistantOf(await collect(normalizeOpenAIStream(parseSSE(streamFromChunks(chunks)))));
+    expect(a.usage.inputTokens).toBe(100 - cache);
+    expect(a.usage.cacheReadInputTokens).toBe(cache);
+    expect(a.usage.outputTokens).toBe(2);
+  }
 });
