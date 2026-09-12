@@ -20,12 +20,13 @@ import type { AgentTool } from '../../../capability/types';
  * Explore 可用的只读/搜索工具名集合。
  *
  * 同时收录 canonical name(本仓内置工具的 `name`,小写蛇形)与 PascalCase 别名,
- * 无论 host 用哪种登记法都能命中。涵盖:文件读取(read_file/Read)、
+ * 无论 host 用哪种登记法都能命中。涵盖:文件读取(read_file/read_files/Read)、
  * 文件名 glob(glob/Glob)、内容 grep(grep/Grep)、网页拉取(web_fetch/WebFetch)、
  * 网页搜索(web_search/WebSearch)。**不含**任何写工具与 bash。
  */
 const READONLY = new Set<string>([
   'read_file',
+  'read_files',
   'Read',
   'glob',
   'Glob',

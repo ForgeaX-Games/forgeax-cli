@@ -795,7 +795,7 @@ export async function* normalizeAnthropicStream(
   frames: AsyncIterable<{ event?: string; data: string }>,
   opts?: { requestId?: string; httpStatus?: number; signal?: AbortSignal },
 ): AsyncGenerator<ProviderStreamEvent> {
-  let usage: Usage = { ...EMPTY_USAGE };
+  let usage: Usage = { ...EMPTY_USAGE, reported: {} };
   let stopReason: StopReason = null;
   let current: CurrentBlock | null = null;
   const blocks: AssistantBlock[] = [];
@@ -817,7 +817,7 @@ export async function* normalizeAnthropicStream(
       case 'message_start': {
         const msg = parsed.message as { usage?: Record<string, unknown> } | undefined;
         const partial = rawUsageToPartial(msg?.usage);
-        usage = mergeUsage(usage, partial);
+        usage = { ...mergeUsage(usage, partial), reported: { ...usage.reported, ...partial } };
         yield { type: 'message_start', usage: partial };
         break;
       }
@@ -930,7 +930,7 @@ export async function* normalizeAnthropicStream(
 
       case 'message_delta': {
         const partial = rawUsageToPartial(parsed.usage as Record<string, unknown> | undefined);
-        usage = mergeUsage(usage, partial);
+        usage = { ...mergeUsage(usage, partial), reported: { ...usage.reported, ...partial } };
         const dr = (parsed.delta as { stop_reason?: unknown } | undefined)?.stop_reason;
         stopReason = normalizeStopReason(dr);
         yield { type: 'message_delta', usage: partial, stopReason };

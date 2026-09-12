@@ -2,7 +2,7 @@
  * Builtin tools CapabilityPack (②) — reference 内核通用工具聚合包。
  *
  * `builtinToolsPack()` 返回一个 `layer: 'builtin'` 的 CapabilityPack，聚合：
- *   read_file / write_file / edit_file（file-tools）、bash（shell-tools）、
+ *   read_file / read_files / write_file / edit_file（file-tools）、bash（shell-tools）、
  *   grep / glob（search-tools）。
  *
  * 这些工具是 reference 实现：IO 全部经 host 注入到 `ToolContext` 上的能力句柄
@@ -12,7 +12,7 @@
  * Boundary: 仅 import core-local 契约。
  */
 import type { CapabilityPack } from '../types';
-import { readFileTool, writeFileTool, editFileTool } from './file-tools';
+import { readFileTool, readFilesTool, writeFileTool, editFileTool } from './file-tools';
 import { bashTool, bashOutputTool, killShellTool } from './shell-tools';
 import { grepTool, globTool } from './search-tools';
 import { askUserQuestionTool } from './ask-tools';
@@ -35,6 +35,7 @@ export function builtinToolsPack(): CapabilityPack {
     layer: 'builtin',
     tools: [
       readFileTool(),
+      readFilesTool(),
       writeFileTool(),
       editFileTool(),
       bashTool(),

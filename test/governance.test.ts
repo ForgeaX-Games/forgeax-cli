@@ -134,6 +134,54 @@ describe('循环兜底 unrecoverable_tool_error', () => {
     }
   });
 
+  test('a repeated failed operation leaves room to report the blocker and finish', async () => {
+    let calls = 0;
+    const observe = buildTool({ name: 'observe', isReadOnly: () => true, maxResultSizeChars: 1000,
+      call: async () => { calls++; throw new Error('evidence unavailable'); },
+      mapResult: (o, id) => ({ type: 'tool.result', payload: { id, o }, ts: 0 }),
+    });
+    const { provider, reqMessages } = scriptedProvider([
+      [asstToolUse('a', 'observe', {})], [asstToolUse('b', 'observe', {})],
+      [asstText('Implementation preserved. Verification is blocked; independent work can continue.')],
+    ]);
+    const events = await collect(new CoreAgent({ context: ctx([observe], provider) }), { input: { type: 'user', payload: 'hi', ts: 0 } });
+    expect(events.at(-1)).toMatchObject({ type: 'done', terminal: { reason: 'completed' } });
+    expect(calls).toBe(2);
+    expect(JSON.stringify(reqMessages[2])).toContain('Continue independent work');
+  });
+
+  test('a further unchanged retry is stopped without executing the operation again', async () => {
+    let calls = 0;
+    const observe = buildTool({ name: 'observe', isReadOnly: () => true, maxResultSizeChars: 1000,
+      call: async () => { calls++; throw new Error('evidence unavailable'); },
+      mapResult: (o, id) => ({ type: 'tool.result', payload: { id, o }, ts: 0 }),
+    });
+    const { provider } = scriptedProvider([[asstToolUse('a', 'observe', {})]]);
+    const events = await collect(new CoreAgent({ context: ctx([observe], provider) }), { input: { type: 'user', payload: 'hi', ts: 0 } });
+    expect(events.at(-1)).toMatchObject({ type: 'done', terminal: { reason: 'unrecoverable_tool_error' } });
+    expect(calls).toBe(2);
+  });
+
+  test('a successful corrective write reopens an exhausted operation', async () => {
+    let checks = 0;
+    let repaired = false;
+    const check = buildTool({ name: 'check', maxResultSizeChars: 1000, isReadOnly: () => true,
+      call: async () => { checks++; if (!repaired) throw new Error('not ready'); return { data: 'ready' }; },
+      mapResult: (result, toolUseId) => ({ type: 'tool.result', payload: { toolUseId, result }, ts: 0 }),
+    });
+    const repair = buildTool({ name: 'repair', maxResultSizeChars: 1000,
+      call: async () => { repaired = true; return { data: 'repaired' }; },
+      mapResult: (result, toolUseId) => ({ type: 'tool.result', payload: { toolUseId, result }, ts: 0 }),
+    });
+    const { provider } = scriptedProvider([
+      [asstToolUse('a', 'check', {})], [asstToolUse('b', 'check', {})],
+      [asstToolUse('c', 'repair', {})], [asstToolUse('d', 'check', {})], [asstText('verified')],
+    ]);
+    const events = await collect(new CoreAgent({ context: ctx([check, repair], provider), mode: 'bypassPermissions' }), { input: { type: 'user', payload: 'hi', ts: 0 } });
+    expect(events.at(-1)).toMatchObject({ type: 'done', terminal: { reason: 'completed' } });
+    expect(checks).toBe(3);
+  });
+
   test('成功穿插重置该 key — 不误杀', async () => {
     let n = 0;
     const recover = buildTool({

@@ -345,7 +345,7 @@ export async function* normalizeOpenAIStream(
     extractReasoning?: boolean;
   },
 ): AsyncGenerator<ProviderStreamEvent> {
-  let usage: Usage = { ...EMPTY_USAGE };
+  let usage: Usage = { ...EMPTY_USAGE, reported: {} };
   let stopReason: StopReason = null;
   let startedEmitted = false;
   let nextIndex = 0;
@@ -418,7 +418,8 @@ export async function* normalizeOpenAIStream(
     // usage 可独立于 choices 出现（OpenAI 尾 chunk choices:[] / DeepSeek 搭末 delta）。
     if (parsed.usage && typeof parsed.usage === 'object') {
       const partial = openAIUsageToPartial(parsed.usage as Record<string, unknown>);
-      usage = { ...usage, ...partial };
+      usage = { ...usage, ...partial, reported: { ...usage.reported, ...partial } };
+      if (Object.keys(partial).length > 0) yield { type: 'message_delta', usage: partial, stopReason };
     }
 
     const choice = (parsed.choices as Array<Record<string, unknown>> | undefined)?.[0];

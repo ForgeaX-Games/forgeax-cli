@@ -11,7 +11,15 @@
 import { test, expect, describe } from 'bun:test';
 import type { SandboxFs, DirEnt, StatResult } from '../src/inject/types';
 import type { ToolContext } from '../src/capability/types';
-import { readFileTool, DEFAULT_READ_LINE_LIMIT, MAX_READ_LINE_CHARS } from '../src/capability/builtin-tools/index';
+import {
+  builtinToolsPack,
+  readFileTool,
+  readFilesTool,
+  DEFAULT_READ_LINE_LIMIT,
+  MAX_READ_LINE_CHARS,
+  MAX_READ_FILES,
+  READ_FILES_MAX_RESULT_CHARS,
+} from '../src/capability/builtin-tools/index';
 import { applyResultBudget } from '../src/context/tool-result-budget';
 
 // 最小 SandboxFs:read_file 文本路径只用 readText;readBytes 抛错以强制走文本路径。
@@ -64,6 +72,16 @@ class MemFs implements SandboxFs {
 function ctxWith(fs: SandboxFs): ToolContext {
   return { signal: new AbortController().signal, sandboxFs: fs };
 }
+
+test('read_files rejects image results explicitly instead of serializing base64 as text', async () => {
+  const fs = new MemFs({ '/ok.txt': 'hello' });
+  const tool = readFilesTool();
+  const { data } = await tool.call({ files: [{ file_path: '/image.png' }, { file_path: '/ok.txt' }] }, ctxWith(fs));
+  expect(data.successful).toBe(1);
+  expect(data.failed).toBe(1);
+  expect(data.files[0]).toMatchObject({ ok: false, error: expect.stringContaining('use read_file') });
+  expect(JSON.stringify(tool.mapResult(data, 'batch'))).not.toContain('imageBlocks');
+});
 
 describe('C-01 read_file default line limit', () => {
   test('exports sane budget constants', () => {
@@ -131,5 +149,44 @@ describe('C-01 zero-regression on offset/limit paging', () => {
     const { data } = await t.call({ file_path: '/s.txt' }, ctxWith(fs));
     expect(data.numLines).toBe(3);
     expect(data.totalLines).toBe(3);
+  });
+});
+
+describe('explicit read_files batching', () => {
+  test('reads independent files in input order and preserves per-file failures', async () => {
+    const fs = new MemFs({ '/a.txt': 'a1\na2', '/b.txt': 'b1' });
+    const { data } = await readFilesTool().call({
+      files: [{ file_path: '/a.txt' }, { file_path: '/missing.txt' }, { file_path: '/b.txt' }],
+    }, ctxWith(fs));
+    expect(data.successful).toBe(2);
+    expect(data.failed).toBe(1);
+    expect(data.files.map((file) => file.file_path)).toEqual(['/a.txt', '/missing.txt', '/b.txt']);
+    expect(data.files[0]).toMatchObject({ file_path: '/a.txt', ok: true, content: expect.stringContaining('a1') });
+    expect(data.files[1]).toMatchObject({ file_path: '/missing.txt', ok: false, error: expect.stringContaining('ENOENT') });
+    expect(data.files[2]).toMatchObject({ file_path: '/b.txt', ok: true, content: expect.stringContaining('b1') });
+  });
+
+  test('is explicitly bounded and advertised as a read-only concurrent builtin', () => {
+    const tool = readFilesTool();
+    expect(tool.name).toBe('read_files');
+    expect(tool.isReadOnly({ files: [] })).toBe(true);
+    expect(tool.isConcurrencySafe({ files: [] })).toBe(true);
+    expect(tool.maxResultSizeChars).toBe(READ_FILES_MAX_RESULT_CHARS);
+    expect(builtinToolsPack().tools?.map((item) => item.name)).toContain('read_files');
+    expect(tool.inputJSONSchema?.properties).toHaveProperty('files');
+  });
+
+  test(`rejects more than ${MAX_READ_FILES} files instead of silently truncating the request`, async () => {
+    const files = Array.from({ length: MAX_READ_FILES + 1 }, (_, i) => ({ file_path: `/f-${i}.txt` }));
+    await expect(readFilesTool().call({ files }, ctxWith(new MemFs()))).rejects.toThrow(`at most ${MAX_READ_FILES}`);
+  });
+
+  test('caps aggregate text deterministically so a batch cannot multiply the read budget', async () => {
+    const fs = new MemFs({ '/a.txt': 'a'.repeat(READ_FILES_MAX_RESULT_CHARS), '/b.txt': 'b'.repeat(READ_FILES_MAX_RESULT_CHARS) });
+    const { data } = await readFilesTool().call({ files: [{ file_path: '/a.txt' }, { file_path: '/b.txt' }] }, ctxWith(fs));
+    const successful = data.files.filter((file): file is Extract<typeof file, { ok: true }> => file.ok);
+    expect(successful).toHaveLength(2);
+    expect(successful.every((file) => file.content.length <= READ_FILES_MAX_RESULT_CHARS / 2 + 100)).toBe(true);
+    expect(successful.some((file) => file.content.includes('truncated'))).toBe(true);
   });
 });

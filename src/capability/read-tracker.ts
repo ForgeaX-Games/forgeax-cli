@@ -1,26 +1,24 @@
-/**
- * Same-file read tracker (C7 extra) — 同一文件重复读次数的进程内计数器。
- *
- * `same_file_read_limit`:
- * 模型在长 loop 里反复读同一路径(空转)是常见浪费;LOOP 在执行 read 类工具前用本
- * tracker 累加该 path 的读次数,`over(path, K)` 越线后由 integrator 决定降级
- * (system-reminder 提示「你已读过 N 次」/ 退化为缓存命中),避免烧 maxTurns。
- *
- * 上游在 Read 工具侧记 readFileState、对重复读做提示;本 tracker 是
- * 把「计数」这件纯逻辑从工具实现剥到 core 的一处,工具/loop 共用同一口径。
- *
- * fail-OPEN:tracker 只计数 + 判越线,从不阻断;是否处置由调用方决定(工程只观测)。
- * in-memory、per-instance(一个 run 一个 tracker;无跨进程持久化,Boundary 自然满足)。
- *
- * 纯结构(Map),无 IO、无 import。
- */
+import { createHash } from 'node:crypto';
 
+/** Per-run read observations; hashes bound memory without retaining file bodies. */
 /** `same_file_read_limit` 默认 K(对齐 agentic_os 配置默认 20)。 */
 export const DEFAULT_SAME_FILE_READ_LIMIT = 20;
 
 export class ReadTracker {
   /** path → 累计读次数。 */
   private readonly counts = new Map<string, number>();
+  private readonly observations = new Map<string, { digest: string; count: number }>();
+
+  /** Count identical successful reads of the same request. Changed output is progress. */
+  observe(path: string, request: string, output: string): number {
+    this.record(path);
+    const key = JSON.stringify([path, request]);
+    const digest = createHash('sha256').update(output).digest('hex');
+    const previous = this.observations.get(key);
+    const count = previous?.digest === digest ? previous.count + 1 : 1;
+    this.observations.set(key, { digest, count });
+    return count;
+  }
 
   /** 记一次读,返回该 path 累加后的新次数(便于调用方就地取用)。
    *  重读时把 path 移到 Map 末尾(delete+set)→ 保持「最近读在后」的插入序,供
@@ -55,5 +53,6 @@ export class ReadTracker {
   /** 清空(测试 / run 复用时重置)。 */
   reset(): void {
     this.counts.clear();
+    this.observations.clear();
   }
 }

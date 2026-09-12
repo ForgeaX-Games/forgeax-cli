@@ -65,6 +65,10 @@ export interface ProviderRequest {
 // ─── 用量（累计语义）──────────────────
 
 export interface Usage {
+  /** Exact reported counters, separate from legacy zero-filled accounting.
+   * Empty means unknown; absent preserves the contract of existing providers.
+   */
+  reported?: Partial<Pick<Usage, 'inputTokens' | 'outputTokens' | 'cacheCreationInputTokens' | 'cacheReadInputTokens'>>;
   /** Uncached input; total prompt = input + cache creation + cache read. */
   inputTokens: number;
   outputTokens: number;

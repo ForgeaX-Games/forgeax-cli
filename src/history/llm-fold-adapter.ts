@@ -1,3 +1,4 @@
+import { toolResultsToContent } from '../capability/tool-result';
 /**
  * LLM fold adapter — 把 EventStore 里的事件流投影成 provider messages,供「开机回放」
  * (resume/replay)在新 createAgent 时重建对话历史(设计稿 §3.8.7 / §6.1:事件流是真相,
@@ -26,23 +27,6 @@ import { computeRewindShadow } from './rewind-mask';
 
 /** loop 自吐的 assistant 会话事件类型(非 CoreEventType 成员,见 agent.ts:520)。 */
 const ASSISTANT_MESSAGE_TYPE = 'assistant.message';
-
-/** tool_result.content 规整成 string(对齐 agent.ts toolResultContent:对象 content
- *  会让 provider 400)。优先取常见文本字段,否则整体 JSON 化。 */
-function toolResultContent(payload: unknown): string {
-  if (typeof payload === 'string') return payload;
-  if (payload && typeof payload === 'object') {
-    const p = payload as Record<string, unknown>;
-    if (typeof p.stdout === 'string' && p.stdout.length > 0) return p.stdout;
-    if (typeof p.message === 'string') return p.message;
-    if (typeof p.result === 'string') return p.result;
-  }
-  try {
-    return JSON.stringify(payload);
-  } catch {
-    return String(payload);
-  }
-}
 
 /** foldFromStore() 给每个事件挂的合成唯一 id 字段名(顶层、非 payload)。store 内事件
  *  ts 多为 0 且会话事件常无天然 id(user_prompt.submit / assistant.message 都没有),
@@ -110,18 +94,16 @@ export const llmFoldAdapter: FoldAdapter<ProviderMessage> = {
       return { role: 'user', content: typeof p.prompt === 'string' ? p.prompt : String(p.prompt ?? '') };
     }
     // ToolCallResult → user 消息,内含一个 tool_result block(对齐 toolResultsToContent)。
-    const p = e.payload as { toolUseId?: string; result?: unknown; isError?: boolean };
-    return {
-      role: 'user',
-      content: [
-        {
-          type: 'tool_result',
-          tool_use_id: p.toolUseId,
-          content: toolResultContent(p.result),
-          is_error: p.isError === true,
-        },
-      ],
-    };
+    const p = e.payload as { toolUseId?: string; callId?: string; isError?: boolean; ok?: boolean; result?: unknown };
+    const id = p.toolUseId ?? p.callId ?? '';
+    // EventBus persists a PostToolUse envelope around the mapped tool payload.
+    // Recognize that transport by its matching call id, never recurse into business data.
+    const nested = p.result && typeof p.result === 'object' ? p.result as Record<string, unknown> : undefined;
+    const mapped = nested && (nested.toolUseId === id || nested.callId === id) ? { ...e, payload: nested } : e;
+    return { role: 'user', content: toolResultsToContent([{
+      toolUseId: id, toolName: '', result: mapped,
+      isError: p.isError === true || p.ok === false,
+    }]) };
   },
 
   eventId: eventIdOf,

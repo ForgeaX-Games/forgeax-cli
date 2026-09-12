@@ -1,3 +1,4 @@
+import { toolResultIsError } from '../capability/tool-result';
 /**
  * Tool dispatch (Wave3 LOOP, K3/K5) — serial/parallel partition + 权限把闸 + hook block.
  *
@@ -331,11 +332,12 @@ async function runOne(use: ToolUse, deps: DispatchDeps): Promise<ToolDispatchRes
 
   try {
     const out = await tool.call(callInput, ctx);
+    const result = tool.mapResult(out.data, use.id);
     return {
       toolUseId: use.id,
       toolName: use.name,
-      result: tool.mapResult(out.data, use.id),
-      isError: false,
+      result,
+      isError: toolResultIsError(result.payload),
       newMessages: out.newMessages,
     };
   } catch (e) {

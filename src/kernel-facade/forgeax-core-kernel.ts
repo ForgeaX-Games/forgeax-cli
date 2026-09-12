@@ -1,3 +1,5 @@
+import { TurnUsage } from './turn-usage';
+import { toolResultValue, toolResultsToContent, toolResultIsError } from '../capability/tool-result';
 /**
  * ForgeaxCoreKernel (Wave4 FACADE, K10/K11) — implements the C6 `AgentKernel`
  * contract as a THIN shell over the native CoreAgent.
@@ -51,8 +53,9 @@ import { foldFromStore } from '../history/llm-fold-adapter';
 import type { CoreEvent } from '../events/types';
 import type { Observability } from '../observability/contract';
 import { NOOP_OBS, parentContextFromTraceparent } from '../observability/contract';
-import { cacheHitRate, promptTokens } from '../observability/usage';
+import { cacheHitRate, promptTokens, type TokenUsage } from '../observability/usage';
 import { readFileSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import {
   imageBlockFromAttachment as buildImageBlockFromAttachment,
   documentBlockFromAttachment,
@@ -313,7 +316,14 @@ function mapReason(r: TerminalReason): TurnDoneReason {
 
 /** TurnRequest.history(契约中立形) → ProviderMessage[]。 */
 function mapHistory(history: TurnMessage[] | undefined): ProviderMessage[] {
-  return canonicalizeHistory(history);
+  return canonicalizeHistory(history?.map(message => {
+    if (message.role !== 'tool') return message;
+    const [block] = toolResultsToContent([{
+      toolUseId: message.callId, toolName: '', isError: !message.ok,
+      result: { type: 'tool.result', ts: 0, payload: { result: message.result } },
+    }]) as Array<{ content: unknown }>;
+    return { ...message, result: block.content };
+  }));
 }
 
 /** 从 assistant AgentEvent 抽文本(message.delta 用)。 */
@@ -546,7 +556,13 @@ export class ForgeaxCoreKernel implements AgentKernel {
       //   拿不到本地实现 → fail-safe 落回下方 host 桥(永不因缺实现而失能)。
       if (spec.delivery === 'local') {
         const impl = localByName.get(spec.name);
-        if (impl) return impl;
+        // Local delivery is an execution optimization, not permission to replace
+        // the host contract (for example path with file_path). A parser without
+        // a verifiable JSON contract must also stay on the host bridge.
+        if (impl && !impl.inputSchema && impl.inputJSONSchema !== undefined
+          && isDeepStrictEqual(impl.inputJSONSchema, spec.inputSchema ?? {})) {
+          return { ...impl, ...(spec.description !== undefined ? { description: spec.description } : {}) };
+        }
       }
       // 'host'/缺省 → executeTool 桥回宿主(现状 A;host 复跑 checkKernelTool 把闸)。
       return buildTool({
@@ -567,7 +583,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
         call: async (input: unknown, ctx) => ({
           data: await this.o.executeTool(spec.name, input, sid, agentId, ctx?.toolUseId, req.callId),
         }),
-        mapResult: (data, id) => ({ type: 'tool.result', payload: { callId: id, ok: true, result: data }, ts: 0 }),
+        mapResult: (data, id) => ({ type: 'tool.result', payload: { callId: id, ok: !toolResultIsError(data), result: data }, ts: 0 }),
         maxResultSizeChars: Infinity,
       });
     });
@@ -604,7 +620,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
       : undefined;
     let turnStatus: 'ok' | 'error' = 'ok';
     // 诊断维度(hoist 到外层 finally 可见):token 用量累计 + 本轮结束原因。
-    const usage = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreation: 0 };
+    const usage = new TurnUsage();
     // 本次 provider 调用已经以 message.delta 流出的 assistant 文本(translate 的去重账,
     // 见 translate 内 'assistant' 分支;每次 provider_call 开始清零)。
     const streamed = { text: '' };
@@ -794,10 +810,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
 
     const emitUsage = (): KernelEvent => ({
       kind: 'turn.usage',
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cacheRead: usage.cacheRead,
-      cacheCreation: usage.cacheCreation,
+      ...usage.values(),
     });
 
     try {
@@ -869,15 +882,18 @@ export class ForgeaxCoreKernel implements AgentKernel {
       //   排查时无需翻多条事件,从这一行即读出本轮全貌。setAttribute 在 noop tracer 下可能无 → 容错。
       const doneModel = this.currentModel ?? req.model ?? 'unknown';
       // 缓存命中率/提示词总量(派生指标,直接落 trace 免下游再算;口径见 observability/usage)。
-      const prompt = promptTokens(usage);
-      const hitRate = cacheHitRate(usage);
+      const counts = usage.values();
+      const complete = counts.inputTokens !== undefined && counts.outputTokens !== undefined &&
+        counts.cacheRead !== undefined && counts.cacheCreation !== undefined;
+      const prompt = complete ? promptTokens(counts as TokenUsage) : undefined;
+      const hitRate = complete ? cacheHitRate(counts as TokenUsage) : undefined;
       try {
-        turnSpan.setAttribute('usage.input', usage.inputTokens);
-        turnSpan.setAttribute('usage.output', usage.outputTokens);
-        turnSpan.setAttribute('usage.cacheRead', usage.cacheRead);
-        turnSpan.setAttribute('usage.cacheCreation', usage.cacheCreation);
-        turnSpan.setAttribute('usage.promptTokens', prompt);
-        turnSpan.setAttribute('usage.cacheHitRate', hitRate);
+        if (counts.inputTokens !== undefined) turnSpan.setAttribute('usage.input', counts.inputTokens);
+        if (counts.outputTokens !== undefined) turnSpan.setAttribute('usage.output', counts.outputTokens);
+        if (counts.cacheRead !== undefined) turnSpan.setAttribute('usage.cacheRead', counts.cacheRead);
+        if (counts.cacheCreation !== undefined) turnSpan.setAttribute('usage.cacheCreation', counts.cacheCreation);
+        if (prompt !== undefined) turnSpan.setAttribute('usage.promptTokens', prompt);
+        if (hitRate !== undefined) turnSpan.setAttribute('usage.cacheHitRate', hitRate);
         turnSpan.setAttribute('model', doneModel);
         if (lastReason) turnSpan.setAttribute('reason', lastReason);
       } catch { /* noop tracer 无 setAttribute */ }
@@ -885,7 +901,7 @@ export class ForgeaxCoreKernel implements AgentKernel {
         status: turnStatus,
         reason: lastReason ?? 'unknown',
         model: doneModel,
-        usage: { ...usage, promptTokens: prompt, cacheHitRate: hitRate },
+        usage: { ...counts, promptTokens: prompt, cacheHitRate: hitRate },
       });
       turnSpan.end();
     }
@@ -1063,14 +1079,14 @@ export class ForgeaxCoreKernel implements AgentKernel {
    *  provider 不吐 text_delta(如测试 stub / 非流式后端)则余量 = 全文,优雅降级为旧行为。 */
   private translate(
     ev: AgentEvent,
-    usage: { inputTokens: number; outputTokens: number; cacheRead: number; cacheCreation: number },
+    usage: TurnUsage,
     streamed: { text: string },
   ): KernelEvent | null {
     switch (ev.type) {
       case 'stage':
         // PTL / 窗口溢出重试同一 turn 时会重发 provider_call → 清零,保证 streamed
         // 精确等于「当前这一次模型调用」已流出的增量(重试前的残量不污染去重账)。
-        if (ev.stage === 'provider_call') streamed.text = '';
+        if (ev.stage === 'provider_call') { streamed.text = ''; usage.begin(); }
         return null;
       case 'assistant': {
         const text = assistantText(ev.message);
@@ -1090,19 +1106,18 @@ export class ForgeaxCoreKernel implements AgentKernel {
         return { kind: 'tool.call', callId: ev.toolUseId, name: ev.toolName, args: ev.input };
       case 'tool_result': {
         const p = ev.result.payload as { ok?: boolean; result?: unknown; isError?: boolean; message?: string };
-        const ok = p.ok ?? !p.isError;
+        const ok = ev.isError === true ? false : p?.ok ?? !p?.isError;
         // 非 ok 时带上 dispatch 写入的人类可读拒因/错误(errorEvent.message,含 plan 只读拒因)。
-        return { kind: 'tool.result', callId: ev.toolUseId, ok, result: p.result, ...(ok ? {} : { error: p.message }) };
+        const result = toolResultValue(ev.result.payload);
+        const detail = result && typeof result === 'object' ? result as Record<string, unknown> : undefined;
+        const error = p?.message ?? detail?.message ?? detail?.error;
+        return { kind: 'tool.result', callId: ev.toolUseId, ok, result,
+          ...(!ok && typeof error === 'string' ? { error } : {}) };
       }
 
       case 'stream': {
         const se = ev.event as ProviderStreamEvent;
-        if (se.type === 'message_delta' && se.usage) {
-          usage.outputTokens = se.usage.outputTokens ?? usage.outputTokens;
-          usage.inputTokens = se.usage.inputTokens ?? usage.inputTokens;
-          usage.cacheRead = se.usage.cacheReadInputTokens ?? usage.cacheRead;
-          usage.cacheCreation = se.usage.cacheCreationInputTokens ?? usage.cacheCreation;
-        }
+        usage.observe(se);
         if (se.type === 'content_block_delta') {
           const d = se.delta as { type?: string; thinking?: string; text?: string } | undefined;
           // 扩展思考增量 → thinking.delta(契约事件)。

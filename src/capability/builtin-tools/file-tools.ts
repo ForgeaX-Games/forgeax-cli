@@ -1,5 +1,6 @@
 /**
- * Builtin file tools (②) — `read_file` / `write_file` / `edit_file`.
+ * Builtin file tools (②) — `read_file` / explicit batched `read_files` /
+ * `write_file` / `edit_file`.
  *
  * 文件工具语义:
  *   - read 只读 + 并发安全 + maxResultSizeChars 有界(C-01:默认读前 2000 行 + 单行
@@ -197,6 +198,118 @@ export function readFileTool(): AgentTool<ReadFileInput, ReadFileOutput> {
       });
     },
     renderToolUseMessage: (input) => `Reading ${input.file_path}`,
+  });
+}
+
+/** Maximum number of independent reads in one explicit batch. */
+export const MAX_READ_FILES = 16;
+/** Keep a batch within the same aggregate text budget as a single read. */
+export const READ_FILES_MAX_RESULT_CHARS = READ_FILE_MAX_RESULT_CHARS;
+
+export type ReadFilesItem =
+  | (ReadFileOutput & { ok: true })
+  | { file_path: string; ok: false; error: string };
+
+export interface ReadFilesInput {
+  files: ReadFileInput[];
+}
+
+export interface ReadFilesOutput {
+  files: ReadFilesItem[];
+  successful: number;
+  failed: number;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Apply a deterministic per-file text budget after the independent reads complete. */
+function capBatchText(files: ReadFilesItem[]): ReadFilesItem[] {
+  const perFileBudget = Math.max(1, Math.floor(READ_FILES_MAX_RESULT_CHARS / Math.max(1, files.length)));
+  const marker = '\n\n[read_files: content truncated; use read_file with offset/limit for this path.]';
+  return files.map((file) => {
+    if (!file.ok || file.content.length <= perFileBudget) return file;
+    const prefixLength = Math.max(0, perFileBudget - marker.length);
+    return { ...file, content: `${file.content.slice(0, prefixLength)}${marker}` };
+  });
+}
+
+/**
+ * Read several independent files in one explicit tool call. The model must
+ * opt into this schema; there is no prompt-side batching or silent rewrite of
+ * ordinary `read_file` calls. Each item keeps its own success/error result so
+ * one missing path does not hide the other reads.
+ */
+export function readFilesTool(): AgentTool<ReadFilesInput, ReadFilesOutput> {
+  return buildTool<ReadFilesInput, ReadFilesOutput>({
+    name: 'read_files',
+    searchHint: 'read several independent files in one call',
+    description: 'Read several independent text files in one call. Use only when each path can be read without the result of another; use read_file for images, dependent or paged reads.',
+    inputJSONSchema: {
+      type: 'object',
+      properties: {
+        files: {
+          type: 'array',
+          minItems: 1,
+          maxItems: MAX_READ_FILES,
+          description: `Independent file reads, up to ${MAX_READ_FILES} items.`,
+          items: {
+            type: 'object',
+            properties: {
+              file_path: { type: 'string', description: 'The path to the file to read' },
+              offset: { type: 'number', description: 'Optional 1-based line offset' },
+              limit: { type: 'number', description: 'Optional line limit' },
+              pages: { type: 'string', description: 'Optional PDF page range' },
+            },
+            required: ['file_path'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['files'],
+      additionalProperties: false,
+    },
+    maxResultSizeChars: READ_FILES_MAX_RESULT_CHARS,
+    isReadOnly: () => true,
+    isConcurrencySafe: () => true,
+    async call(input, ctx): Promise<{ data: ReadFilesOutput }> {
+      if (!input || !Array.isArray(input.files) || input.files.length === 0) {
+        throw new Error('read_files: files must be a non-empty array');
+      }
+      if (input.files.length > MAX_READ_FILES) {
+        throw new Error(`read_files: at most ${MAX_READ_FILES} files per call`);
+      }
+
+      const single = readFileTool();
+      const results = await Promise.all(input.files.map(async (raw): Promise<ReadFilesItem> => {
+        const item = raw && typeof raw === 'object' ? raw : { file_path: '' };
+        const filePath = typeof item.file_path === 'string' ? item.file_path : '';
+        try {
+          if (isImageExt(filePath)) {
+            throw new Error('read_files supports text only; use read_file for images');
+          }
+          const result = await single.call(item, ctx);
+          if (result.data.imageBlocks?.length) {
+            throw new Error('read_files supports text only; use read_file for images');
+          }
+          return { ...result.data, ok: true };
+        } catch (error) {
+          return { file_path: filePath, ok: false, error: errorMessage(error) };
+        }
+      }));
+      const files = capBatchText(results);
+      const failed = files.filter((file) => !file.ok).length;
+      return { data: { files, successful: files.length - failed, failed } };
+    },
+    mapResult(output, toolUseId): CoreEvent {
+      return toResultEvent(toolUseId, {
+        files: output.files,
+        successful: output.successful,
+        failed: output.failed,
+      });
+    },
+    renderToolUseMessage: (input) => `Reading ${input.files.length} independent files`,
   });
 }
 

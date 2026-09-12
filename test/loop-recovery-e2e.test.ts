@@ -209,7 +209,7 @@ test('同文件重复读越线 → 拦截当次(不硬杀),其余照常', async 
   // sameFileReadLimit=2;关掉 error-streak 兜底以隔离 same-file 行为。
   const agent = new CoreAgent({ context: ctx([readFile], provider, {}), sameFileReadLimit: 2, maxToolErrorStreak: 0 });
   const evs = await run(agent);
-  expect(reads.length).toBeLessThan(3); // 至少一次被拦,未真正执行
+  expect(reads.length).toBe(3); // Read to detect changes; suppress unchanged output after the limit.
   expect(lastDone(evs)).toBe('completed'); // 未硬杀
   const intercepted = evs.some(
     (e) =>
@@ -220,4 +220,62 @@ test('同文件重复读越线 → 拦截当次(不硬杀),其余照常', async 
       })(),
   );
   expect(intercepted).toBe(true);
+});
+
+test('changed file and different ranges remain readable beyond the repeat limit', async () => {
+  let reads = 0;
+  const readFile = buildTool({ name: 'read_file', maxResultSizeChars: Infinity, isReadOnly: () => true,
+    call: async () => ({ data: ++reads < 3 ? 'old' : 'changed' }),
+    mapResult: (data, id) => ({ type: 'tool.result', payload: { toolUseId: id, result: data }, ts: 0 }),
+  });
+  const { provider } = mkProvider([
+    ...[{}, {}, {}, { offset: 2 }].map(extra => () => [asst(tu('r', 'read_file', { path: '/f', ...extra }), 'tool_use')]),
+    () => [asst(txt('done'), 'end_turn')],
+  ]);
+  const evs = await run(new CoreAgent({ context: ctx([readFile], provider), sameFileReadLimit: 2, maxToolErrorStreak: 0 }));
+  expect(reads).toBe(4);
+  expect(evs.filter(e => e.type === 'tool_result').every(e => !(e as any).result.payload.isError)).toBe(true);
+});
+
+for (const writeSucceeds of [true, false]) test(`same path after ${writeSucceeds ? 'successful' : 'failed'} write uses observed progress`, async () => {
+  let body = 'before';
+  const readFile = buildTool({ name: 'read_file', maxResultSizeChars: Infinity, isReadOnly: () => true,
+    call: async () => ({ data: body }),
+    mapResult: (data, id) => ({ type: 'tool.result', payload: { toolUseId: id, result: data }, ts: 0 }),
+  });
+  const writeFile = buildTool({ name: 'write_file', maxResultSizeChars: Infinity,
+    checkPermissions: async () => ({ behavior: 'allow' as const }),
+    call: async () => { if (!writeSucceeds) throw new Error('write failed'); body = 'after'; return { data: 'written' }; },
+    mapResult: (data, id) => ({ type: 'tool.result', payload: { toolUseId: id, result: data }, ts: 0 }),
+  });
+  const { provider } = mkProvider([
+    ...['r1', 'r2'].map(id => () => [asst(tu(id, 'read_file', { path: 'fixture.txt' }), 'tool_use')]),
+    () => [asst(tu('w', 'write_file', { path: 'fixture.txt' }), 'tool_use')],
+    () => [asst(tu('r3', 'read_file', { path: 'fixture.txt' }), 'tool_use')],
+    () => [asst(txt('done'), 'end_turn')],
+  ]);
+  const evs = await run(new CoreAgent({ context: ctx([readFile, writeFile], provider), sameFileReadLimit: 2, maxToolErrorStreak: 0 }));
+  const result = evs.find(e => e.type === 'tool_result' && e.toolUseId === 'r3');
+  expect(result?.type === 'tool_result' && result.isError).toBe(!writeSucceeds);
+  if (writeSucceeds) expect(JSON.stringify(result)).toContain('after');
+});
+
+for (const between of ['edit', 'read', 'failed-edit', 'none'] as const) test(`returned failure retry after ${between}`, async () => {
+  const failure = buildTool({ name: 'check', maxResultSizeChars: Infinity,
+    call: async () => ({ data: 'test failed' }),
+    mapResult: (message, id) => ({ type: 'tool.result', ts: 0, payload: { toolUseId: id, isError: true, message } }),
+  });
+  const action = buildTool({ name: 'action', maxResultSizeChars: Infinity, isReadOnly: () => between === 'read',
+    call: async () => { if (between === 'failed-edit') throw new Error('edit failed'); return { data: 'success' }; },
+    mapResult: (result, id) => ({ type: 'tool.result', ts: 0, payload: { toolUseId: id, result } }),
+  });
+  const { provider } = mkProvider([
+    () => [asst(tu('f1', 'check', {}), 'tool_use')],
+    ...(between === 'none' ? [] : [() => [asst(tu('action', 'action', {}), 'tool_use')]]),
+    () => [asst(tu('f2', 'check', {}), 'tool_use')],
+    () => [asst(tu('f3', 'check', {}), 'tool_use')],
+    () => [asst(txt('can continue repairing'), 'end_turn')],
+  ]);
+  const evs = await run(new CoreAgent({ context: ctx([failure, action], provider), mode: 'bypassPermissions' }));
+  expect(lastDone(evs)).toBe(between === 'edit' ? 'completed' : 'unrecoverable_tool_error');
 });

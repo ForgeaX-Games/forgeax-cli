@@ -11,7 +11,7 @@ import type { TurnRequest, KernelEvent } from '@forgeax/agent-runtime/contract';
 import type { HandoffSink, HandoffIntent } from '../src/inject/types';
 import { buildTool, type AgentTool } from '../src/capability/types';
 
-function asstToolUse(id: string, name: string, input: unknown): ProviderStreamEvent {
+function asstToolUse(id: string, name: string, input: unknown): Extract<ProviderStreamEvent, { type: 'assistant' }> {
   return {
     type: 'assistant',
     message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
@@ -19,7 +19,7 @@ function asstToolUse(id: string, name: string, input: unknown): ProviderStreamEv
     stopReason: 'tool_use',
   };
 }
-function asstText(text: string): ProviderStreamEvent {
+function asstText(text: string): Extract<ProviderStreamEvent, { type: 'assistant' }> {
   return {
     type: 'assistant',
     message: { role: 'assistant', content: [{ type: 'text', text }] },
@@ -654,6 +654,33 @@ function spyLocalTool(name: string, onCall: () => void): AgentTool {
 }
 
 describe('ForgeaxCoreKernel — delivery 二分(B 路径)', () => {
+  test('local delivery preserves the host read_file contract when builtin parameters differ', async () => {
+    let local = 0;
+    const bridged: unknown[] = [];
+    const advertised: ProviderRequest[] = [];
+    const hostSchema = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] };
+    const nativeTool = {
+      ...spyLocalTool('read_file', () => local++),
+      inputJSONSchema: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] },
+    };
+    const provider = scripted([[asstToolUse('read1', 'read_file', { path: 'forge.json' })], [asstText('done')]]);
+    const k = new ForgeaxCoreKernel({
+      provider: { ...provider, async *stream(request, signal) {
+        advertised.push(request);
+        yield* provider.stream(request, signal);
+      } },
+      executeTool: async (_name, input) => { bridged.push(input); return 'project manifest'; },
+      localToolImpls: [nativeTool],
+    });
+    const events = await collect(k, req({ tools: [{
+      name: 'read_file', description: 'Read a project file using path', inputSchema: hostSchema, delivery: 'local',
+    }] }));
+    expect(advertised[0]!.tools.find((tool) => tool.name === 'read_file')?.inputSchema).toEqual(hostSchema);
+    expect(events.find((event) => event.kind === 'tool.result')).toMatchObject({ ok: true });
+    expect(bridged).toEqual([{ path: 'forge.json' }]);
+    expect(local).toBe(0);
+  });
+
   test('delivery="local" 且有同名本地实现 → 本地直跑,executeTool 桥不被调', async () => {
     let local = 0;
     let bridge = 0;
@@ -670,6 +697,23 @@ describe('ForgeaxCoreKernel — delivery 二分(B 路径)', () => {
     expect(tr?.ok).toBe(true);
     expect(local).toBe(1); // 本地实现被调
     expect(bridge).toBe(0); // 桥未被调(没回宿主)
+  });
+
+  test('local parser cannot silently narrow an identical JSON host schema', async () => {
+    let local = 0;
+    let bridge = 0;
+    const k = new ForgeaxCoreKernel({
+      provider: scripted([[asstToolUse('p1', 'safe_tool', { path: 'forge.json' })], [asstText('done')]]),
+      executeTool: async () => { bridge++; return 'manifest'; },
+      localToolImpls: [{
+        ...spyLocalTool('safe_tool', () => local++),
+        inputSchema: { parse: () => { throw new Error('native parser rejects host input'); }, safeParse: () => ({ success: false as const }) },
+      }],
+    });
+    const events = await collect(k, req({ tools: [{ name: 'safe_tool', inputSchema: {}, delivery: 'local' }] }));
+    expect(events.find((event) => event.kind === 'tool.result')).toMatchObject({ ok: true });
+    expect(bridge).toBe(1);
+    expect(local).toBe(0);
   });
 
   test('delivery 缺省(host)→ 走 executeTool 桥,本地实现不被调(即便注入了同名)', async () => {
@@ -798,4 +842,61 @@ describe('ForgeaxCoreKernel — 内核默认 web 工具', () => {
     expect(seen[0]).not.toContain('web_fetch');
     expect(seen[0]).not.toContain('web_search');
   });
+});
+
+describe('audit result and usage regression', () => {
+  test('native structured result survives facade and the next model request', async () => {
+    const payload = { toolUseId: 'r1', isError: false, files: ['a.ts'], truncated: false };
+    const local = buildTool({ name: 'glob', maxResultSizeChars: Infinity, call: async () => ({ data: payload }),
+      mapResult: (data) => ({ type: 'tool.result', payload: data, ts: 0 }) });
+    const requests: ProviderRequest[] = [];
+    const provider: LLMProvider = { api: 'stub', async *stream(r) {
+      requests.push(structuredClone(r));
+      yield requests.length === 1 ? asstToolUse('r1', 'glob', {}) : asstText('done');
+    } };
+    const k = new ForgeaxCoreKernel({ provider, localToolImpls: [local], executeTool: async () => null });
+    const events = await collect(k, req({ tools: [{ name: 'glob', delivery: 'local', inputSchema: {} }] }));
+    expect(events.find(e => e.kind === 'tool.result')).toMatchObject({ callId: 'r1', ok: true, result: { files: ['a.ts'], truncated: false } });
+    expect(JSON.stringify(requests[1].messages)).toContain('a.ts');
+  });
+  test('final assistant usage sums provider calls without counting stream snapshots twice', async () => {
+    const usage = { inputTokens: 10, outputTokens: 4, cacheReadInputTokens: 3, cacheCreationInputTokens: 2 };
+    const k = new ForgeaxCoreKernel({ provider: scripted([
+      [{ type: 'message_start', usage }, { ...asstToolUse('t', 'echo', {}), usage }],
+      [{ type: 'message_delta', usage, stopReason: 'end_turn' }, { ...asstText('done'), usage }],
+    ]), executeTool: async () => 'ok' });
+    expect((await collect(k, req())).find(e => e.kind === 'turn.usage')).toMatchObject({
+      inputTokens: 20, outputTokens: 8, cacheRead: 6, cacheCreation: 4,
+    });
+  });
+});
+
+for (const delivery of ['host', 'local'] as const) for (const throws of [true, false]) {
+  test(`${delivery} ${throws ? 'thrown' : 'returned'} failures preserve error, output and call id`, async () => {
+    const output = { isError: true, message: 'read denied', detail: { code: 'EACCES' } };
+    const call = async () => { if (throws) throw new Error('read denied'); return output; };
+    const local = buildTool({ name: 'read_file', maxResultSizeChars: Infinity, isReadOnly: () => true,
+      call: async () => ({ data: await call() }),
+      mapResult: (data, id) => ({ type: 'tool.result', payload: { toolUseId: id, ...data }, ts: 0 }),
+    });
+    const k = new ForgeaxCoreKernel({ provider: scripted([
+      [asstToolUse('failure-id', 'read_file', {})], [asstText('done')],
+    ]), localToolImpls: [local], executeTool: call });
+    const events = await collect(k, req({ tools: [{ name: 'read_file', delivery, inputSchema: {} }] }));
+    const result = events.find(e => e.kind === 'tool.result');
+    expect(result).toMatchObject({ callId: 'failure-id', ok: false, error: 'read denied' });
+    if (!throws) expect(JSON.stringify(result)).toContain('EACCES');
+  });
+}
+
+test('cancelled provider call reports observed usage before cancelled done', async () => {
+  const controller = new AbortController();
+  const provider: LLMProvider = { api: 'stub', async *stream() {
+    yield { type: 'message_start', usage: { ...EMPTY_USAGE, inputTokens: 12, outputTokens: 2 } };
+    controller.abort();
+    throw new Error('aborted');
+  } };
+  const events = await collect(new ForgeaxCoreKernel({ provider, executeTool: async () => null }), req(), controller.signal);
+  expect(events.find(e => e.kind === 'turn.usage')).toMatchObject({ inputTokens: 12, outputTokens: 2 });
+  expect(events.at(-1)).toMatchObject({ kind: 'turn.done', reason: 'cancelled' });
 });

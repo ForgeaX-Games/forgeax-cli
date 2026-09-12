@@ -29,8 +29,8 @@ import type { ProviderCallOpts, ProviderMessage, ProviderRequest, ProviderToolDe
 import { systemPromptAssembler } from '../context/system-prompt';
 import type { SystemPromptAssembler } from '../context/types';
 import type { PermissionRuleSet } from '../permission/rules';
-import type { PermissionMode } from '../permission/engine';
-import { dispatchTools, findTool, type ToolUse, type AskUserFn, type ToolDispatchResult } from './dispatch';
+import { safeReadOnly, type PermissionMode } from '../permission/engine';
+import { dispatchTools, findTool, type ToolUse, type ToolDispatchResult, type AskUserFn } from './dispatch';
 import {
   BRACKET_TOOL_REJECT_MESSAGE,
   BRACKET_TOOL_REPEAT_MESSAGE,
@@ -73,7 +73,7 @@ import {
   type SummaryScenario,
 } from '../context/compaction-types';
 import { ensureToolResultPairing } from '../context/tool-pairing';
-import { applyResultBudget } from '../context/tool-result-budget';
+import { toolResultValue, toolResultsToContent } from '../capability/tool-result';
 import { buildToolSearchTool, formatDeferredManifest } from '../capability/tool-search';
 import {
   shouldContinueOnMaxTokens,
@@ -83,8 +83,7 @@ import {
 } from '../context/reactive-recovery';
 import { evaluateStopHook, type StopHookPublishResult } from './stop-hook';
 import { isBudgetExhausted, shouldContinueForBudget } from './token-budget';
-import { ReadTracker } from '../capability/read-tracker';
-import { canonicalizeBoundaryContent } from '../capability/history-content';
+import { ReadTracker, DEFAULT_SAME_FILE_READ_LIMIT } from '../capability/read-tracker';
 import { aggregateErrorCategories, summarizeErrorStats } from '../diagnostics/error-stats';
 import type { HandoffSink, HandoffIntent, HandoffResolution } from '../inject/types';
 import { HANDOFF_INTENT_KEY } from '../capability/builtin-tools/message-tools';
@@ -184,8 +183,9 @@ export interface CoreAgentOptions {
   /** mid-turn steering:每 turn 顶部 drain 一次,把返回的消息 append 进上下文(回合中插话)。
    *  返回空数组=本轮无插话。 */
   steeringSource?: () => ProviderMessage[];
-  /** 同一工具(name+args)连续报错达此次数 → 循环兜底终止(移植 agentic_os 02.4)。
-   *  默认 2;设 0 或 Infinity 关闭。 */
+  /** Repeated failures exhaust an operation (name + args), allowing the model
+   *  to continue other work. A further unchanged attempt ends the turn without
+   *  executing that operation. Default 2; 0 or Infinity disables the guard. */
   maxToolErrorStreak?: number;
   /** 反应式续轮(max_output_tokens 续写 / stop-hook prevented / token-budget)的硬上限,
    *  防无限循环。默认 4;设 0 关闭这些续轮(回退到「该停就停」)。 */
@@ -323,68 +323,6 @@ function readPathOf(use: ToolUse, tools: AgentTool[]): string | null {
   return nameLooksRead || readOnly ? path : null;
 }
 
-/** tool_result.content 必须是 string 或 content-block 数组(Anthropic/OpenAI 皆然);
- *  工具 mapResult 的 payload 多为对象 → 这里规整成字符串,否则回灌时 provider 400
- *  (真 e2e 实测:对象 content → 次轮 model_error)。 */
-function toolResultContent(payload: unknown): string {
-  if (typeof payload === 'string') return payload;
-  // 优先取常见文本字段(bash stdout / 工具 message / result),否则整体 JSON 化。
-  if (payload && typeof payload === 'object') {
-    const p = payload as Record<string, unknown>;
-    if (typeof p.stdout === 'string' && p.stdout.length > 0) return p.stdout;
-    if (typeof p.message === 'string') return p.message;
-    if (typeof p.result === 'string') return p.result;
-  }
-  try {
-    return JSON.stringify(payload);
-  } catch {
-    return String(payload);
-  }
-}
-
-const CANONICAL_TOOL_RESULT_PART_TYPES = new Set(['text', 'image', 'audio', 'video', 'file', 'document']);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-
-/**
- * Keep tool-result media as neutral content until the provider boundary.
- *
- * The old loop converted every object result to JSON before the adapter saw
- * it. That made a direct `{type:'image', data, mimeType}` result look like
- * ordinary text, so Anthropic/Responses/Gemini lost the media semantics on
- * the very next request. Only accept the bounded canonical content shapes;
- * arbitrary tool metadata continues through the legacy text path.
- */
-function canonicalToolResultParts(payload: unknown): Array<Record<string, unknown>> | undefined {
-  const normalized = canonicalizeBoundaryContent(payload);
-  const values = Array.isArray(normalized) ? normalized : [normalized];
-  if (values.length === 0) return undefined;
-  const parts: Array<Record<string, unknown>> = [];
-  for (const value of values) {
-    if (!isRecord(value) || typeof value.type !== 'string' || !CANONICAL_TOOL_RESULT_PART_TYPES.has(value.type)) return undefined;
-    parts.push(value);
-  }
-  return parts.length > 0 ? parts : undefined;
-}
-
-/** 多模态(011):从 tool.result payload 取 image content blocks(read_file 读图时挂在
- *  payload.imageBlocks)。无图返回 []。只挑形状合法的 `{type:'image',source}` 项,避免
- *  把脏数据塞进回灌内容触发 provider 400。 */
-function imageBlocksFromPayload(payload: unknown): Array<Record<string, unknown>> {
-  if (!payload || typeof payload !== 'object') return [];
-  const arr = (payload as Record<string, unknown>).imageBlocks;
-  if (!Array.isArray(arr)) return [];
-  return arr.filter(
-    (b): b is Record<string, unknown> =>
-      !!b &&
-      typeof b === 'object' &&
-      (b as Record<string, unknown>).type === 'image' &&
-      typeof (b as Record<string, unknown>).source === 'object',
-  );
-}
-
 /** 从 user 消息 payload 取文本(用于 auto-memory 召回 query)。payload 为纯字符串时直返;
  *  为多模态 content 数组时,拼接其中的 text 块(忽略 image/其它块,避免 base64 进检索)。 */
 function userQueryText(payload: unknown): string {
@@ -489,60 +427,6 @@ function foldHandoffEvents(events: CoreEvent[]): string {
   }
   const body = parts.length > 0 ? parts.join('\n') : events.map((e) => e.type).join(', ') || '(no events)';
   return `<handoff-result>\n${body}\n</handoff-result>`;
-}
-
-function toolResultsToContent(
-  results: { toolUseId: string; toolName: string; result: CoreEvent; isError: boolean; newMessages?: CoreEvent[] }[],
-  budgetFor?: (toolName: string) => number,
-  persist?: (raw: string, meta: { toolUseId: string; toolName: string }) => string | undefined,
-): unknown {
-  const blocks: unknown[] = results.map((r) => {
-    // 全局预算兜底(移植 agentic_os 03.B):单 tool 声明 maxResultSizeChars,这里统一裁。
-    const max = budgetFor?.(r.toolName) ?? Infinity;
-    // CORE-CTX-005:注入了 persist → 截断时全量落盘,marker 带回读路径;缺省不落盘(旧行为)。
-    const opts = persist
-      ? { persist: (raw: string) => persist(raw, { toolUseId: r.toolUseId, toolName: r.toolName }) }
-      : undefined;
-    const canonicalParts = canonicalToolResultParts(r.result.payload);
-    const canonicalText = canonicalParts
-      ?.filter((part) => part.type === 'text' && typeof part.text === 'string')
-      .map((part) => part.text as string)
-      .join('');
-    const { output } = applyResultBudget(
-      canonicalParts ? canonicalText ?? '' : toolResultContent(r.result.payload),
-      max,
-      opts,
-    );
-    // 多模态(011):工具(如 read_file 读图)在 payload 带 imageBlocks → tool_result.content
-    //   组成 content 数组 [text, image…]。Anthropic 原样吃图;openai-compat 的
-    //   toolResultToText 只取 text 块 → 优雅降级(丢图留文,不 400)。
-    const images = imageBlocksFromPayload(r.result.payload);
-    const media = canonicalParts?.filter((part) => part.type !== 'text') ?? images;
-    const content = canonicalParts
-      ? [
-          ...(output ? [{ type: 'text', text: output }] : []),
-          ...media,
-          ...(output || media.length > 0 ? [] : [{ type: 'text', text: '[empty tool result]' }]),
-        ]
-      : images.length > 0
-        ? [{ type: 'text', text: output }, ...images]
-        : output;
-    return {
-      type: 'tool_result',
-      tool_use_id: r.toolUseId,
-      content,
-      is_error: r.isError,
-    };
-  });
-  // 工具的 newMessages(如 skill inline 展开的 prompt)作 text 块并入**同一** user 轮
-  // (不能另起一条 user 消息——会破坏 Anthropic 角色交替)。让模型看到展开后的指令并续跑。
-  for (const r of results) {
-    for (const m of r.newMessages ?? []) {
-      const text = newMessageText(m);
-      if (text) blocks.push({ type: 'text', text });
-    }
-  }
-  return blocks;
 }
 
 export class CoreAgent implements Agent {
@@ -915,7 +799,7 @@ export class CoreAgent implements Agent {
         signal,
         trusted: true,
       });
-      for (const r of results) yield { type: 'tool_result', toolUseId: r.toolUseId, result: r.result };
+      for (const r of results) yield { type: 'tool_result', toolUseId: r.toolUseId, result: r.result, isError: r.isError };
       yield { type: 'done', terminal: { reason: 'completed' } };
       return;
     }
@@ -1034,6 +918,7 @@ export class CoreAgent implements Agent {
     let spentTokens = 0;
     // ─── 循环兜底(移植 02.4):同一工具(name+args)连续报错计数。
     const errorStreak = new Map<string, number>();
+    const exhaustedOperations = new Map<string, ToolDispatchResult>();
     const maxStreak = this.o.maxToolErrorStreak ?? 2;
     // ─── 反应式续轮硬上限(max_tokens 续写 / stop-hook prevented / token-budget),防无限循环。
     const maxContinuations = this.o.maxContinuations ?? 4;
@@ -1047,7 +932,7 @@ export class CoreAgent implements Agent {
     //   per-run 重置实例字段(供 runCompactionV2 压后重挂自取 recentPaths);本地别名沿用旧引用。
     this.readTracker.reset();
     const readTracker = this.readTracker;
-    const readLimit = this.o.sameFileReadLimit ?? undefined;
+    const readLimit = this.o.sameFileReadLimit ?? DEFAULT_SAME_FILE_READ_LIMIT;
     const readReminders: string[] = [];
     const readReminderSlots = (): Slot[] =>
       readReminders.length > 0
@@ -1670,27 +1555,6 @@ export class CoreAgent implements Agent {
         );
       }
 
-      // 同一文件重复读护栏(移植 same_file_read_limit):read 类调用先记次数;越线(>K)
-      //   的 read 不真正执行——合成一条「已读过 N 次,复用此前输出」的 error 结果拦下(绝不硬杀
-      //   run),并注一条 system-reminder 供下一轮提示模型复用。其余调用照常 dispatch。
-      const interceptedReads = new Map<string, ToolDispatchResult>();
-      for (const tu of toolUses) {
-        const path = readPathOf(tu, tools);
-        if (path == null) continue;
-        const n = readTracker.record(path);
-        if (readTracker.over(path, readLimit)) {
-          const msg = `You have already read ${path} ${n} times; reuse the prior result instead of re-reading.`;
-          interceptedReads.set(tu.id, {
-            toolUseId: tu.id,
-            toolName: tu.name,
-            result: { type: 'tool.result', payload: { toolUseId: tu.id, isError: true, message: msg }, ts: 0 },
-            isError: true,
-          });
-          readReminders.push(`<system-reminder>${msg}</system-reminder>`);
-        }
-      }
-
-      const toDispatch = toolUses.filter((tu) => !interceptedReads.has(tu.id));
       // PreToolUse 每工具只发布一次:isBlocked 与 preToolPermission 共用同一回执
       //   (避免对同一 use 重复触发 hook)。回执携带 blocked(K1/K5 闸)与
       //   permissionDecision(allow/deny/ask 三态)。
@@ -1705,7 +1569,15 @@ export class CoreAgent implements Agent {
         }
         return r;
       };
-      const dispatched = await dispatchTools(toDispatch, {
+      const operationKey = (use: ToolUse) => JSON.stringify([use.name, stableStringify(use.input)]);
+      const blocked = new Map<string, ToolDispatchResult>(toolUses.flatMap(use => {
+        const previous = exhaustedOperations.get(operationKey(use));
+        return previous ? [[use.id, { ...previous, toolUseId: use.id, toolName: use.name, newMessages: undefined,
+          result: { ...previous.result, payload: { toolUseId: use.id, isError: true,
+            message: `Unchanged retry blocked. Prior failure: ${briefError(previous.result)}` } },
+        }] as const] : [];
+      }));
+      const dispatched = await dispatchTools(toolUses.filter(use => !blocked.has(use.id)), {
         tools,
         toolContext: this.o.context.toolContext,
         signal,
@@ -1718,11 +1590,8 @@ export class CoreAgent implements Agent {
         isBlocked: (use) => preToolReceipt(use).blocked === true,
         preToolPermission: (use) => preToolReceipt(use).permissionDecision,
       });
-      // 合并:保持工具调用的原始顺序(拦下的 read 用合成结果占位)。
-      const dispById = new Map(dispatched.map((r) => [r.toolUseId, r]));
-      const results: ToolDispatchResult[] = toolUses.map(
-        (tu) => interceptedReads.get(tu.id) ?? dispById.get(tu.id)!,
-      ).filter((r): r is ToolDispatchResult => r != null);
+      const dispatchedById = new Map(dispatched.map(result => [result.toolUseId, result]));
+      const results = toolUses.map(use => blocked.get(use.id) ?? dispatchedById.get(use.id)!);
 
       // ExitPlanMode:本轮工具结果含 sentinel(= 人类已在 ask 闸 approve,工具才执行到)→
       //   恢复进入 plan 前的权限模式(无记录则回退 default,不再硬编码)。
@@ -1736,6 +1605,22 @@ export class CoreAgent implements Agent {
       }
 
       // 诊断:本轮工具错误按五类聚合,发一条 tool.error_stats 事件(纯函数,无 IO;WS5)。
+      // Observe actual content before suppressing duplicates: writes, external edits and
+      // different ranges remain readable. Failed writes cannot reset this evidence.
+      for (const r of results) {
+        if (r.isError) continue;
+        const use = toolUses.find(tu => tu.id === r.toolUseId);
+        const path = use && readPathOf(use, tools);
+        if (!use || path == null) continue;
+        const n = readTracker.observe(path, stableStringify([findTool(tools, use.name)?.name ?? use.name, use.input]), stableStringify(toolResultValue(r.result.payload)));
+        if (Number.isFinite(readLimit) && readLimit > 0 && n > readLimit) {
+          const msg = `You have already read ${path} with this request ${n} times with unchanged output; reuse the prior result. A different range or changed content remains readable.`;
+          r.result = { ...r.result, payload: { toolUseId: r.toolUseId, isError: true, message: msg } };
+          r.isError = true;
+          readReminders.push(`<system-reminder>${msg}</system-reminder>`);
+        }
+      }
+
       const errorStats = aggregateErrorCategories(results);
       if (Object.keys(errorStats).length > 0) {
         this.bus.publish(this.ev('tool.error_stats', { turn, stats: errorStats, summary: summarizeErrorStats(errorStats) }));
@@ -1768,7 +1653,7 @@ export class CoreAgent implements Agent {
       }
 
       for (const r of results) {
-        yield { type: 'tool_result', toolUseId: r.toolUseId, result: r.result };
+        yield { type: 'tool_result', toolUseId: r.toolUseId, result: r.result, isError: r.isError };
         // ★ v3/B 档:收尾对应工具 span(status 据 isError;1=OK / 2=ERROR)。noop tracer 下为空操作。
         const ts = toolSpans.get(r.toolUseId);
         if (ts) {
@@ -1785,10 +1670,16 @@ export class CoreAgent implements Agent {
       // 防御:任何未配到结果的工具 span(理论不应有)也收尾,绝不泄漏未 end 的 span。
       for (const ts of toolSpans.values()) ts.end();
       toolSpans.clear();
-      messages.push({ role: 'user', content: toolResultsToContent(results, budgetFor, this.o.persistToolResult) });
+      const resultContent = toolResultsToContent(results, budgetFor, this.o.persistToolResult) as unknown[];
+      for (const r of results) for (const m of r.newMessages ?? []) {
+        const text = newMessageText(m);
+        if (text) resultContent.push({ type: 'text', text });
+      }
+      messages.push({ role: 'user', content: resultContent });
 
-      // 循环兜底(移植 02.4):同一工具(name+args)连续报错达阈值 → 终止,避免空转烧 maxTurns。
-      //   模型已见到本轮错误结果(上一行已 push),但不再续轮重试同一失败动作。
+      // Exhaust the operation first, not the whole task. Give the model a chance
+      // to continue independent work or explain the blocker. Repeating the
+      // exhausted request still terminates the turn without another tool call.
       if (maxStreak > 0 && Number.isFinite(maxStreak)) {
         const resById = new Map(results.map((r) => [r.toolUseId, r]));
         let bail = false;
@@ -1800,12 +1691,27 @@ export class CoreAgent implements Agent {
           if (r.isError) {
             const n = (errorStreak.get(key) ?? 0) + 1;
             errorStreak.set(key, n);
-            if (n >= maxStreak) {
+            if (n === maxStreak) {
+              exhaustedOperations.set(key, r);
+              resultContent.push({ type: 'text', text: `<system-reminder>The operation ${tu.name} with these arguments failed ${n} times and is now blocked. Continue independent work, inspect a different diagnostic, or explain what remains blocked. Do not claim missing verification succeeded. Do not repeat this operation unchanged: another attempt will end this turn. A successful corrective mutation allows a new attempt.</system-reminder>` });
+            }
+            if (n > maxStreak) {
               bail = true;
-              bailErrors.push(`tool "${tu.name}" failed ${n} consecutive times: ${briefError(r.result)}`);
+              bailErrors.push(`tool "${tu.name}" failed ${n - 1} consecutive times; unchanged retry blocked: ${briefError(r.result)}`);
             }
           } else {
-            errorStreak.set(key, 0);
+            const tool = findTool(tools, tu.name);
+            // A successful mutation invalidates the assumption that retries see
+            // the same state. Read-only successes and failed mutations do not.
+            if (tool && !safeReadOnly(tool, tu.input)) {
+              errorStreak.clear();
+              exhaustedOperations.clear();
+              bail = false;
+              bailErrors.length = 0;
+            } else {
+              errorStreak.set(key, 0);
+              exhaustedOperations.delete(key);
+            }
           }
         }
         if (bail) {

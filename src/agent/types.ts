@@ -91,7 +91,7 @@ export type AgentEvent =
   | { type: 'stream'; event: unknown } // 透传 provider 流事件
   | { type: 'assistant'; message: CoreEvent }
   | { type: 'tool_call'; toolName: string; toolUseId: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; result: CoreEvent }
+  | { type: 'tool_result'; toolUseId: string; result: CoreEvent; isError?: boolean }
   | { type: 'turn_end'; turn: number; usageContextRatio?: number }
   | { type: 'turn_aborted'; turn: number } // interrupt 必发
   | { type: 'done'; terminal: Terminal };
